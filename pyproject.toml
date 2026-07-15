@@ -12,6 +12,9 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8,<9"]
 
+[tool.setuptools.packages.find]
+include = ["bdb_bridge*", "bdb_poc*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

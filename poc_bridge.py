@@ -4,7 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from bdb_poc import *  # re-export the tested POC API for the single entry-point script
+from bdb_poc import BridgeConfig, BridgeError, PocBridge
 
 
 def build_parser() -> argparse.ArgumentParser:
