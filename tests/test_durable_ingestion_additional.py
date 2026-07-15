@@ -6,7 +6,12 @@ import pytest
 from bdb_bridge.ingestion import CommandIngestor, calculate_raw_sha256
 from bdb_bridge.journal import Journal
 from bdb_bridge.journal_ingestion import get_session_ingestion, get_command_ingestion, CollisionError, _row_to_ingestion_issue
-from bdb_bridge.models import BridgeErrorCode, CommandState, SessionState
+from bdb_bridge.models import (
+    BridgeErrorCode,
+    CommandState,
+    IngestionIssue,
+    SessionState,
+)
 from bdb_bridge.protocol import BridgeError
 from bdb_bridge.serializers import sha256_text
 from bdb_bridge.transport import CommandSnapshot, RemoteDocument, CommandTransport
