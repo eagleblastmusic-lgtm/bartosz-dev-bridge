@@ -12,7 +12,8 @@ from bdb_bridge.workspace_lifecycle_migration import MIGRATION_V6, MIGRATION_V6_
 NOW = "2026-07-15T21:00:00Z"
 SESSION = "018f3f66-6cb3-4f66-9f2e-3d7647d1b707"
 HASH = "sha256:" + "a" * 64
-V6_CHECKSUM = "e4cd247289ad5b7a7d3b19de5db04170d3df60680f97920b7d7e015813a1a140"
+HASH_AFTER = "sha256:" + "b" * 64
+V6_CHECKSUM = "eaac8a58c752800581d5f02504d7d5b509985fbb2638cb6924f5673828689839"
 
 
 def test_v6_registry_and_literal_checksum() -> None:
@@ -20,6 +21,10 @@ def test_v6_registry_and_literal_checksum() -> None:
     assert [m.name for m in MIGRATIONS][-1] == "journal_v6_workspace_lifecycle"
     assert MIGRATION_V6.checksum() == V6_CHECKSUM
     assert MIGRATION_V6.statements == MIGRATION_V6_STATEMENTS
+
+
+def test_empty_and_reopen_apply_v6() -> None:
+    pass
 
 
 def test_empty_and_reopen_apply_v6(tmp_path: Path) -> None:
@@ -31,6 +36,16 @@ def test_empty_and_reopen_apply_v6(tmp_path: Path) -> None:
     assert journal._connection.execute(
         "SELECT version,name,checksum FROM schema_migrations WHERE version=6"
     ).fetchone() == (6, "journal_v6_workspace_lifecycle", V6_CHECKSUM)
+    triggers = {
+        row[0]
+        for row in journal._connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'workspace_lifecycle_%'"
+        ).fetchall()
+    }
+    assert triggers == {
+        "workspace_lifecycle_validate_workspace_update",
+        "workspace_lifecycle_sync_workspace_update",
+    }
     journal.close()
     reopened = Journal.open(path, now_fn=lambda: NOW)
     assert reopened._connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=6").fetchone()[0] == 1
@@ -95,11 +110,49 @@ def test_future_version_rejected(tmp_path: Path) -> None:
 def test_constraints_one_row_and_no_delete_api(tmp_path: Path) -> None:
     journal = Journal.open(tmp_path / "constraints.db", now_fn=lambda: NOW)
     journal._connection.execute("INSERT INTO sessions VALUES(?,?,?,?,?,?)", (SESSION, "repo", "a" * 40, "active", NOW, NOW))
-    values = (SESSION, str(tmp_path / SESSION), "a" * 40, 0, HASH, "preserve", "preserved", None, None, None, None, NOW, NOW)
+    values = (SESSION, str((tmp_path / SESSION).resolve()), "a" * 40, 0, HASH, "preserve", "preserved", None, None, None, None, NOW, NOW)
     journal._connection.execute("INSERT INTO workspace_lifecycle VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
     with pytest.raises(sqlite3.IntegrityError):
         journal._connection.execute("INSERT INTO workspace_lifecycle VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
     assert not hasattr(journal, "delete_workspace_lifecycle")
+    journal.close()
+
+
+def test_preserved_identity_advances_with_workspace_in_same_transaction(tmp_path: Path) -> None:
+    journal = Journal.open(tmp_path / "sync.db", now_fn=lambda: NOW)
+    path = str((tmp_path / SESSION).resolve())
+    journal._connection.execute("INSERT INTO sessions VALUES(?,?,?,?,?,?)", (SESSION, "repo", "a" * 40, "active", NOW, NOW))
+    journal._connection.execute("INSERT INTO workspaces VALUES(?,?,?,?,?,?,?)", (SESSION, path, "a" * 40, 0, HASH, NOW, NOW))
+    journal._connection.execute(
+        "INSERT INTO workspace_lifecycle VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (SESSION, path, "a" * 40, 0, HASH, "preserve", "preserved", None, None, None, None, NOW, NOW),
+    )
+    journal._connection.execute(
+        "UPDATE workspaces SET revision=1,state_hash=?,updated_at=? WHERE session_id=?",
+        (HASH_AFTER, NOW, SESSION),
+    )
+    assert journal._connection.execute(
+        "SELECT expected_revision,expected_state_hash FROM workspace_lifecycle WHERE session_id=?",
+        (SESSION,),
+    ).fetchone() == (1, HASH_AFTER)
+    journal.close()
+
+
+def test_workspace_update_rejects_stale_or_cleanup_lifecycle_identity(tmp_path: Path) -> None:
+    journal = Journal.open(tmp_path / "guard.db", now_fn=lambda: NOW)
+    path = str((tmp_path / SESSION).resolve())
+    journal._connection.execute("INSERT INTO sessions VALUES(?,?,?,?,?,?)", (SESSION, "repo", "a" * 40, "completed", NOW, NOW))
+    journal._connection.execute("INSERT INTO workspaces VALUES(?,?,?,?,?,?,?)", (SESSION, path, "a" * 40, 0, HASH, NOW, NOW))
+    journal._connection.execute(
+        "INSERT INTO workspace_lifecycle VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (SESSION, path, "a" * 40, 0, HASH, "cleanup", "cleanup_requested", NOW, None, None, None, NOW, NOW),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        journal._connection.execute(
+            "UPDATE workspaces SET revision=1,state_hash=?,updated_at=? WHERE session_id=?",
+            (HASH_AFTER, NOW, SESSION),
+        )
+    assert journal.get_workspace(SESSION).revision == 0
     journal.close()
 
 
@@ -109,7 +162,7 @@ def test_corrupted_lifecycle_row_maps_to_journal_corrupt(tmp_path: Path) -> None
     journal._connection.execute("PRAGMA ignore_check_constraints=ON")
     journal._connection.execute(
         "INSERT INTO workspace_lifecycle VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (SESSION, str(tmp_path / SESSION), "a" * 40, 0, HASH, "preserve", "preserved", None, None, None, None, "bad-time", NOW),
+        (SESSION, str((tmp_path / SESSION).resolve()), "a" * 40, 0, HASH, "preserve", "preserved", None, None, None, None, "bad-time", NOW),
     )
     journal._connection.execute("PRAGMA ignore_check_constraints=OFF")
     with pytest.raises(BridgeError) as exc:
