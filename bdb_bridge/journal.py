@@ -190,42 +190,68 @@ class Journal:
     ) -> SessionRecord:
         self._ensure_open()
         now = self._now_fn()
-        with self._transaction():
-            current = self._get_session_row_for_update(session_id)
-            if current is None:
-                raise BridgeError(
-                    BridgeErrorCode.JOURNAL_CONFLICT,
-                    f"Session not found: {session_id}",
+        try:
+            with self._transaction():
+                current = self._get_session_row_for_update(session_id)
+                if current is None:
+                    raise BridgeError(
+                        BridgeErrorCode.JOURNAL_CONFLICT,
+                        f"Session not found: {session_id}",
+                    )
+                current_state = _parse_session_state(current[3])
+                if current_state != expected_state:
+                    raise BridgeError(
+                        BridgeErrorCode.JOURNAL_CONFLICT,
+                        f"Session state mismatch: expected {expected_state.value}, got {current_state.value}",
+                    )
+                validate_session_transition(current_state, new_state)
+
+                if new_state in (SessionState.ACTIVE, SessionState.COMPLETING):
+                    active = self._conn.execute(
+                        "SELECT session_id FROM sessions WHERE state IN ('active', 'completing') AND session_id != ?",
+                        (session_id,),
+                    ).fetchone()
+                    if active is not None:
+                        raise BridgeError(
+                            BridgeErrorCode.JOURNAL_CONFLICT,
+                            f"Another session {active[0]} is already active or completing",
+                        )
+
+                try:
+                    updated = self._conn.execute(
+                        """
+                        UPDATE sessions
+                        SET state = ?, updated_at = ?
+                        WHERE session_id = ? AND state = ?
+                        """,
+                        (new_state.value, now, session_id, expected_state.value),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    if "idx_sessions_one_active" in str(exc).lower():
+                        raise BridgeError(
+                            BridgeErrorCode.JOURNAL_CONFLICT,
+                            f"Concurrency conflict: another session is already active or completing: {exc}",
+                        ) from exc
+                    raise
+
+                if updated.rowcount != 1:
+                    raise BridgeError(
+                        BridgeErrorCode.JOURNAL_CONFLICT,
+                        f"Failed to transition session {session_id}",
+                    )
+                self._append_event_in_transaction(
+                    session_id=session_id,
+                    event_type="session.state_changed",
+                    payload={
+                        "from_state": expected_state.value,
+                        "to_state": new_state.value,
+                    },
+                    created_at=now,
                 )
-            current_state = _parse_session_state(current[3])
-            if current_state != expected_state:
-                raise BridgeError(
-                    BridgeErrorCode.JOURNAL_CONFLICT,
-                    f"Session state mismatch: expected {expected_state.value}, got {current_state.value}",
-                )
-            validate_session_transition(current_state, new_state)
-            updated = self._conn.execute(
-                """
-                UPDATE sessions
-                SET state = ?, updated_at = ?
-                WHERE session_id = ? AND state = ?
-                """,
-                (new_state.value, now, session_id, expected_state.value),
-            )
-            if updated.rowcount != 1:
-                raise BridgeError(
-                    BridgeErrorCode.JOURNAL_CONFLICT,
-                    f"Failed to transition session {session_id}",
-                )
-            self._append_event_in_transaction(
-                session_id=session_id,
-                event_type="session.state_changed",
-                payload={
-                    "from_state": expected_state.value,
-                    "to_state": new_state.value,
-                },
-                created_at=now,
-            )
+        except BridgeError:
+            raise
+        except sqlite3.Error as exc:
+            raise map_sqlite_error(exc, context="session transition") from exc
         record = self.get_session(session_id)
         assert record is not None
         return record
@@ -367,43 +393,69 @@ class Journal:
     ) -> CommandRecord:
         self._ensure_open()
         now = self._now_fn()
-        with self._transaction():
-            row = self._get_command_row_for_update(command_id)
-            if row is None:
-                raise BridgeError(
-                    BridgeErrorCode.JOURNAL_CONFLICT,
-                    f"Command not found: {command_id}",
+        try:
+            with self._transaction():
+                row = self._get_command_row_for_update(command_id)
+                if row is None:
+                    raise BridgeError(
+                        BridgeErrorCode.JOURNAL_CONFLICT,
+                        f"Command not found: {command_id}",
+                    )
+                current_state = _parse_command_state(row[6])
+                if current_state != expected_state:
+                    raise BridgeError(
+                        BridgeErrorCode.JOURNAL_CONFLICT,
+                        f"Command state mismatch: expected {expected_state.value}, got {current_state.value}",
+                    )
+                validate_command_transition(current_state, new_state)
+
+                if new_state in (CommandState.CLAIMED, CommandState.EXECUTING, CommandState.EFFECT_RECORDED):
+                    active_worker = self._conn.execute(
+                        "SELECT command_id FROM commands WHERE state IN ('claimed', 'executing', 'effect_recorded') AND command_id != ?",
+                        (command_id,),
+                    ).fetchone()
+                    if active_worker is not None:
+                        raise BridgeError(
+                            BridgeErrorCode.JOURNAL_CONFLICT,
+                            f"Another command {active_worker[0]} is already active/worker",
+                        )
+
+                try:
+                    updated = self._conn.execute(
+                        """
+                        UPDATE commands
+                        SET state = ?, updated_at = ?
+                        WHERE command_id = ? AND state = ?
+                        """,
+                        (new_state.value, now, command_id, expected_state.value),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    if "idx_commands_one_worker" in str(exc).lower():
+                        raise BridgeError(
+                            BridgeErrorCode.JOURNAL_CONFLICT,
+                            f"Concurrency conflict: another command is already active/worker: {exc}",
+                        ) from exc
+                    raise
+
+                if updated.rowcount != 1:
+                    raise BridgeError(
+                        BridgeErrorCode.JOURNAL_CONFLICT,
+                        f"Failed to transition command {command_id}",
+                    )
+                self._append_event_in_transaction(
+                    session_id=row[1],
+                    command_id=command_id,
+                    event_type="command.state_changed",
+                    payload={
+                        "from_state": expected_state.value,
+                        "to_state": new_state.value,
+                    },
+                    created_at=now,
                 )
-            current_state = _parse_command_state(row[6])
-            if current_state != expected_state:
-                raise BridgeError(
-                    BridgeErrorCode.JOURNAL_CONFLICT,
-                    f"Command state mismatch: expected {expected_state.value}, got {current_state.value}",
-                )
-            validate_command_transition(current_state, new_state)
-            updated = self._conn.execute(
-                """
-                UPDATE commands
-                SET state = ?, updated_at = ?
-                WHERE command_id = ? AND state = ?
-                """,
-                (new_state.value, now, command_id, expected_state.value),
-            )
-            if updated.rowcount != 1:
-                raise BridgeError(
-                    BridgeErrorCode.JOURNAL_CONFLICT,
-                    f"Failed to transition command {command_id}",
-                )
-            self._append_event_in_transaction(
-                session_id=row[1],
-                command_id=command_id,
-                event_type="command.state_changed",
-                payload={
-                    "from_state": expected_state.value,
-                    "to_state": new_state.value,
-                },
-                created_at=now,
-            )
+        except BridgeError:
+            raise
+        except sqlite3.Error as exc:
+            raise map_sqlite_error(exc, context="command transition") from exc
         record = self.get_command(command_id)
         assert record is not None
         return record
@@ -776,7 +828,7 @@ class Journal:
         document_commit_sha: str | None = None,
         session_id: str | None = None,
         command_id: str | None = None,
-    ) -> IngestionIssue | None:
+    ) -> tuple[IngestionIssue, bool] | None:
         from . import journal_ingestion as _ji
 
         return _ji.record_ingestion_issue(
@@ -809,7 +861,7 @@ class Journal:
         base_sha: str,
         created_remote_at: str,
         expires_at: str,
-    ) -> SessionIngestionRecord:
+    ) -> tuple[SessionIngestionRecord, bool, int]:
         from . import journal_ingestion as _ji
 
         return _ji.record_session_manifest(
@@ -840,7 +892,7 @@ class Journal:
         document_commit_sha: str,
         raw_content: str,
         raw_sha256_value: str,
-    ) -> CommandIngestionRecord | None:
+    ) -> tuple[CommandIngestionRecord | None, bool]:
         from . import journal_ingestion as _ji
 
         return _ji.record_ingested_command(
@@ -854,6 +906,68 @@ class Journal:
             raw_content=raw_content,
             raw_sha256_value=raw_sha256_value,
         )
+
+    def expire_session_and_pending_commands(self, session_id: str, expires_at: str) -> None:
+        from . import journal_ingestion as _ji
+        return _ji.expire_session_and_pending_commands(self, session_id, expires_at)
+
+    def validate_and_update_command(
+        self,
+        command_id: str,
+        *,
+        command_json: str,
+        command_sha256: str,
+        expected_revision: int | None,
+        expected_state_hash: str | None,
+        created_remote_at: str,
+        expires_at: str,
+        snapshot_sha: str,
+    ) -> None:
+        from . import journal_ingestion as _ji
+        return _ji.validate_and_update_command(
+            self,
+            command_id,
+            command_json=command_json,
+            command_sha256=command_sha256,
+            expected_revision=expected_revision,
+            expected_state_hash=expected_state_hash,
+            created_remote_at=created_remote_at,
+            expires_at=expires_at,
+            snapshot_sha=snapshot_sha,
+        )
+
+    def reject_command_during_validation(
+        self,
+        command_id: str,
+        *,
+        error_code: str,
+        detail: str,
+        source_id: str,
+        source_path: str,
+        snapshot_sha: str,
+        raw_sha256: str,
+        document_commit_sha: str | None,
+    ) -> bool:
+        from . import journal_ingestion as _ji
+        return _ji.reject_command_during_validation(
+            self,
+            command_id,
+            error_code=error_code,
+            detail=detail,
+            source_id=source_id,
+            source_path=source_path,
+            snapshot_sha=snapshot_sha,
+            raw_sha256=raw_sha256,
+            document_commit_sha=document_commit_sha,
+        )
+
+    def expire_command_during_validation(self, command_id: str) -> None:
+        from . import journal_ingestion as _ji
+        return _ji.expire_command_during_validation(self, command_id)
+
+    def count_session_commands_before(self, session_id: str, sequence: int) -> int:
+        from . import journal_ingestion as _ji
+        return _ji.count_session_commands_before(self, session_id, sequence)
 
     def list_discovered_commands(self) -> list[CommandRecord]:
         from . import journal_ingestion as _ji

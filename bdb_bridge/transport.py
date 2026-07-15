@@ -7,7 +7,7 @@ from typing import Protocol
 @dataclass(frozen=True)
 class RemoteDocument:
     path: str
-    content: str
+    content: bytes
     document_commit_sha: str
 
 

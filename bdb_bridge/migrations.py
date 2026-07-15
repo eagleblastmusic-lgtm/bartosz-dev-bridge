@@ -141,6 +141,8 @@ MIGRATION_V2_STATEMENTS: tuple[str, ...] = (
 )""",
     """CREATE TABLE command_ingestion (
   command_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL,
+  snapshot_sha TEXT NOT NULL,
   source_path TEXT NOT NULL,
   document_commit_sha TEXT NOT NULL,
   raw_sha256 TEXT NOT NULL,
@@ -149,6 +151,19 @@ MIGRATION_V2_STATEMENTS: tuple[str, ...] = (
   first_seen_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL,
   FOREIGN KEY (command_id) REFERENCES commands(command_id)
+)""",
+    """CREATE TABLE pending_command_documents (
+  session_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  source_id TEXT NOT NULL,
+  snapshot_sha TEXT NOT NULL,
+  source_path TEXT NOT NULL,
+  document_commit_sha TEXT NOT NULL,
+  raw_sha256 TEXT NOT NULL,
+  content TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  PRIMARY KEY (session_id, sequence)
 )""",
     """CREATE TABLE ingestion_issues (
   issue_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -169,14 +184,12 @@ MIGRATION_V2_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX idx_commands_session_seq ON commands(session_id, sequence)",
     "CREATE INDEX idx_sessions_created ON sessions(created_at, session_id)",
     "CREATE INDEX idx_ingestion_issues_blocking ON ingestion_issues(blocking) WHERE blocking = 1",
-    """ALTER TABLE sessions ADD COLUMN active_slot TEXT GENERATED ALWAYS AS (
-  CASE WHEN state IN ('active', 'completing') THEN 'occupied' ELSE NULL END
-) STORED""",
-    "CREATE UNIQUE INDEX idx_sessions_one_active ON sessions(active_slot) WHERE active_slot IS NOT NULL",
-    """ALTER TABLE commands ADD COLUMN worker_slot TEXT GENERATED ALWAYS AS (
-  CASE WHEN state IN ('claimed', 'executing', 'effect_recorded') THEN 'occupied' ELSE NULL END
-) STORED""",
-    "CREATE UNIQUE INDEX idx_commands_one_worker ON commands(worker_slot) WHERE worker_slot IS NOT NULL",
+    """CREATE UNIQUE INDEX idx_sessions_one_active
+ON sessions((1))
+WHERE state IN ('active', 'completing')""",
+    """CREATE UNIQUE INDEX idx_commands_one_worker
+ON commands((1))
+WHERE state IN ('claimed', 'executing', 'effect_recorded')""",
 )
 
 MIGRATIONS: tuple[Migration, ...] = (
@@ -300,6 +313,34 @@ def apply_migrations(
         next_version = len(applied_rows) + 1
         while next_version <= len(migrations):
             migration = migration_map[next_version]
+            if migration.version == 2:
+                # Check for multiple active sessions in existing database
+                cur = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"
+                )
+                if cur.fetchone() is not None:
+                    cur = conn.execute(
+                        "SELECT COUNT(*) FROM sessions WHERE state IN ('active', 'completing')"
+                    )
+                    if cur.fetchone()[0] > 1:
+                        raise BridgeError(
+                            BridgeErrorCode.JOURNAL_MIGRATION_MISMATCH,
+                            "Cannot migrate to v2: multiple active or completing sessions exist in database",
+                        )
+                # Check for multiple claimed/executing/effect_recorded commands
+                cur = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'commands'"
+                )
+                if cur.fetchone() is not None:
+                    cur = conn.execute(
+                        "SELECT COUNT(*) FROM commands WHERE state IN ('claimed', 'executing', 'effect_recorded')"
+                    )
+                    if cur.fetchone()[0] > 1:
+                        raise BridgeError(
+                            BridgeErrorCode.JOURNAL_MIGRATION_MISMATCH,
+                            "Cannot migrate to v2: multiple active workers exist in database",
+                        )
+
             for statement in migration.statements:
                 conn.execute(statement)
             conn.execute(

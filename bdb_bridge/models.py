@@ -308,6 +308,8 @@ class SessionIngestionRecord:
 @dataclass(frozen=True)
 class CommandIngestionRecord:
     command_id: str
+    source_id: str
+    snapshot_sha: str
     source_path: str
     document_commit_sha: str
     raw_sha256: str
