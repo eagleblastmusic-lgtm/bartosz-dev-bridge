@@ -10,6 +10,27 @@ permissions:
   contents: read
 
 jobs:
+  snapshot:
+    name: Temporary source snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ghb07-source-snapshot
+          include-hidden-files: true
+          path: |
+            README.md
+            pyproject.toml
+            poc_bridge.py
+            bdb_bridge
+            bdb_poc
+            bdb-poc-fixture
+            tests
+            scripts
+            .github
+            docs
+
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
@@ -56,13 +77,3 @@ jobs:
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
       - name: Run tests
         run: python -m pytest -q
-      - name: Upload temporary source snapshot
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ghb07-source-snapshot
-          include-hidden-files: true
-          path: |
-            .
-            !.git/**
-            !**/__pycache__/**
