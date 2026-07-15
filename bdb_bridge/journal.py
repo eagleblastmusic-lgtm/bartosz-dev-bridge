@@ -27,6 +27,8 @@ from .models import (
     validate_command_transition,
     validate_session_transition,
     PromotionOutcome,
+    OperationPlanRecord,
+    OperationEffectRecord,
 )
 from .protocol import BridgeError, result_path_for, validate_session_id
 from .serializers import MAX_RESULT_BYTES, canonical_json, sha256_text
@@ -386,6 +388,72 @@ class Journal:
             return None
         return _row_to_command(row)
 
+    def _transition_command_in_transaction(
+        self,
+        command_id: str,
+        expected_state: CommandState,
+        new_state: CommandState,
+        now: str,
+    ) -> list[Any]:
+        row = self._get_command_row_for_update(command_id)
+        if row is None:
+            raise BridgeError(
+                BridgeErrorCode.JOURNAL_CONFLICT,
+                f"Command not found: {command_id}",
+            )
+        current_state = _parse_command_state(row[6])
+        if current_state != expected_state:
+            raise BridgeError(
+                BridgeErrorCode.JOURNAL_CONFLICT,
+                f"Command state mismatch: expected {expected_state.value}, got {current_state.value}",
+            )
+        validate_command_transition(current_state, new_state)
+
+        if new_state in (CommandState.CLAIMED, CommandState.EXECUTING, CommandState.EFFECT_RECORDED):
+            active_worker = self._conn.execute(
+                "SELECT command_id FROM commands WHERE state IN ('claimed', 'executing', 'effect_recorded') AND command_id != ?",
+                (command_id,),
+            ).fetchone()
+            if active_worker is not None:
+                raise BridgeError(
+                    BridgeErrorCode.JOURNAL_CONFLICT,
+                    f"Another command {active_worker[0]} is already active/worker",
+                )
+
+        try:
+            updated = self._conn.execute(
+                """
+                UPDATE commands
+                SET state = ?, updated_at = ?
+                WHERE command_id = ? AND state = ?
+                """,
+                (new_state.value, now, command_id, expected_state.value),
+            )
+        except sqlite3.IntegrityError as exc:
+            if "idx_commands_one_worker" in str(exc).lower():
+                raise BridgeError(
+                    BridgeErrorCode.JOURNAL_CONFLICT,
+                    f"Concurrency conflict: another command is already active/worker: {exc}",
+                ) from exc
+            raise
+
+        if updated.rowcount != 1:
+            raise BridgeError(
+                BridgeErrorCode.JOURNAL_CONFLICT,
+                f"Failed to transition command {command_id}",
+            )
+        self._append_event_in_transaction(
+            session_id=row[1],
+            command_id=command_id,
+            event_type="command.state_changed",
+            payload={
+                "from_state": expected_state.value,
+                "to_state": new_state.value,
+            },
+            created_at=now,
+        )
+        return row
+
     def transition_command(
         self,
         command_id: str,
@@ -396,63 +464,7 @@ class Journal:
         now = self._now_fn()
         try:
             with self._transaction():
-                row = self._get_command_row_for_update(command_id)
-                if row is None:
-                    raise BridgeError(
-                        BridgeErrorCode.JOURNAL_CONFLICT,
-                        f"Command not found: {command_id}",
-                    )
-                current_state = _parse_command_state(row[6])
-                if current_state != expected_state:
-                    raise BridgeError(
-                        BridgeErrorCode.JOURNAL_CONFLICT,
-                        f"Command state mismatch: expected {expected_state.value}, got {current_state.value}",
-                    )
-                validate_command_transition(current_state, new_state)
-
-                if new_state in (CommandState.CLAIMED, CommandState.EXECUTING, CommandState.EFFECT_RECORDED):
-                    active_worker = self._conn.execute(
-                        "SELECT command_id FROM commands WHERE state IN ('claimed', 'executing', 'effect_recorded') AND command_id != ?",
-                        (command_id,),
-                    ).fetchone()
-                    if active_worker is not None:
-                        raise BridgeError(
-                            BridgeErrorCode.JOURNAL_CONFLICT,
-                            f"Another command {active_worker[0]} is already active/worker",
-                        )
-
-                try:
-                    updated = self._conn.execute(
-                        """
-                        UPDATE commands
-                        SET state = ?, updated_at = ?
-                        WHERE command_id = ? AND state = ?
-                        """,
-                        (new_state.value, now, command_id, expected_state.value),
-                    )
-                except sqlite3.IntegrityError as exc:
-                    if "idx_commands_one_worker" in str(exc).lower():
-                        raise BridgeError(
-                            BridgeErrorCode.JOURNAL_CONFLICT,
-                            f"Concurrency conflict: another command is already active/worker: {exc}",
-                        ) from exc
-                    raise
-
-                if updated.rowcount != 1:
-                    raise BridgeError(
-                        BridgeErrorCode.JOURNAL_CONFLICT,
-                        f"Failed to transition command {command_id}",
-                    )
-                self._append_event_in_transaction(
-                    session_id=row[1],
-                    command_id=command_id,
-                    event_type="command.state_changed",
-                    payload={
-                        "from_state": expected_state.value,
-                        "to_state": new_state.value,
-                    },
-                    created_at=now,
-                )
+                self._transition_command_in_transaction(command_id, expected_state, new_state, now)
         except BridgeError:
             raise
         except sqlite3.Error as exc:
@@ -595,6 +607,241 @@ class Journal:
         record = self.get_workspace(session_id)
         assert record is not None
         return record
+
+    def record_operation_plan(self, record: OperationPlanRecord) -> None:
+        self._ensure_open()
+        now = self._now_fn()
+        with self._transaction():
+            existing = self._conn.execute(
+                "SELECT plan_sha256 FROM operation_plans WHERE command_id = ?",
+                (record.command_id,),
+            ).fetchone()
+            if existing is not None:
+                if existing[0] != record.plan_sha256:
+                    raise BridgeError(
+                        BridgeErrorCode.OPERATION_PLAN_COLLISION,
+                        f"Different plan already registered for command {record.command_id}",
+                    )
+                return
+
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO operation_plans (
+                        command_id, session_id, operation, target_path, profile_id,
+                        expected_revision, expected_state_hash,
+                        workspace_revision_before, workspace_state_hash_before,
+                        before_content, before_content_sha256,
+                        planned_after_content, planned_after_content_sha256, planned_after_state_hash,
+                        plan_sha256, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.command_id,
+                        record.session_id,
+                        record.operation,
+                        record.target_path,
+                        record.profile_id,
+                        record.expected_revision,
+                        record.expected_state_hash,
+                        record.workspace_revision_before,
+                        record.workspace_state_hash_before,
+                        sqlite3.Binary(record.before_content),
+                        record.before_content_sha256,
+                        sqlite3.Binary(record.planned_after_content),
+                        record.planned_after_content_sha256,
+                        record.planned_after_state_hash,
+                        record.plan_sha256,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise _map_integrity_error(exc, context="record_operation_plan") from exc
+
+            self._transition_command_in_transaction(
+                command_id=record.command_id,
+                expected_state=CommandState.CLAIMED,
+                new_state=CommandState.EXECUTING,
+                now=now,
+            )
+
+            self._append_event_in_transaction(
+                session_id=record.session_id,
+                command_id=record.command_id,
+                event_type="operation.plan_recorded",
+                payload={"target_path": record.target_path, "plan_sha256": record.plan_sha256},
+                created_at=now,
+            )
+
+    def get_operation_plan(self, command_id: str) -> OperationPlanRecord | None:
+        self._ensure_open()
+        row = self._conn.execute(
+            """
+            SELECT command_id, session_id, operation, target_path, profile_id,
+                   expected_revision, expected_state_hash,
+                   workspace_revision_before, workspace_state_hash_before,
+                   before_content, before_content_sha256,
+                   planned_after_content, planned_after_content_sha256, planned_after_state_hash,
+                   plan_sha256, created_at
+            FROM operation_plans WHERE command_id = ?
+            """,
+            (command_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return OperationPlanRecord(
+            command_id=row[0],
+            session_id=row[1],
+            operation=row[2],
+            target_path=row[3],
+            profile_id=row[4],
+            expected_revision=row[5],
+            expected_state_hash=row[6],
+            workspace_revision_before=row[7],
+            workspace_state_hash_before=row[8],
+            before_content=row[9],
+            before_content_sha256=row[10],
+            planned_after_content=row[11],
+            planned_after_content_sha256=row[12],
+            planned_after_state_hash=row[13],
+            plan_sha256=row[14],
+            created_at=row[15],
+        )
+
+    def record_operation_effect(self, record: OperationEffectRecord) -> None:
+        self._ensure_open()
+        now = self._now_fn()
+        with self._transaction():
+            existing = self._conn.execute(
+                "SELECT effect_sha256 FROM operation_effects WHERE command_id = ?",
+                (record.command_id,),
+            ).fetchone()
+            if existing is not None:
+                if existing[0] != record.effect_sha256:
+                    raise BridgeError(
+                        BridgeErrorCode.EFFECT_COLLISION,
+                        f"Different effect already registered for command {record.command_id}",
+                    )
+                return
+
+            cmd = self.get_command(record.command_id)
+            if cmd is None:
+                raise BridgeError(
+                    BridgeErrorCode.JOURNAL_CONFLICT,
+                    f"Command {record.command_id} not found",
+                )
+            if cmd.state != CommandState.EXECUTING:
+                raise BridgeError(
+                    BridgeErrorCode.INVALID_STATE_TRANSITION,
+                    f"Command {record.command_id} must be in EXECUTING state, got {cmd.state.value}",
+                )
+
+            plan = self.get_operation_plan(record.command_id)
+            if plan is None:
+                raise BridgeError(
+                    BridgeErrorCode.JOURNAL_CONFLICT,
+                    f"Operation plan not found for command {record.command_id}",
+                )
+            if plan.plan_sha256 != record.plan_sha256:
+                raise BridgeError(
+                    BridgeErrorCode.JOURNAL_CONFLICT,
+                    f"Plan SHA mismatch: {plan.plan_sha256} != {record.plan_sha256}",
+                )
+
+            updated_workspace = self._conn.execute(
+                """
+                UPDATE workspaces
+                SET revision = ?, state_hash = ?, updated_at = ?
+                WHERE session_id = ? AND revision = ? AND state_hash = ?
+                """,
+                (
+                    record.workspace_revision_after,
+                    record.workspace_state_hash_after,
+                    now,
+                    record.session_id,
+                    record.workspace_revision_before,
+                    record.workspace_state_hash_before,
+                ),
+            )
+            if updated_workspace.rowcount != 1:
+                raise BridgeError(
+                    BridgeErrorCode.JOURNAL_CONFLICT,
+                    f"Workspace state CAS failed for session {record.session_id}",
+                )
+
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO operation_effects (
+                        command_id, session_id, plan_sha256, target_path,
+                        workspace_revision_before, workspace_revision_after,
+                        workspace_state_hash_before, workspace_state_hash_after,
+                        before_content_sha256, after_content_sha256, effect_sha256,
+                        recorded_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.command_id,
+                        record.session_id,
+                        record.plan_sha256,
+                        record.target_path,
+                        record.workspace_revision_before,
+                        record.workspace_revision_after,
+                        record.workspace_state_hash_before,
+                        record.workspace_state_hash_after,
+                        record.before_content_sha256,
+                        record.after_content_sha256,
+                        record.effect_sha256,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise _map_integrity_error(exc, context="record_operation_effect") from exc
+
+            self._transition_command_in_transaction(
+                command_id=record.command_id,
+                expected_state=CommandState.EXECUTING,
+                new_state=CommandState.EFFECT_RECORDED,
+                now=now,
+            )
+
+            self._append_event_in_transaction(
+                session_id=record.session_id,
+                command_id=record.command_id,
+                event_type="operation.effect_recorded",
+                payload={"target_path": record.target_path, "effect_sha256": record.effect_sha256},
+                created_at=now,
+            )
+
+    def get_operation_effect(self, command_id: str) -> OperationEffectRecord | None:
+        self._ensure_open()
+        row = self._conn.execute(
+            """
+            SELECT command_id, session_id, plan_sha256, target_path,
+                   workspace_revision_before, workspace_revision_after,
+                   workspace_state_hash_before, workspace_state_hash_after,
+                   before_content_sha256, after_content_sha256, effect_sha256,
+                   recorded_at
+            FROM operation_effects WHERE command_id = ?
+            """,
+            (command_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return OperationEffectRecord(
+            command_id=row[0],
+            session_id=row[1],
+            plan_sha256=row[2],
+            target_path=row[3],
+            workspace_revision_before=row[4],
+            workspace_revision_after=row[5],
+            workspace_state_hash_before=row[6],
+            workspace_state_hash_after=row[7],
+            before_content_sha256=row[8],
+            after_content_sha256=row[9],
+            effect_sha256=row[10],
+            recorded_at=row[11],
+        )
 
     def store_result(
         self,

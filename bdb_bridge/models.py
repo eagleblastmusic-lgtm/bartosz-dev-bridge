@@ -59,6 +59,10 @@ class BridgeErrorCode(StrEnum):
     SESSION_ID_COLLISION = "session_id_collision"
     TRANSPORT_UNAVAILABLE = "transport_unavailable"
     INGESTION_BLOCKED = "ingestion_blocked"
+    WORKSPACE_DIVERGED = "workspace_diverged"
+    OPERATION_PLAN_COLLISION = "operation_plan_collision"
+    EFFECT_COLLISION = "effect_collision"
+    MANUAL_RECONCILIATION_REQUIRED = "manual_reconciliation_required"
 
 
 class CommandState(StrEnum):
@@ -367,3 +371,70 @@ class PromotionOutcome:
     promoted_count: int
     issues_created: int
     blocking_collisions: tuple[CollisionError, ...]
+
+
+@dataclass(frozen=True)
+class OperationPlanRecord:
+    command_id: str
+    session_id: str
+    operation: str
+    target_path: str
+    profile_id: str
+    expected_revision: int
+    expected_state_hash: str | None
+    workspace_revision_before: int
+    workspace_state_hash_before: str
+    before_content: bytes
+    before_content_sha256: str
+    planned_after_content: bytes
+    planned_after_content_sha256: str
+    planned_after_state_hash: str
+    plan_sha256: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class OperationEffectRecord:
+    command_id: str
+    session_id: str
+    plan_sha256: str
+    target_path: str
+    workspace_revision_before: int
+    workspace_revision_after: int
+    workspace_state_hash_before: str
+    workspace_state_hash_after: str
+    before_content_sha256: str
+    after_content_sha256: str
+    effect_sha256: str
+    recorded_at: str
+
+
+class RecoveryDecision(StrEnum):
+    EXECUTE = "execute"
+    RECOVER_PLANNED_AFTER = "recover_planned_after"
+    IDEMPOTENT_REPLAY = "idempotent_replay"
+    DIVERGED = "diverged"
+
+
+@dataclass(frozen=True)
+class ProfileRunOutcome:
+    status: str
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    duration_ms: int
+
+
+@dataclass(frozen=True)
+class ExecutionOutcome:
+    status: str
+    error_code: str | None
+    summary: str
+    workspace_revision_before: int
+    workspace_revision_after: int
+    workspace_state_hash_before: str
+    workspace_state_hash_after: str
+    changed_files: list[str]
+    diff: str
+    profile_run: ProfileRunOutcome | None = None
+    manual_reconciliation_details: dict[str, Any] | None = None

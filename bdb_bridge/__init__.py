@@ -18,7 +18,14 @@ from .models import (
     SessionState,
     TransportRetryRecord,
     WorkspaceRecord,
+    OperationPlanRecord,
+    OperationEffectRecord,
+    RecoveryDecision,
+    ProfileRunOutcome,
+    ExecutionOutcome,
 )
+from .workspace_manager import WorkspaceManager
+from .execution import ExecutionCoordinator
 from .protocol import (
     BridgeError,
     COMMAND_PATH_RE,
@@ -73,6 +80,13 @@ __all__ = [
     "SingleQueueScheduler",
     "TransportRetryRecord",
     "WorkspaceRecord",
+    "WorkspaceManager",
+    "ExecutionCoordinator",
+    "OperationPlanRecord",
+    "OperationEffectRecord",
+    "RecoveryDecision",
+    "ProfileRunOutcome",
+    "ExecutionOutcome",
     "canonical_json",
     "command_id_for",
     "command_path_for",
