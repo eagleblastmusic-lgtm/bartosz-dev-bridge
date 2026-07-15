@@ -47,6 +47,8 @@ def install_workspace_lifecycle_migration(journal_cls: Type[object]) -> None:
     _base.MIGRATIONS = (*_base.MIGRATIONS, MIGRATION_V6)
     _base.JOURNAL_TABLES = frozenset((*_base.JOURNAL_TABLES, "workspace_lifecycle"))
     _base._validate_migration_registry(_base.MIGRATIONS)
+    if _base.apply_migrations.__kwdefaults__ is not None:
+        _base.apply_migrations.__kwdefaults__["migrations"] = _base.MIGRATIONS
 
     def migrate(self: object) -> None:
         from . import journal as _journal
