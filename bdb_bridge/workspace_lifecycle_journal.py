@@ -133,12 +133,14 @@ def _state_change(
             requested = now if new_state is WorkspaceLifecycleState.CLEANUP_REQUESTED else current.requested_at
             started = now if new_state is WorkspaceLifecycleState.REMOVING else current.started_at
             completed = now if new_state is WorkspaceLifecycleState.REMOVED else current.completed_at
-            journal._connection.execute(
+            updated = journal._connection.execute(
                 """UPDATE workspace_lifecycle SET disposition=?, state=?, requested_at=?, started_at=?,
                 completed_at=?, last_error=?, updated_at=? WHERE session_id=? AND state=?""",
                 (disposition.value, new_state.value, requested, started, completed, diagnostic, now,
                  session_id, current.state.value),
             )
+            if updated.rowcount != 1:
+                raise BridgeError("journal_conflict", "Workspace lifecycle state changed concurrently")
             if fault_hook: fault_hook("AFTER_LIFECYCLE_STATE_WRITE_BEFORE_EVENT")
             _event(journal, session_id, event_type, new_state, now)
     except BridgeError: raise
