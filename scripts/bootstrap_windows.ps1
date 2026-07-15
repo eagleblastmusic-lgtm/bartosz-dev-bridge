@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Root = "C:\BartoszDev\POC0",
+    [string]$Root = "C:\Projekt\DevMaster\POC0",
     [string]$ControlRemote = "https://github.com/eagleblastmusic-lgtm/bartosz-dev-poc-control.git"
 )
 
@@ -77,11 +77,12 @@ $Config = [ordered]@{
     worktree_root = $WorktreeRoot
     repository_id = "bdb-poc-fixture"
     allowed_paths = @("src/clamp.py", "tests/test_clamp.py")
-    poll_interval_seconds = 5
+    poll_interval_seconds= 5
     max_poll_seconds = 300
     max_sequence = 3
     test_timeout_seconds = 45
     python_executable = $VenvPython
+
 }
 $Config | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 -Path $ConfigPath
 

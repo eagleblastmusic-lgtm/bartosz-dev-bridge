@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Root = "C:\BartoszDev\POC0",
+    [string]$Root = "C:\Projekt\DevMaster\POC0",
     [string]$ConfigPath = ""
 )
 

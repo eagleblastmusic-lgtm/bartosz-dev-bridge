@@ -294,3 +294,35 @@ def test_end_to_end_local_transport(tmp_path: Path) -> None:
         assert result["end_marker"].startswith("BDB-END:sha256:")
         assert len(raw.encode("utf-8")) <= MAX_RESULT_BYTES + 1
     assert statuses == ["success", "failed", "success"]
+
+
+def test_windows_scripts_use_new_configurable_default_root() -> None:
+    repo_root = Path(__file__).parents[1]
+    expected = r'C:\Projekt\DevMaster\POC0'
+    legacy = r'C:\BartoszDev\POC0'
+
+    for relative in (
+        'scripts/bootstrap_windows.ps1',
+        'scripts/run_poc_bridge.ps1',
+    ):
+        script = (repo_root / relative).read_text(encoding='utf-8')
+        assert f'[string]$Root = "{expected}"' in script
+        assert legacy not in script
+        assert 'param(' in script
+        assert '$Root' in script
+
+    documentation = (repo_root / 'POC_0_WINDOWS_START.md').read_text(encoding='utf-8')
+    assert expected in documentation
+    assert legacy not in documentation
+    assert r'-Root "D:\BartoszDev\POC0"' in documentation
+
+
+def test_windows_ci_parses_powershell_without_running_bootstrap() -> None:
+    repo_root = Path(__file__).parents[1]
+    workflow = (repo_root / '.github/workflows/bridge-ci.yml').read_text(encoding='utf-8')
+    assert "if: runner.os == 'Windows'" in workflow
+    assert '[System.Management.Automation.Language.Parser]::ParseFile' in workflow
+    assert 'scripts/bootstrap_windows.ps1' in workflow
+    assert 'scripts/run_poc_bridge.ps1' in workflow
+    assert 'bootstrap_windows.ps1 -Root' not in workflow
+

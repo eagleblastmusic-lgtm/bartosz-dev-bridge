@@ -40,7 +40,14 @@ Set-ExecutionPolicy -Scope Process Bypass
 Domyślny katalog lokalny:
 
 ```text
-C:\BartoszDev\POC0
+C:\Projekt\DevMaster\POC0
+```
+
+Parametr `Root` pozostaje konfigurowalny. Inny katalog można wskazać jawnie, na przykład:
+
+```powershell
+.\scripts\bootstrap_windows.ps1 -Root "D:\BartoszDev\POC0"
+.\scripts\run_poc_bridge.ps1 -Root "D:\BartoszDev\POC0"
 ```
 
 Bootstrap:
