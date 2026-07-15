@@ -1,128 +1,107 @@
 from __future__ import annotations
 
-import json
-import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+
 import pytest
 
-from bdb_bridge import Journal, ServiceStatusReader, ServiceStatus, InstanceLock, BridgeConfig, is_pid_alive
+from bdb_bridge import Journal, ServiceInstanceState, is_pid_alive
+from tests.helpers.service_lifecycle_fixture import (
+    assert_lock_is_free,
+    cli_command,
+    make_service_config,
+    read_status,
+    wait_for_heartbeat_change,
+    wait_for_status,
+)
 
-# Skip entire file on non-Windows platforms
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows background service mode is only supported on Windows")
-
-
-@pytest.fixture
-def make_config_file(tmp_path: Path):
-    def _make():
-        control = tmp_path / "control"
-        control.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", "init"], cwd=control, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=control)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=control)
-
-        (control / "dummy.txt").write_text("initial")
-        subprocess.run(["git", "add", "dummy.txt"], cwd=control)
-        subprocess.run(["git", "commit", "-m", "initial commit"], cwd=control)
-
-        subprocess.run(["git", "checkout", "-b", "commands"], cwd=control, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["git", "checkout", "-b", "results"], cwd=control, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["git", "checkout", "main"], cwd=control, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        cfg = BridgeConfig(
-            control_repo_path=control,
-            fixture_repo_path=tmp_path / "fixture",
-            worktree_root=tmp_path / "worktrees",
-            runtime_dir=tmp_path / "runtime",
-            heartbeat_stale_seconds=5.0,
-            heartbeat_interval_seconds=1.0,
-            idle_poll_seconds=1.0,
-        )
-        (tmp_path / "runtime").mkdir(parents=True, exist_ok=True)
-
-        cfg_dict = {
-            "schema_version": "1.1",
-            "control_repo_path": str(control),
-            "fixture_repo_path": str(tmp_path / "fixture"),
-            "worktree_root": str(tmp_path / "worktrees"),
-            "runtime_dir": str(tmp_path / "runtime"),
-            "heartbeat_stale_seconds": 5.0,
-            "heartbeat_interval_seconds": 1.0,
-            "idle_poll_seconds": 1.0,
-        }
-
-        cfg_path = tmp_path / "config.json"
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump(cfg_dict, f, indent=2)
-
-        return cfg, cfg_path
-    return _make
+pytestmark = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Windows background service mode is only supported on Windows",
+)
 
 
-def test_windows_background_cli_lifecycle(make_config_file) -> None:
-    config, config_path = make_config_file()
+def test_windows_background_cli_lifecycle_full_contract(tmp_path: Path) -> None:
+    config, config_path, durable_marker = make_service_config(
+        tmp_path,
+        heartbeat_interval_seconds=0.2,
+        heartbeat_stale_seconds=5.0,
+        idle_poll_seconds=2.0,
+    )
+    start_cmd = cli_command(config_path, "start", "--background")
+    stop_cmd = cli_command(config_path, "stop")
+    journal_path = Path(config.journal_path)
+    lock_path = Path(config.runtime_dir) / "bridge.instance.lock"
 
-    status_cmd = [
-        sys.executable,
-        "-m", "bdb_bridge",
-        "bridge", "status",
-        "--config", str(config_path),
-        "--json"
-    ]
+    initial = read_status(config_path)
+    assert initial["status"] == "OFFLINE"
+    assert initial["lock_held"] is False
 
-    # 1. Start background process
-    start_cmd = [
-        sys.executable,
-        "-m", "bdb_bridge",
-        "bridge", "start",
-        "--config", str(config_path),
-        "--background"
-    ]
+    first = subprocess.run(start_cmd, capture_output=True, text=True, check=False)
+    assert first.returncode == 0, first.stderr
+    assert "Service started in background successfully" in first.stdout
 
-    res = subprocess.run(start_cmd, capture_output=True, text=True)
-    assert res.returncode == 0
-    assert "Service started in background successfully" in res.stdout
-
-    # 2. Check status shows RUNNING and PID is alive
-    res_status = subprocess.run(status_cmd, capture_output=True, text=True)
-    assert res_status.returncode == 0
-    status_data = json.loads(res_status.stdout.strip())
-    assert status_data["status"] == "RUNNING"
-    assert status_data["lock_held"] is True
-
-    bg_pid = status_data["pid"]
-    assert bg_pid is not None
-    assert bg_pid > 0
+    running = wait_for_status(config_path, "RUNNING")
+    bg_pid = running["pid"]
+    assert isinstance(bg_pid, int) and bg_pid > 0
+    assert running["instance_id"].startswith("inst-")
+    assert running["lock_held"] is True
+    assert running["pid_alive"] is True
     assert is_pid_alive(bg_pid) is True
 
-    # 3. Double start rejection
-    res_double = subprocess.run(start_cmd, capture_output=True, text=True)
-    assert res_double.returncode == 1
-    assert "Error: Another bridge instance is already running" in res_double.stderr
+    first_heartbeat = running["heartbeat_at"]
+    progressed = wait_for_heartbeat_change(config_path, first_heartbeat)
+    assert progressed["heartbeat_at"] != first_heartbeat
+    assert progressed["pid"] == bg_pid
 
-    # 4. Request Graceful Stop
-    stop_cmd = [
-        sys.executable,
-        "-m", "bdb_bridge",
-        "bridge", "stop",
-        "--config", str(config_path),
-    ]
-    res_stop = subprocess.run(stop_cmd, capture_output=True, text=True)
-    assert res_stop.returncode == 0
-    assert "Graceful stop request sent successfully" in res_stop.stdout
+    second = subprocess.run(start_cmd, capture_output=True, text=True, check=False)
+    assert second.returncode == 1
+    assert "Another bridge instance is already running" in second.stderr
 
-    # 5. Wait until OFFLINE and process is no longer alive
-    start_time = time.time()
-    stopped = False
-    while time.time() - start_time < 10.0:
-        res_status = subprocess.run(status_cmd, capture_output=True, text=True)
-        status_data = json.loads(res_status.stdout.strip())
-        if status_data["status"] == "OFFLINE":
-            stopped = True
+    stop = subprocess.run(stop_cmd, capture_output=True, text=True, check=False)
+    assert stop.returncode == 0
+    assert "Graceful stop request sent successfully" in stop.stdout
+
+    observed_stopping = False
+    deadline = time.monotonic() + 12.0
+    final_status = None
+    while time.monotonic() < deadline:
+        final_status = read_status(config_path)
+        if final_status["status"] == "STOPPING":
+            observed_stopping = True
+        if final_status["status"] == "OFFLINE":
             break
-        time.sleep(0.5)
+        time.sleep(0.05)
 
-    assert stopped is True
+    assert observed_stopping is True
+    assert final_status is not None and final_status["status"] == "OFFLINE"
     assert is_pid_alive(bg_pid) is False
+
+    assert journal_path.exists()
+    assert Path(config.worktree_root).is_dir()
+    assert durable_marker.read_bytes() == b"keep-me"
+    assert lock_path.exists()
+    assert_lock_is_free(config)
+
+    journal = Journal.open(journal_path)
+    latest = journal.get_latest_service_instance()
+    assert latest is not None
+    assert latest.pid == bg_pid
+    assert latest.state == ServiceInstanceState.STOPPED
+    assert latest.exit_code == 0
+    journal.close()
+
+    from bdb_bridge import cli, service
+
+    source = Path(cli.__file__).read_text(encoding="utf-8") + Path(service.__file__).read_text(encoding="utf-8")
+    for forbidden in (
+        "taskkill",
+        "TerminateProcess",
+        "powershell",
+        "schtasks",
+        "CreateService",
+        "Start-Service",
+    ):
+        assert forbidden.lower() not in source.lower()
