@@ -128,3 +128,34 @@ def parse_strict_utc_timestamp(value: str, *, field: str) -> datetime:
 def validate_strict_utc_timestamp(value: str, *, field: str) -> str:
     parse_strict_utc_timestamp(value, field=field)
     return value
+
+
+_SECRET_URL_RE = re.compile(r"(https?://)[^\s/@]+(?::[^\s/@]*)?@", re.IGNORECASE)
+
+
+def sanitize_diagnostics(value: bytes | str | None, *, limit: int = 500) -> str:
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = value or ""
+    text = text.replace("\x00", "")
+    text = _SECRET_URL_RE.sub(r"\1<redacted>@", text)
+    text = " ".join(text.split())
+    return text[:limit]
+
+
+def parse_git_ref(ref: str, default_remote: str = "origin") -> tuple[str, str]:
+    if not isinstance(ref, str):
+        return "", ""
+    if ref.startswith("refs/remotes/"):
+        parts = ref[len("refs/remotes/"):].split("/", 1)
+        if len(parts) == 2:
+            return parts[0], parts[1]
+        return default_remote, ref
+    elif ref.startswith("refs/heads/"):
+        return "", ref[len("refs/heads/"):]
+    if "/" in ref:
+        first, rest = ref.split("/", 1)
+        if first not in ("refs", ""):
+            return first, rest
+    return "", ref

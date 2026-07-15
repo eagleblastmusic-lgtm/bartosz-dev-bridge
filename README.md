@@ -5,69 +5,95 @@ Lokalny Bridge dla ChatGPT Plus i GitHuba, rozwijany etapami na podstawie potwie
 Aktualna faza:
 
 ```text
-GHB0-5 — Result staging i durable outbox
+GHB0-6 — Service lifecycle i pojedyncza instancja
 ```
 
-## Zakres GHB0-5
-
-Rdzeń zachowuje protokół `1.1`, recovery worktree z GHB0-4 oraz dotychczasowe granice bezpieczeństwa. Nowa warstwa wyników obejmuje:
-
-- `ResultStager`, który buduje deterministyczny wynik wyłącznie z trwałych rekordów session, command, plan, effect oraz kontrolowanego `ExecutionOutcome`;
-- `finalize_result()` jako jedyny finalny serializer, bez zmiany limitu 16 KiB ani end markera;
-- exact UTF-8 bytes bez BOM, dopisywania newline i normalizacji końców linii;
-- SHA-256 liczony z pełnych exact staged bytes;
-- atomowe `result + outbox + RESULT_STAGED + events` w jednym `BEGIN IMMEDIATE`;
-- tabelę SQLite `outbox` z persisted attempt count, next-attempt time, bounded diagnostic oraz trwałymi stanami `pending`, `published` i `collision`;
-- deterministyczny backoff `1, 2, 4, 8…`, ograniczony do 60 sekund, bez jittera i bez `sleep`;
-- `OutboxProcessor`, którego pojedyncze wywołanie wykonuje najwyżej jedną próbę publikacji jednego wpisu;
-- `ResultTransport` i `GitResultTransport` publikujące dokładnie jeden result path na branchu `results`, bez force-pusha;
-- ponowny odczyt exact remote bytes po pushu zamiast zaufania samemu exit code;
-- idempotentne rozpoznanie identycznego istniejącego remote resultu;
-- trwałe `RESULT_COLLISION` i przejście command/session do `MANUAL_RECONCILIATION_REQUIRED` bez nadpisania zdalnej treści;
-- recovery po crashu po pushu, ale przed lokalnym ACK, bez drugiego remote commita;
-- preservation session worktree oraz brak ponownego patcha po awarii publikacji.
-
-## Recovery contract
+## CLI
 
 ```text
-EFFECT_RECORDED + brak staged result
-  → bez ponownego patcha dokończ profil/result
-  → atomowo stage result i enqueue outbox
-
-RESULT_STAGED
-  → nie uruchamiaj operacji ani profilu
-  → publikuj wyłącznie immutable staged result
-
-remote path absent
-  → jedna próba publikacji exact bytes
-
-remote path identical
-  → RESULT_PUBLISHED bez kolejnego pushu
-
-remote path different
-  → outbox collision
-  → command/session MANUAL_RECONCILIATION_REQUIRED
-
-push success + crash przed lokalnym ACK
-  → po restarcie odczytaj remote path
-  → identyczny hash oznacza RESULT_PUBLISHED bez ponownego commita
+bdb bridge start --config <path> --foreground
+bdb bridge start --config <path> --background   # tylko Windows
+bdb bridge stop --config <path>
+bdb bridge status --config <path> [--json]
 ```
 
-## Granice
+Tryb background na Windows uruchamia zwykły proces użytkownika. Nie tworzy Windows Service, Scheduled Task ani procesu administracyjnego. Child sam zdobywa platformowy OS lock i sam prowadzi graceful lifecycle.
 
-GHB0-5 nie implementuje jeszcze:
+## Cykl usługi
 
-- daemona ani pętli działającej stale;
-- CLI `start`, `stop` i `status`;
-- instance lock, PID lub heartbeat;
-- ACK protocol ani przejścia do `ACKNOWLEDGED`;
-- cleanupu session worktree;
-- uploadu artefaktów;
-- GUI, LSP, Browser Lab ani Hermesa;
-- integracji z GicleeApp;
-- nowych operacji lub ogólnego terminala;
-- podłączenia nowego runtime do legacy `PocBridge`.
+Każdy cykl zachowuje kolejność:
 
-Legacy POC-0 pozostaje dostępny przez `bdb_poc` i `poc_bridge.py`, ale nie używa durable outboxu GHB0-5.
+```text
+recovery → pending outbox → ingestion → execution
+```
 
-Repozytorium nie może zawierać tokenów, sekretów, plików `.env` ani prywatnych danych użytkownika.
+Pomiędzy bezpiecznymi fazami sprawdzany jest trwały stan zatrzymania. Żądanie `STOPPING` zapisane podczas długiej fazy execution nie przerywa patcha ani profilu w połowie: faza kończy się bezpiecznie, po czym usługa przechodzi bezpośrednio do końcowego `OFFLINE`, bez dodatkowego pełnego `idle_poll_seconds`.
+
+## Stany lifecycle
+
+- `OFFLINE` — brak aktywnej instancji i OS lock jest wolny;
+- `RUNNING` — aktywna instancja posiada lock, PID i aktualizowany heartbeat;
+- `STOPPING` — trwałe żądanie graceful stop zostało zapisane i jest obserwowalne;
+- `STALE` — baza, PID, heartbeat i stan locka nie tworzą spójnej aktywnej instancji.
+
+Końcowe zatrzymanie zapisuje `STOPPED`, po czym publiczny status staje się `OFFLINE`. Journal, lock file, session worktree i inne durable markery nie są usuwane przez lifecycle.
+
+## Pojedyncza instancja
+
+`InstanceLock` korzysta z:
+
+- `msvcrt.locking` na Windows;
+- `fcntl.flock` na POSIX.
+
+Contention jest mapowane na `INSTANCE_ALREADY_RUNNING`. Awaria backendu, ścieżki albo uprawnień jest mapowana na `INSTANCE_LOCK_FAILED` i nie jest traktowana jak zwykłe zajęcie locka. Drugi realny proces nie może rozpocząć działania, gdy lock należy do aktywnej instancji.
+
+## Heartbeat
+
+`HeartbeatWorker` działa jako osobny, niedaemonowy wątek i otwiera własne połączenie SQLite na podstawie ścieżki Journalu. Nie współdzieli głównego obiektu `Journal` usługi. Heartbeat jest aktualizowany także wtedy, gdy bezpieczna faza execution trwa przez kilka interwałów, a worker kończy się przez kontrolowany `stop()` i `join()`.
+
+## Recovery po ponownym otwarciu
+
+Po restarcie nowy Journal i nowy graph service/coordinator obsługują trwałe stany:
+
+```text
+CLAIMED         → recovery bez drugiego claimu
+EXECUTING       → recovery bez ponownego patcha
+EFFECT_RECORDED → dokończenie profilu/resultu bez ponownego patcha
+RESULT_STAGED   → wyłącznie outbox/publication
+```
+
+Workspace revision rośnie dokładnie o jeden, plan i effect pozostają pojedyncze, a staged result/outbox są idempotentne. Recovery jest wykonywane przed pending outbox, a pending outbox przed nowym ingestion.
+
+## Fault points
+
+GHB0-6 zachowuje kontrolowane punkty awarii, między innymi:
+
+- `AFTER_INSTANCE_LOCK_BEFORE_DB_START` — proces kończy się bez active service row, a OS zwalnia lock;
+- `AFTER_EXECUTE_CLAIM` — trwały `CLAIMED` jest odzyskiwany po ponownym otwarciu bez drugiego claimu i bez podwójnego patcha/effectu.
+
+## Background preflight
+
+Przed uruchomieniem child process sprawdzane są Journal i publiczny status. Child nie jest uruchamiany przy:
+
+- uszkodzonym lub nieobsługiwanym schemacie Journalu;
+- błędzie status readera;
+- `INSTANCE_LOCK_FAILED`;
+- permission error;
+- nieprawidłowej konfiguracji;
+- stanie `RUNNING` lub `STOPPING`.
+
+Tolerowany jest wyłącznie prawidłowy stan nieaktywnej instancji. Diagnostyka jest ograniczona i sanitizowana; błędy nie są ignorowane przez szerokie `except Exception: pass`.
+
+## Granice bezpieczeństwa
+
+GHB0-6 nie dodaje:
+
+- `taskkill`, `TerminateProcess` ani zabijania procesu podczas graceful stop;
+- PowerShella do sterowania usługą;
+- Windows Service ani Scheduled Task;
+- usuwania Journalu lub session worktree;
+- daemonowego cleanupu;
+- nowych operacji, ogólnego terminala, GUI, Hermesa ani integracji z GicleeApp;
+- zależności `bdb_bridge → bdb_poc`.
+
+Legacy POC-0 pozostaje dostępny przez `bdb_poc` i `poc_bridge.py`.

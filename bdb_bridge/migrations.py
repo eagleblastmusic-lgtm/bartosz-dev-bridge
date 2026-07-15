@@ -30,6 +30,7 @@ JOURNAL_TABLES = frozenset(
         "operation_plans",
         "operation_effects",
         "outbox",
+        "service_instances",
     }
 )
 
@@ -260,11 +261,37 @@ MIGRATION_V4_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX idx_outbox_due ON outbox(state, next_attempt_at, created_at, command_id)",
 )
 
+MIGRATION_V5_STATEMENTS: tuple[str, ...] = (
+    """CREATE TABLE service_instances (
+  instance_id TEXT PRIMARY KEY,
+  pid INTEGER NOT NULL CHECK (pid > 0),
+  state TEXT NOT NULL CHECK (
+    state IN ('running', 'stopping', 'stopped', 'stale', 'failed')
+  ),
+
+  started_at TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL,
+  stop_requested_at TEXT,
+  stopped_at TEXT,
+
+  exit_code INTEGER,
+  last_error TEXT,
+
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)""",
+    """CREATE UNIQUE INDEX idx_service_instances_one_active
+ON service_instances((1))
+WHERE state IN ('running', 'stopping')""",
+    "CREATE INDEX idx_service_instances_latest ON service_instances(started_at DESC, instance_id)",
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "journal_v1_initial", MIGRATION_V1_STATEMENTS),
     Migration(2, "journal_v2_ingestion", MIGRATION_V2_STATEMENTS),
     Migration(3, "journal_v3_execution", MIGRATION_V3_STATEMENTS),
     Migration(4, "journal_v4_result_outbox", MIGRATION_V4_STATEMENTS),
+    Migration(5, "journal_v5_service_lifecycle", MIGRATION_V5_STATEMENTS),
 )
 
 
