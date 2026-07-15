@@ -17,23 +17,19 @@ from tests.helpers.recovery_gate_fixture import (
 )
 
 
-def _publish_once(env) -> None:
-    process = start_service(env)
-    wait_for(
-        env.journal, "SELECT state FROM commands WHERE command_id=?",
-        "result_published", (env.command_id,), process=process,
-    )
-    stop_and_wait(env, process)
-
-
-def test_command_collision_is_persisted_hash_only_and_restart_stays_blocked(tmp_path: Path) -> None:
+def test_command_collision_is_persisted_hash_only_and_blocks_execution(tmp_path: Path) -> None:
     env = setup_gate_environment(tmp_path / "command-collision")
-    _publish_once(env)
+    discovered = run_cli(
+        env, "start", "--foreground", fault="AFTER_DISCOVERED_BEFORE_VALIDATION"
+    )
+    assert discovered.returncode == 2 and "Traceback" not in discovered.stderr
     conn = sqlite3.connect(env.journal)
-    original_json, original_hash = conn.execute(
-        "SELECT command_json,command_sha256 FROM commands WHERE command_id=?", (env.command_id,)
+    original_json, original_hash, original_state = conn.execute(
+        "SELECT command_json,command_sha256,state FROM commands WHERE command_id=?",
+        (env.command_id,),
     ).fetchone()
     conn.close()
+    assert original_state == "discovered"
 
     path = env.writer / "sessions" / env.session_id / "commands" / "000001.json"
     changed = json.loads(path.read_text(encoding="utf-8"))
@@ -49,20 +45,29 @@ def test_command_collision_is_persisted_hash_only_and_restart_stays_blocked(tmp_
         "SELECT COUNT(*) FROM ingestion_issues WHERE command_id=? AND blocking=1",
         1, (env.command_id,), process=process,
     )
+    time.sleep(0.2)
     stop_and_wait(env, process)
     conn = sqlite3.connect(env.journal)
-    current_json, current_hash = conn.execute(
-        "SELECT command_json,command_sha256 FROM commands WHERE command_id=?", (env.command_id,)
+    current_json, current_hash, current_state = conn.execute(
+        "SELECT command_json,command_sha256,state FROM commands WHERE command_id=?",
+        (env.command_id,),
     ).fetchone()
     detail = conn.execute(
         "SELECT detail FROM ingestion_issues WHERE command_id=? ORDER BY issue_id DESC LIMIT 1",
         (env.command_id,),
     ).fetchone()[0]
+    counts = {
+        "plan": conn.execute("SELECT COUNT(*) FROM operation_plans WHERE command_id=?", (env.command_id,)).fetchone()[0],
+        "effect": conn.execute("SELECT COUNT(*) FROM operation_effects WHERE command_id=?", (env.command_id,)).fetchone()[0],
+        "result": conn.execute("SELECT COUNT(*) FROM results WHERE command_id=?", (env.command_id,)).fetchone()[0],
+    }
     conn.close()
     assert (current_json, current_hash) == (original_json, original_hash)
+    assert current_state in {"discovered", "validated"}
+    assert counts == {"plan": 0, "effect": 0, "result": 0}
     assert "existing_sha256=" in detail and "incoming_sha256=" in detail
     assert "return 42" not in detail and len(detail) <= 500
-    assert (env.worktrees / env.session_id).exists()
+    assert env.worktrees.exists() is False or not any(env.worktrees.iterdir())
 
     replay = start_service(env)
     time.sleep(0.3)
@@ -72,6 +77,7 @@ def test_command_collision_is_persisted_hash_only_and_restart_stays_blocked(tmp_
         "SELECT COUNT(*) FROM ingestion_issues WHERE command_id=? AND blocking=1",
         (env.command_id,),
     ).fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM operation_plans WHERE command_id=?", (env.command_id,)).fetchone()[0] == 0
     conn.close()
 
 
@@ -140,7 +146,7 @@ def test_divergent_workspace_is_blocked_and_preserved(tmp_path: Path) -> None:
         env.journal, "SELECT state FROM commands WHERE command_id=?",
         "manual_reconciliation_required", (env.command_id,), process=recovery,
     )
-    recovery.communicate(timeout=30)
+    stop_and_wait(env, recovery)
     conn = sqlite3.connect(env.journal)
     session_state = conn.execute(
         "SELECT state FROM sessions WHERE session_id=?", (env.session_id,)
