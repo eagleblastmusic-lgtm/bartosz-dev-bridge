@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 from typing import Callable, Type
 
 from .migrations import map_sqlite_error
@@ -27,10 +28,22 @@ def _hash(value: str) -> str:
     return value
 
 
+def _absolute_workspace_path(value: str, *, corrupt: bool) -> str:
+    try:
+        path = Path(value)
+        if not value or not path.is_absolute():
+            raise ValueError("workspace path is not absolute")
+        return str(path)
+    except (OSError, ValueError, TypeError) as exc:
+        code = "journal_corrupt" if corrupt else "invalid_payload"
+        message = "Invalid workspace_lifecycle row" if corrupt else "workspace_path must be an exact absolute path"
+        raise BridgeError(code, message) from exc
+
+
 def _row(row: tuple[object, ...]) -> WorkspaceLifecycleRecord:
     try:
         record = WorkspaceLifecycleRecord(
-            session_id=str(row[0]), workspace_path=str(row[1]), base_sha=validate_base_sha(str(row[2])),
+            session_id=str(row[0]), workspace_path=_absolute_workspace_path(str(row[1]), corrupt=True), base_sha=validate_base_sha(str(row[2])),
             expected_revision=int(row[3]), expected_state_hash=_hash(str(row[4])),
             disposition=WorkspaceDisposition(str(row[5])), state=WorkspaceLifecycleState(str(row[6])),
             requested_at=None if row[7] is None else str(row[7]),
@@ -40,7 +53,7 @@ def _row(row: tuple[object, ...]) -> WorkspaceLifecycleRecord:
             created_at=str(row[11]), updated_at=str(row[12]),
         )
         validate_session_id(record.session_id)
-        if not record.workspace_path or record.expected_revision < 0:
+        if record.expected_revision < 0:
             raise ValueError("invalid identity")
         for name in ("requested_at", "started_at", "completed_at", "created_at", "updated_at"):
             value = getattr(record, name)
@@ -50,6 +63,8 @@ def _row(row: tuple[object, ...]) -> WorkspaceLifecycleRecord:
             raise ValueError("oversized diagnostic")
         return record
     except (BridgeError, ValueError, TypeError) as exc:
+        if isinstance(exc, BridgeError) and exc.code == "journal_corrupt":
+            raise
         raise BridgeError("journal_corrupt", "Invalid workspace_lifecycle row") from exc
 
 
@@ -81,8 +96,7 @@ def record_workspace_preserved(
     expected_revision: int, expected_state_hash: str, fault_hook: FaultHook | None = None,
 ) -> WorkspaceLifecycleRecord:
     journal._ensure_open(); validate_session_id(session_id)
-    if not isinstance(workspace_path, str) or not workspace_path:
-        raise BridgeError("invalid_payload", "workspace_path must be non-empty")
+    workspace_path = _absolute_workspace_path(workspace_path, corrupt=False)
     if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
         raise BridgeError("invalid_payload", "expected_revision must be non-negative")
     base_sha = validate_base_sha(base_sha); expected_state_hash = _hash(expected_state_hash)
