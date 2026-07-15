@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from poc_bridge import (
+from bdb_poc import (
     BridgeConfig,
     BridgeError,
     ControlRepository,
