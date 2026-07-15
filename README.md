@@ -5,12 +5,13 @@ Minimalna implementacja **POC-0** lokalnego Bridge'a dla ChatGPT Plus i GitHuba,
 Aktualna faza:
 
 ```text
-GHB0-1 — stabilne granice rdzenia
+GHB0-2 — SQLite Journal v1
 ```
 
 Zakres obejmuje:
 
 - pakiet `bdb_bridge` ze stabilnymi granicami protokołu v1.1 (walidacja, serializacja, konfiguracja, modele);
+- **SQLite Journal v1** — trwały, transakcyjny moduł `bdb_bridge.journal` z wersjonowanymi migracjami, idempotency komend i wyników, compare-and-swap workspace oraz append-only event logiem;
 - warstwę wykonawczą `bdb_poc` z zachowaną kompatybilnością importów POC-0;
 - jednorazowy `poc_bridge.py`;
 - syntetyczne repozytorium `bdb-poc-fixture`;
@@ -21,7 +22,23 @@ Zakres obejmuje:
 - jedno worktree i jedną aktywną sesję;
 - testy jednostkowe/integracyjne oraz GitHub Actions.
 
-Poza zakresem pozostają GHB-0+, GUI, SQLite, LSP, Browser Lab, Hermes, wielosesyjność, prawdziwe repozytoria GicleeApp oraz operacje produkcyjne.
+Journal v1 jest niezależnym fundamentem danych i **nie jest jeszcze podłączony** do działającego `PocBridge`, pollingu GitHuba ani worktree runtime.
+
+SQLite Journal:
+
+```python
+from bdb_bridge import Journal
+
+journal = Journal.open("path/to/journal.db")
+journal.create_session(session_id, repository_id, base_sha)
+journal.record_command(session_id, command_id, sequence, command_dict)
+journal.store_result(command_id, result_json, remote_path)
+journal.close()
+```
+
+Schemat obejmuje tabele: `schema_migrations`, `sessions`, `commands`, `workspaces`, `results`, `events`.
+
+Poza zakresem pozostają daemon, recovery, outbox, automatyczne wznawianie komend, GUI, LSP, Browser Lab, Hermes, wielosesyjność, prawdziwe repozytoria GicleeApp oraz operacje produkcyjne.
 
 Instrukcja uruchomienia:
 

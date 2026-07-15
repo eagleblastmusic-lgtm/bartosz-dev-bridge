@@ -1,5 +1,17 @@
 from .config import BridgeConfig
-from .models import BridgeErrorCode, CommandState, Operation, ResultStatus, SessionState
+from .journal import Journal
+from .models import (
+    BridgeErrorCode,
+    CommandRecord,
+    CommandState,
+    JournalEvent,
+    Operation,
+    ResultRecord,
+    ResultStatus,
+    SessionRecord,
+    SessionState,
+    WorkspaceRecord,
+)
 from .protocol import (
     BridgeError,
     COMMAND_PATH_RE,
@@ -20,14 +32,20 @@ __all__ = [
     "BridgeError",
     "BridgeErrorCode",
     "COMMAND_PATH_RE",
+    "CommandRecord",
     "CommandState",
+    "Journal",
+    "JournalEvent",
     "MAX_RESULT_BYTES",
     "MAX_TAIL_CHARS",
     "Operation",
+    "ResultRecord",
     "ResultStatus",
     "SCHEMA_VERSION",
     "SESSION_RE",
+    "SessionRecord",
     "SessionState",
+    "WorkspaceRecord",
     "canonical_json",
     "finalize_result",
     "path_matches",
