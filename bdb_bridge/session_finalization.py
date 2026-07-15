@@ -38,6 +38,10 @@ class SessionFinalizer:
     def _blocking_reasons_in_transaction(self, session_id: str) -> list[str]:
         conn = self.journal._connection
         reasons: list[str] = []
+        if conn.execute(
+            "SELECT 1 FROM service_instances WHERE state IN ('running','stopping') LIMIT 1"
+        ).fetchone() is not None:
+            reasons.append("service is running or stopping")
         rows = conn.execute(
             "SELECT state FROM commands WHERE session_id = ? ORDER BY sequence", (session_id,)
         ).fetchall()
@@ -60,8 +64,10 @@ class SessionFinalizer:
             reasons.append("blocking ingestion issue exists")
         return reasons
 
-    def finalize(self, session_id: str) -> SessionFinalizationOutcome:
+    def finalize(self, session_id: str, *, lock_held: bool) -> SessionFinalizationOutcome:
         validate_session_id(session_id)
+        if not lock_held:
+            raise BridgeError("instance_lock_failed", "Session finalization requires the shared instance lock")
         self.journal._ensure_open()
         now = self.journal._now_fn()
         try:
@@ -73,11 +79,17 @@ class SessionFinalizer:
                     raise BridgeError("journal_conflict", f"Session not found: {session_id}")
                 state = SessionState(str(row[0]))
                 if state is SessionState.COMPLETED:
+                    reasons = self._blocking_reasons_in_transaction(session_id)
+                    service_reasons = [reason for reason in reasons if reason == "service is running or stopping"]
+                    if service_reasons:
+                        raise BridgeError("instance_already_running", service_reasons[0])
                     self._ensure_preserve_in_transaction(session_id, now)
                     return SessionFinalizationOutcome(session_id, state, False, True)
                 if state is not SessionState.ACTIVE:
                     raise BridgeError("invalid_state_transition", f"Session finalization requires ACTIVE, got {state.value}")
                 reasons = self._blocking_reasons_in_transaction(session_id)
+                if "service is running or stopping" in reasons:
+                    raise BridgeError("instance_already_running", "Session finalization requires service OFFLINE")
                 if reasons:
                     raise BridgeError("manual_reconciliation_required", "Session finalization blocked: " + "; ".join(reasons))
                 validate_session_transition(SessionState.ACTIVE, SessionState.COMPLETING)
@@ -92,6 +104,8 @@ class SessionFinalizer:
                     payload={"from_state":"active","to_state":"completing"}, created_at=now,
                 )
                 reasons = self._blocking_reasons_in_transaction(session_id)
+                if "service is running or stopping" in reasons:
+                    raise BridgeError("instance_already_running", "Service became active during finalization")
                 if reasons:
                     raise BridgeError("manual_reconciliation_required", "Session finalization recheck failed: " + "; ".join(reasons))
                 validate_session_transition(SessionState.COMPLETING, SessionState.COMPLETED)
