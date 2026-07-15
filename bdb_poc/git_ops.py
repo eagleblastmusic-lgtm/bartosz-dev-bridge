@@ -44,6 +44,49 @@ class Git:
             raise BridgeError("git_error", f"git {' '.join(args)} failed: {detail}")
         return completed
 
+    def run_bytes(
+        self,
+        args: Iterable[str],
+        *,
+        cwd: Path | None = None,
+        check: bool = True,
+        timeout: float = 60.0,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        from bdb_bridge.models import BridgeErrorCode
+        command = ["git", "-C", str(cwd or self.repo), *list(args)]
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                timeout=timeout,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise BridgeError(
+                BridgeErrorCode.TRANSPORT_UNAVAILABLE,
+                f"git {' '.join(args)} timed out: {exc}",
+            ) from exc
+        except FileNotFoundError as exc:
+            raise BridgeError(
+                BridgeErrorCode.TRANSPORT_UNAVAILABLE,
+                f"git executable not found: {exc}",
+            ) from exc
+        except OSError as exc:
+            raise BridgeError(
+                BridgeErrorCode.TRANSPORT_UNAVAILABLE,
+                f"git execution failed: {exc}",
+            ) from exc
+
+        if check and completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).decode("utf-8", errors="replace").strip()
+            raise BridgeError(
+                BridgeErrorCode.TRANSPORT_UNAVAILABLE,
+                f"git {' '.join(args)} failed with exit code {completed.returncode}: {detail}",
+            )
+        return completed
+
 
 class ControlRepository:
     def __init__(self, path: Path) -> None:
