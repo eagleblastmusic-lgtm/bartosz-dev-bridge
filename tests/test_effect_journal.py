@@ -1,186 +1,163 @@
 from __future__ import annotations
 
-import json
+from dataclasses import replace
 from pathlib import Path
+
 import pytest
 
-from bdb_bridge import Journal, BridgeError, BridgeErrorCode, OperationPlanRecord, OperationEffectRecord, CommandState
+from bdb_bridge import (
+    BridgeError,
+    BridgeErrorCode,
+    CommandState,
+    Journal,
+    OperationEffectRecord,
+    OperationPlanRecord,
+    compute_operation_effect_sha256,
+    compute_operation_plan_sha256,
+    sha256_bytes,
+)
 
 SESSION_ID = "018f3f66-6cb3-4f66-9f2e-3d7647d1b701"
 COMMAND_ID = f"{SESSION_ID}:000001"
 FIXED_NOW = "2026-07-15T12:00:00Z"
+
+
 def fixed_now() -> str:
     return FIXED_NOW
 
-def setup_session_and_claimed_command(journal: Journal) -> None:
-    now = FIXED_NOW
-    # Record session
+
+def setup_records(tmp_path: Path) -> Journal:
+    journal = Journal.open(tmp_path / "journal.db", now_fn=fixed_now)
     journal._connection.execute(
         "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)",
-        (SESSION_ID, "repo1", "a" * 40, "active", now, now)
+        (SESSION_ID, "repo1", "a" * 40, "active", FIXED_NOW, FIXED_NOW),
     )
-    # Record workspace
     journal._connection.execute(
         "INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (SESSION_ID, "/path/to/ws", "a" * 40, 0, "hashws", now, now)
+        (SESSION_ID, "/path/to/ws", "a" * 40, 0, "before", FIXED_NOW, FIXED_NOW),
     )
-    # Record command in CLAIMED state
     journal._connection.execute(
         "INSERT INTO commands VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (COMMAND_ID, SESSION_ID, 1, "sha256:" + "a" * 64, "{}", "c" * 40, CommandState.CLAIMED.value, 0, "hashws", now, now)
+        (COMMAND_ID, SESSION_ID, 1, "cmd", "{}", None, "claimed", 0, None, FIXED_NOW, FIXED_NOW),
     )
+    return journal
 
-def make_sample_plan() -> OperationPlanRecord:
-    return OperationPlanRecord(
+
+def sample_plan() -> OperationPlanRecord:
+    before = b"\xef\xbb\xbfA\r\n\xc4\x85\n"
+    after = b"B\r\n"
+    candidate = OperationPlanRecord(
         command_id=COMMAND_ID,
         session_id=SESSION_ID,
         operation="replace_exact_and_test",
         target_path="src/clamp.py",
         profile_id="poc_pytest",
         expected_revision=0,
-        expected_state_hash="hashws",
+        expected_state_hash=None,
         workspace_revision_before=0,
-        workspace_state_hash_before="hashws",
-        before_content=b"old text",
-        before_content_sha256="hash_old",
-        planned_after_content=b"new text",
-        planned_after_content_sha256="hash_new",
-        planned_after_state_hash="hash_after",
-        plan_sha256="plan_sha",
+        workspace_state_hash_before="before",
+        before_content=before,
+        before_content_sha256=sha256_bytes(before),
+        planned_after_content=after,
+        planned_after_content_sha256=sha256_bytes(after),
+        planned_after_state_hash="after",
+        plan_sha256="",
         created_at=FIXED_NOW,
     )
+    return replace(candidate, plan_sha256=compute_operation_plan_sha256(candidate))
 
-def make_sample_effect() -> OperationEffectRecord:
-    return OperationEffectRecord(
-        command_id=COMMAND_ID,
-        session_id=SESSION_ID,
-        plan_sha256="plan_sha",
-        target_path="src/clamp.py",
+
+def sample_effect(plan: OperationPlanRecord) -> OperationEffectRecord:
+    candidate = OperationEffectRecord(
+        command_id=plan.command_id,
+        session_id=plan.session_id,
+        plan_sha256=plan.plan_sha256,
+        target_path=plan.target_path,
         workspace_revision_before=0,
         workspace_revision_after=1,
-        workspace_state_hash_before="hashws",
-        workspace_state_hash_after="hash_after",
-        before_content_sha256="hash_old",
-        after_content_sha256="hash_new",
-        effect_sha256="effect_sha",
+        workspace_state_hash_before="before",
+        workspace_state_hash_after="after",
+        before_content_sha256=plan.before_content_sha256,
+        after_content_sha256=plan.planned_after_content_sha256,
+        effect_sha256="",
         recorded_at=FIXED_NOW,
     )
+    return replace(candidate, effect_sha256=compute_operation_effect_sha256(candidate))
 
-def test_record_and_get_operation_plan(tmp_path: Path) -> None:
-    journal = Journal.open(tmp_path / "journal.db", now_fn=fixed_now)
-    setup_session_and_claimed_command(journal)
 
-    plan = make_sample_plan()
-
-    # 1. First record plan
-    journal.record_operation_plan(plan)
-
-    # Check command transitioned CLAIMED -> EXECUTING
-    cmd = journal.get_command(COMMAND_ID)
-    assert cmd is not None
-    assert cmd.state == CommandState.EXECUTING
-
-    # Get plan and verify
-    retrieved = journal.get_operation_plan(COMMAND_ID)
-    assert retrieved == plan
-
-    # Verify exact one event operation.plan_recorded
-    events = [e for e in journal.list_events() if e.event_type == "operation.plan_recorded"]
-    assert len(events) == 1
-    assert events[0].command_id == COMMAND_ID
-
-    # 2. Identical replay is no-op
-    journal.record_operation_plan(plan)
-
-    events2 = [e for e in journal.list_events() if e.event_type == "operation.plan_recorded"]
-    assert len(events2) == 1  # No duplicate event
-
-    # 3. Collision with different plan raises collision error
-    different_plan = make_sample_plan()
-    object.__setattr__(different_plan, "plan_sha256", "different_sha")
-    with pytest.raises(BridgeError) as exc:
-        journal.record_operation_plan(different_plan)
-    assert exc.value.code == BridgeErrorCode.OPERATION_PLAN_COLLISION
-
-    journal.close()
-
-def test_record_and_get_operation_effect(tmp_path: Path) -> None:
-    journal = Journal.open(tmp_path / "journal.db", now_fn=fixed_now)
-    setup_session_and_claimed_command(journal)
-
-    plan = make_sample_plan()
-    journal.record_operation_plan(plan)
-
-    effect = make_sample_effect()
-
-    # 1. Record effect (performs CAS on workspace and transitions command)
-    journal.record_operation_effect(effect)
-
-    # Verify command state EXECUTING -> EFFECT_RECORDED
-    cmd = journal.get_command(COMMAND_ID)
-    assert cmd is not None
-    assert cmd.state == CommandState.EFFECT_RECORDED
-
-    # Verify workspace record has been advanced (revision=1, state_hash=hash_after)
-    ws = journal.get_workspace(SESSION_ID)
-    assert ws is not None
-    assert ws.revision == 1
-    assert ws.state_hash == "hash_after"
-
-    # Verify get_operation_effect
-    retrieved = journal.get_operation_effect(COMMAND_ID)
-    assert retrieved == effect
-
-    # Verify exact one event operation.effect_recorded
-    events = [e for e in journal.list_events() if e.event_type == "operation.effect_recorded"]
-    assert len(events) == 1
-
-    # 2. Identical effect replay is no-op
-    # Re-run requires command to be EXECUTING. In record_operation_effect,
-    # if the effect already exists, it checks if the effect_sha256 is the same.
-    # If yes, it returns immediately without executing checks or raising transition errors!
-    journal.record_operation_effect(effect)
-
-    events2 = [e for e in journal.list_events() if e.event_type == "operation.effect_recorded"]
-    assert len(events2) == 1  # No duplicate event
-
-    # Verify workspace revision has increased exactly once
-    ws2 = journal.get_workspace(SESSION_ID)
-    assert ws2.revision == 1
-
-    # 3. Collision with different effect raises error
-    different_effect = make_sample_effect()
-    object.__setattr__(different_effect, "effect_sha256", "different_effect_sha")
-    with pytest.raises(BridgeError) as exc:
-        journal.record_operation_effect(different_effect)
-    assert exc.value.code == BridgeErrorCode.EFFECT_COLLISION
-
-    journal.close()
-
-def test_10_replays_remain_one_record(tmp_path: Path) -> None:
-    journal = Journal.open(tmp_path / "journal.db", now_fn=fixed_now)
-    setup_session_and_claimed_command(journal)
-
-    plan = make_sample_plan()
-    effect = make_sample_effect()
-
+def test_ghb04_plan_effect_ten_replays_are_one_record(tmp_path: Path) -> None:
+    journal = setup_records(tmp_path)
+    plan = sample_plan()
+    effect = sample_effect(plan)
     journal.record_operation_plan(plan)
     journal.record_operation_effect(effect)
-
     for _ in range(10):
         journal.record_operation_plan(plan)
         journal.record_operation_effect(effect)
-
-    # Check DB table counts
     assert journal._connection.execute("SELECT COUNT(*) FROM operation_plans").fetchone()[0] == 1
     assert journal._connection.execute("SELECT COUNT(*) FROM operation_effects").fetchone()[0] == 1
+    assert journal._connection.execute("SELECT COUNT(*) FROM events WHERE event_type='operation.plan_recorded'").fetchone()[0] == 1
+    assert journal._connection.execute("SELECT COUNT(*) FROM events WHERE event_type='operation.effect_recorded'").fetchone()[0] == 1
+    assert journal.get_workspace(SESSION_ID).revision == 1
+    assert journal.get_command(COMMAND_ID).state == CommandState.EFFECT_RECORDED
+    journal.close()
 
-    # Check event counts
-    assert len([e for e in journal.list_events() if e.event_type == "operation.plan_recorded"]) == 1
-    assert len([e for e in journal.list_events() if e.event_type == "operation.effect_recorded"]) == 1
 
-    # Check revision remains 1
-    ws = journal.get_workspace(SESSION_ID)
-    assert ws.revision == 1
+def test_ghb04_plan_collision_checks_all_immutable_fields(tmp_path: Path) -> None:
+    journal = setup_records(tmp_path)
+    plan = sample_plan()
+    journal.record_operation_plan(plan)
+    attack = replace(plan, target_path="src/other.py", plan_sha256=plan.plan_sha256)
+    with pytest.raises(BridgeError) as exc:
+        journal.record_operation_plan(attack)
+    assert exc.value.code == BridgeErrorCode.OPERATION_PLAN_COLLISION
+    journal.close()
 
+
+def test_ghb04_effect_collision_checks_all_immutable_fields(tmp_path: Path) -> None:
+    journal = setup_records(tmp_path)
+    plan = sample_plan()
+    journal.record_operation_plan(plan)
+    effect = sample_effect(plan)
+    journal.record_operation_effect(effect)
+    attack = replace(effect, target_path="src/other.py", effect_sha256=effect.effect_sha256)
+    with pytest.raises(BridgeError) as exc:
+        journal.record_operation_effect(attack)
+    assert exc.value.code == BridgeErrorCode.EFFECT_COLLISION
+    journal.close()
+
+
+@pytest.mark.parametrize("point", ["AFTER_WORKSPACE_CAS", "AFTER_EFFECT_INSERT", "BEFORE_EFFECT_EVENT"])
+def test_ghb04_effect_transaction_fault_rolls_back(tmp_path: Path, point: str) -> None:
+    journal = setup_records(tmp_path)
+    plan = sample_plan()
+    journal.record_operation_plan(plan)
+    effect = sample_effect(plan)
+
+    def hook(actual: str) -> None:
+        if actual == point:
+            raise RuntimeError(point)
+
+    with pytest.raises(RuntimeError):
+        journal.record_operation_effect(effect, fault_hook=hook)
+    assert journal.get_workspace(SESSION_ID).revision == 0
+    assert journal.get_workspace(SESSION_ID).state_hash == "before"
+    assert journal.get_command(COMMAND_ID).state == CommandState.EXECUTING
+    assert journal.get_operation_effect(COMMAND_ID) is None
+    assert journal._connection.execute("SELECT COUNT(*) FROM events WHERE event_type='operation.effect_recorded'").fetchone()[0] == 0
+    journal.close()
+
+
+def test_ghb04_exact_bytes_persist_bit_for_bit_after_reopen(tmp_path: Path) -> None:
+    journal = setup_records(tmp_path)
+    plan = sample_plan()
+    journal.record_operation_plan(plan)
+    journal.close()
+    journal = Journal.open(tmp_path / "journal.db", now_fn=fixed_now)
+    stored = journal.get_operation_plan(COMMAND_ID)
+    assert stored is not None
+    assert stored.before_content == b"\xef\xbb\xbfA\r\n\xc4\x85\n"
+    assert stored.planned_after_content == b"B\r\n"
+    assert stored.before_content_sha256 == sha256_bytes(stored.before_content)
+    assert stored.plan_sha256 == compute_operation_plan_sha256(stored)
     journal.close()

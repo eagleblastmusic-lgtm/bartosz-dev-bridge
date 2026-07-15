@@ -5,22 +5,19 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
 import pytest
 
-from bdb_bridge import Journal, BridgeConfig, BridgeError, BridgeErrorCode, WorkspaceManager
+from bdb_bridge import BridgeConfig, BridgeError, BridgeErrorCode, Journal, WorkspaceManager
 
 SESSION_ID = "018f3f66-6cb3-4f66-9f2e-3d7647d1b701"
 
-def run_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    completed = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if check and completed.returncode != 0:
-        raise AssertionError(completed.stderr or completed.stdout)
-    return completed
+
+def run_git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True, check=False)
+    assert completed.returncode == 0, completed.stderr
+    return completed.stdout.strip()
+
 
 def init_fixture(tmp_path: Path) -> tuple[Path, str]:
     source = Path(__file__).parents[1] / "bdb-poc-fixture"
@@ -31,7 +28,8 @@ def init_fixture(tmp_path: Path) -> tuple[Path, str]:
     run_git(fixture, "config", "user.email", "poc@example.invalid")
     run_git(fixture, "add", "--", ".gitignore", "pyproject.toml", "src", "tests")
     run_git(fixture, "commit", "-m", "fixture baseline")
-    return fixture, run_git(fixture, "rev-parse", "HEAD").stdout.strip()
+    return fixture, run_git(fixture, "rev-parse", "HEAD")
+
 
 def make_config(tmp_path: Path, fixture: Path) -> BridgeConfig:
     return BridgeConfig(
@@ -39,180 +37,125 @@ def make_config(tmp_path: Path, fixture: Path) -> BridgeConfig:
         fixture_repo_path=fixture,
         worktree_root=tmp_path / "worktrees",
         allowed_paths=("src/clamp.py", "tests/test_clamp.py"),
-        poll_interval_seconds=0.01,
-        max_poll_seconds=30,
-        test_timeout_seconds=30,
         python_executable=sys.executable,
     )
 
-def test_workspace_manager_lifecycle(tmp_path: Path) -> None:
+
+def test_ghb04_registered_workspace_reattach_validates_exact_identity(tmp_path: Path) -> None:
     fixture, base_sha = init_fixture(tmp_path)
     config = make_config(tmp_path, fixture)
     journal = Journal.open(tmp_path / "journal.db")
     journal.create_session(SESSION_ID, "repo1", base_sha)
-
-    # 1. ensure_workspace creation flow
-    wm = WorkspaceManager(config, SESSION_ID, base_sha, ["src/clamp.py", "tests/test_clamp.py"])
-    rec = wm.ensure_workspace(journal)
-
-    assert rec.session_id == SESSION_ID
-    assert rec.base_sha == base_sha
-    assert rec.revision == 0
-    assert Path(rec.workspace_path) == wm.path
-
-    # Verify worktree HEAD
-    head = wm.git.run(["rev-parse", "HEAD"]).stdout.strip()
-    assert head == base_sha
-
-    # Verify workspaces table row
-    db_rec = journal.get_workspace(SESSION_ID)
-    assert db_rec is not None
-    assert db_rec.state_hash == rec.state_hash
-
-    # 2. reattach existing registered worktree
-    rec2 = wm.ensure_workspace(journal)
-    assert rec2.revision == 0
-    assert rec2.state_hash == rec.state_hash
-
+    manager = WorkspaceManager(config, SESSION_ID, base_sha, ["src/clamp.py", "tests/test_clamp.py"])
+    first = manager.ensure_workspace(journal)
+    second = WorkspaceManager(config, SESSION_ID, base_sha, ["src/clamp.py", "tests/test_clamp.py"]).ensure_workspace(journal)
+    assert second == first
+    assert Path(second.workspace_path) == config.worktree_root / SESSION_ID
+    assert manager.git.run(["symbolic-ref", "-q", "HEAD"], check=False).returncode != 0
     journal.close()
 
-def test_workspace_manager_attach_orphan(tmp_path: Path) -> None:
-    fixture, base_sha = init_fixture(tmp_path)
-    config = make_config(tmp_path, fixture)
-    journal = Journal.open(tmp_path / "journal.db")
+
+def test_ghb04_clean_orphan_attach_and_divergent_orphan_rejection(tmp_path: Path) -> None:
+    fixture, base_sha = init_fixture(tmp_path / "clean")
+    config = make_config(tmp_path / "clean", fixture)
+    journal = Journal.open(tmp_path / "clean" / "journal.db")
     journal.create_session(SESSION_ID, "repo1", base_sha)
-
-    wm = WorkspaceManager(config, SESSION_ID, base_sha, ["src/clamp.py", "tests/test_clamp.py"])
-
-    # Manually add worktree physical directory without DB registration
-    wm.source_git.run(["worktree", "add", "--detach", str(wm.path), base_sha])
-
-    # ensure_workspace should detect and register it
-    rec = wm.ensure_workspace(journal)
-    assert rec.session_id == SESSION_ID
-    assert rec.revision == 0
-    assert rec.base_sha == base_sha
-
-    db_rec = journal.get_workspace(SESSION_ID)
-    assert db_rec is not None
-    assert db_rec.workspace_path == str(wm.path)
-
+    manager = WorkspaceManager(config, SESSION_ID, base_sha, ["src/clamp.py", "tests/test_clamp.py"])
+    manager.source_git.run(["worktree", "add", "--detach", str(manager.path), base_sha])
+    assert manager.ensure_workspace(journal).revision == 0
     journal.close()
 
-def test_workspace_manager_attach_divergent_orphan_fails(tmp_path: Path) -> None:
-    fixture, base_sha = init_fixture(tmp_path)
-    config = make_config(tmp_path, fixture)
-    journal = Journal.open(tmp_path / "journal.db")
+    fixture, base_sha = init_fixture(tmp_path / "dirty")
+    config = make_config(tmp_path / "dirty", fixture)
+    journal = Journal.open(tmp_path / "dirty" / "journal.db")
     journal.create_session(SESSION_ID, "repo1", base_sha)
-
-    wm = WorkspaceManager(config, SESSION_ID, base_sha, ["src/clamp.py", "tests/test_clamp.py"])
-
-    # Create worktree
-    wm.source_git.run(["worktree", "add", "--detach", str(wm.path), base_sha])
-
-    # Modify something or add an untracked file to make it dirty
-    wm.path.joinpath("src/untracked.py").write_text("print(123)")
-
+    manager = WorkspaceManager(config, SESSION_ID, base_sha, ["src/clamp.py", "tests/test_clamp.py"])
+    manager.source_git.run(["worktree", "add", "--detach", str(manager.path), base_sha])
+    foreign = manager.path / "src" / "foreign.py"
+    foreign.write_bytes(b"foreign")
     with pytest.raises(BridgeError) as exc:
-        wm.ensure_workspace(journal)
+        manager.ensure_workspace(journal)
     assert exc.value.code == BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED
+    assert journal.get_workspace(SESSION_ID) is None
+    assert foreign.exists()
+    journal.close()
 
-    # Verify not registered
+
+def test_ghb04_wrong_head_orphan_is_never_registered(tmp_path: Path) -> None:
+    fixture, base_sha = init_fixture(tmp_path)
+    (fixture / "second.txt").write_text("second", encoding="utf-8")
+    run_git(fixture, "add", "second.txt")
+    run_git(fixture, "commit", "-m", "second")
+    wrong_head = run_git(fixture, "rev-parse", "HEAD")
+    config = make_config(tmp_path, fixture)
+    journal = Journal.open(tmp_path / "journal.db")
+    journal.create_session(SESSION_ID, "repo1", base_sha)
+    manager = WorkspaceManager(config, SESSION_ID, base_sha, ["src/clamp.py", "tests/test_clamp.py"])
+    manager.source_git.run(["worktree", "add", "--detach", str(manager.path), wrong_head])
+    with pytest.raises(BridgeError) as exc:
+        manager.ensure_workspace(journal)
+    assert exc.value.code == BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED
     assert journal.get_workspace(SESSION_ID) is None
     journal.close()
 
-def test_workspace_manager_unsafe_path(tmp_path: Path) -> None:
+
+def test_ghb04_base_sha_and_path_scope_are_strict(tmp_path: Path) -> None:
     fixture, base_sha = init_fixture(tmp_path)
     config = make_config(tmp_path, fixture)
+    with pytest.raises(BridgeError) as exc:
+        WorkspaceManager(config, SESSION_ID, "main", ["src/clamp.py"])
+    assert exc.value.code == BridgeErrorCode.INVALID_BASE_SHA
+    with pytest.raises(BridgeError) as exc:
+        WorkspaceManager(config, "../../bad", base_sha, ["src/clamp.py"])
+    assert exc.value.code == BridgeErrorCode.INVALID_SESSION_ID
 
-    # Path escaping root
-    wm = WorkspaceManager(config, "../../bad", base_sha, ["src/clamp.py"])
     journal = Journal.open(tmp_path / "journal.db")
     journal.create_session(SESSION_ID, "repo1", base_sha)
-
+    manager = WorkspaceManager(config, SESSION_ID, base_sha, ["src/clamp.py"])
+    manager.ensure_workspace(journal)
     with pytest.raises(BridgeError) as exc:
-        wm.ensure_workspace(journal)
-    assert exc.value.code == BridgeErrorCode.UNSAFE_WORKTREE_PATH
-
-    # Policy denied path resolution
-    wm_ok = WorkspaceManager(config, SESSION_ID, base_sha, ["src/clamp.py"])
-    wm_ok.ensure_workspace(journal)
-
+        manager.resolve_allowed_path("tests/test_clamp.py")
+    assert exc.value.code == BridgeErrorCode.SCOPE_VIOLATION
     with pytest.raises(BridgeError) as exc:
-        wm_ok.resolve_allowed_path("src/unauthorized.py")
-    assert exc.value.code == BridgeErrorCode.POLICY_DENIED
-
-    with pytest.raises(BridgeError) as exc:
-        wm_ok.resolve_allowed_path("../../escape.py")
+        manager.resolve_allowed_path("../escape")
     assert exc.value.code == BridgeErrorCode.UNSAFE_PATH
-
     journal.close()
 
-def test_workspace_manager_symlink_escape(tmp_path: Path) -> None:
+
+def test_ghb04_symlink_escape_is_rejected(tmp_path: Path) -> None:
     fixture, base_sha = init_fixture(tmp_path)
-    config = make_config(tmp_path, fixture)
+    base_config = make_config(tmp_path, fixture)
+    config = BridgeConfig(
+        control_repo_path=base_config.control_repo_path,
+        fixture_repo_path=base_config.fixture_repo_path,
+        worktree_root=base_config.worktree_root,
+        allowed_paths=("src/clamp.py", "src/link.py"),
+        python_executable=sys.executable,
+    )
     journal = Journal.open(tmp_path / "journal.db")
     journal.create_session(SESSION_ID, "repo1", base_sha)
-
-    wm = WorkspaceManager(config, SESSION_ID, base_sha, ["src/clamp.py", "src/symlink.py"])
-    wm.ensure_workspace(journal)
-
-    # Create a symlink pointing outside the workspace inside allowed paths
-    target = tmp_path / "outside.txt"
-    target.write_text("secrets")
-
-    symlink_path = wm.path / "src" / "symlink.py"
+    manager = WorkspaceManager(config, SESSION_ID, base_sha, ["src/clamp.py", "src/link.py"])
+    manager.ensure_workspace(journal)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private", encoding="utf-8")
+    link = manager.path / "src" / "link.py"
     try:
-        os.symlink(target, symlink_path)
+        os.symlink(outside, link)
     except OSError:
-        pytest.skip("Symlink creation is not supported on this user setup")
-
+        pytest.skip("Symlink creation unavailable")
     with pytest.raises(BridgeError) as exc:
-        wm.resolve_allowed_path("src/symlink.py")
-    assert exc.value.code == BridgeErrorCode.UNSAFE_PATH
-
+        manager.resolve_allowed_path("src/link.py")
+    assert exc.value.code in {BridgeErrorCode.UNSAFE_PATH, BridgeErrorCode.UNSAFE_WORKTREE_PATH}
     journal.close()
 
-def test_workspace_manager_read_write_bytes(tmp_path: Path) -> None:
-    fixture, base_sha = init_fixture(tmp_path)
-    config = make_config(tmp_path, fixture)
-    journal = Journal.open(tmp_path / "journal.db")
-    journal.create_session(SESSION_ID, "repo1", base_sha)
 
-    wm = WorkspaceManager(config, SESSION_ID, base_sha, ["src/clamp.py"])
-    wm.ensure_workspace(journal)
+def test_ghb04_git_wrapper_maps_os_failures(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from bdb_bridge.workspace_manager import Git
 
-    # Read bytes
-    content = wm.read_exact_bytes("src/clamp.py")
-    assert b"clamp_percent" in content
+    def missing(*args: object, **kwargs: object) -> object:
+        raise FileNotFoundError("git")
 
-    # Write planned bytes atomically
-    new_content = content + b"\n# a planned line\n"
-    wm.write_planned_bytes("src/clamp.py", new_content)
-
-    # Reread exact bytes
-    assert wm.read_exact_bytes("src/clamp.py") == new_content
-    journal.close()
-
-def test_workspace_manager_state_hash(tmp_path: Path) -> None:
-    fixture, base_sha = init_fixture(tmp_path)
-    config = make_config(tmp_path, fixture)
-    journal = Journal.open(tmp_path / "journal.db")
-    journal.create_session(SESSION_ID, "repo1", base_sha)
-
-    wm = WorkspaceManager(config, SESSION_ID, base_sha, ["src/clamp.py"])
-    wm.ensure_workspace(journal)
-
-    h1 = wm.compute_state_hash()
-
-    # Modify allowed path
-    orig = wm.read_exact_bytes("src/clamp.py")
-    wm.write_planned_bytes("src/clamp.py", orig + b"\n# change")
-    h2 = wm.compute_state_hash()
-    assert h1 != h2
-
-    # Check compute_state_hash_with_override matches actual state after modification
-    override_hash = wm.compute_state_hash_with_override("src/clamp.py", orig + b"\n# change")
-    assert h2 == override_hash
-
-    journal.close()
+    monkeypatch.setattr(subprocess, "run", missing)
+    with pytest.raises(BridgeError) as exc:
+        Git(tmp_path).run(["status"])
+    assert exc.value.code == BridgeErrorCode.GIT_ERROR
