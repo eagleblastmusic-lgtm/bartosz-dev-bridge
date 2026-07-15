@@ -83,7 +83,7 @@ def _finalize(config: BridgeConfig, session_id: str) -> int:
     lock = None
     try:
         journal, lock = _offline(config)
-        outcome = SessionFinalizer(journal).finalize(session_id)
+        outcome = SessionFinalizer(journal).finalize(session_id, lock_held=True)
         print(json.dumps({
             "finalized": outcome.finalized,
             "idempotent": outcome.idempotent,
