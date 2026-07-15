@@ -4,7 +4,45 @@ from typing import Type
 
 from .journal_ingestion import CollisionError
 from .models import BridgeErrorCode, IngestionReport, PollReport
-from .protocol import BridgeError, parse_strict_utc_timestamp
+from .protocol import (
+    BridgeError,
+    command_id_for,
+    parse_strict_utc_timestamp,
+    sanitize_diagnostics,
+)
+
+
+def install_command_collision_diagnostics(journal_cls: Type[object]) -> None:
+    original = journal_cls.record_ingested_command
+    if getattr(original, "_ghb07_collision_wrapped", False):
+        return
+
+    def wrapped(self: object, *args: object, **kwargs: object):
+        try:
+            return original(self, *args, **kwargs)
+        except CollisionError:
+            session_id = str(kwargs.get("session_id") or "")
+            sequence = int(kwargs.get("sequence") or 0)
+            incoming = str(kwargs.get("raw_sha256_value") or "")
+            command_id = command_id_for(session_id, sequence)
+            existing = self.get_command(command_id)
+            existing_hash = existing.command_sha256 if existing is not None else "missing"
+            detail = sanitize_diagnostics(
+                f"immutable command collision existing_sha256={existing_hash} incoming_sha256={incoming}",
+                limit=500,
+            )
+            with self._transaction():
+                self._connection.execute(
+                    """UPDATE ingestion_issues SET detail=? WHERE issue_id=(
+                    SELECT issue_id FROM ingestion_issues WHERE command_id=?
+                    AND error_code IN ('command_id_collision','sequence_collision')
+                    ORDER BY issue_id DESC LIMIT 1)""",
+                    (detail, command_id),
+                )
+            raise
+
+    wrapped._ghb07_collision_wrapped = True
+    journal_cls.record_ingested_command = wrapped
 
 
 def install_command_ingestor_fault_hook(ingestor_cls: Type[object]) -> None:
