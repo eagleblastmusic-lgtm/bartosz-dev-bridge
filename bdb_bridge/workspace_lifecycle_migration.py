@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+from typing import Type
+
+from . import migrations as _base
+
+
+MIGRATION_V6_STATEMENTS: tuple[str, ...] = (
+    """CREATE TABLE workspace_lifecycle (
+  session_id TEXT PRIMARY KEY,
+  workspace_path TEXT NOT NULL UNIQUE,
+  base_sha TEXT NOT NULL CHECK (
+    length(base_sha) = 40 AND base_sha NOT GLOB '*[^0-9a-fA-F]*'
+  ),
+  expected_revision INTEGER NOT NULL CHECK (expected_revision >= 0),
+  expected_state_hash TEXT NOT NULL CHECK (
+    length(expected_state_hash) = 71
+    AND substr(expected_state_hash, 1, 7) = 'sha256:'
+    AND substr(expected_state_hash, 8) NOT GLOB '*[^0-9a-f]*'
+  ),
+  disposition TEXT NOT NULL CHECK (disposition IN ('preserve', 'cleanup')),
+  state TEXT NOT NULL CHECK (
+    state IN ('preserved', 'cleanup_requested', 'removing', 'removed', 'blocked')
+  ),
+  requested_at TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  last_error TEXT CHECK (last_error IS NULL OR length(last_error) <= 500),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+)""",
+    "CREATE INDEX idx_workspace_lifecycle_state ON workspace_lifecycle(state, updated_at, session_id)",
+)
+
+MIGRATION_V6 = _base.Migration(
+    6,
+    "journal_v6_workspace_lifecycle",
+    MIGRATION_V6_STATEMENTS,
+)
+
+
+def install_workspace_lifecycle_migration(journal_cls: Type[object]) -> None:
+    if any(m.version == 6 for m in _base.MIGRATIONS):
+        return
+
+    _base.MIGRATIONS = (*_base.MIGRATIONS, MIGRATION_V6)
+    _base.JOURNAL_TABLES = frozenset((*_base.JOURNAL_TABLES, "workspace_lifecycle"))
+    _base._validate_migration_registry(_base.MIGRATIONS)
+
+    def migrate(self: object) -> None:
+        self._ensure_open()
+        _base.apply_migrations(
+            self._conn,
+            migrations=_base.MIGRATIONS,
+            now_fn=self._now_fn,
+        )
+
+    setattr(journal_cls, "migrate", migrate)
