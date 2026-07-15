@@ -5,59 +5,69 @@ Lokalny Bridge dla ChatGPT Plus i GitHuba, rozwijany etapami na podstawie potwie
 Aktualna faza:
 
 ```text
-GHB0-4 — Workspace recovery i effect journal
+GHB0-5 — Result staging i durable outbox
 ```
 
-## Zakres GHB0-4
+## Zakres GHB0-5
 
-Rdzeń zachowuje protokół `1.1` oraz dotychczasowe granice bezpieczeństwa. Nowa warstwa wykonawcza obejmuje:
+Rdzeń zachowuje protokół `1.1`, recovery worktree z GHB0-4 oraz dotychczasowe granice bezpieczeństwa. Nowa warstwa wyników obejmuje:
 
-- kontrolowany `WorkspaceManager` dla detached worktree z exact base SHA;
-- trwały, immutable operation plan zapisany przed zmianą pliku;
-- exact-byte SHA-256 dla treści przed i po edycji;
-- atomowy file effect: temp w katalogu targetu, flush, `fsync`, `os.replace` i ponowny odczyt bytes;
-- atomowy effect journal: workspace CAS, effect row, przejście command i event w jednym `BEGIN IMMEDIATE`;
-- idempotentne replaye planu i effectu z kontrolą wszystkich immutable pól;
-- recovery rozróżniający stany `BEFORE`, `PLANNED-AFTER`, `EFFECT` i `DIVERGED`;
-- atomowe przejście command/session do `MANUAL_RECONCILIATION_REQUIRED`;
-- zachowanie worktree i plików diagnostycznych przy failure lub divergence;
-- jedyny profil wykonawczy `poc_pytest`, uruchamiany jako `<python_executable> -m pytest -q` bez `shell=True`;
-- testy fault-injection, migration golden checksums oraz regresje Windows/Ubuntu.
+- `ResultStager`, który buduje deterministyczny wynik wyłącznie z trwałych rekordów session, command, plan, effect oraz kontrolowanego `ExecutionOutcome`;
+- `finalize_result()` jako jedyny finalny serializer, bez zmiany limitu 16 KiB ani end markera;
+- exact UTF-8 bytes bez BOM, dopisywania newline i normalizacji końców linii;
+- SHA-256 liczony z pełnych exact staged bytes;
+- atomowe `result + outbox + RESULT_STAGED + events` w jednym `BEGIN IMMEDIATE`;
+- tabelę SQLite `outbox` z persisted attempt count, next-attempt time, bounded diagnostic oraz trwałymi stanami `pending`, `published` i `collision`;
+- deterministyczny backoff `1, 2, 4, 8…`, ograniczony do 60 sekund, bez jittera i bez `sleep`;
+- `OutboxProcessor`, którego pojedyncze wywołanie wykonuje najwyżej jedną próbę publikacji jednego wpisu;
+- `ResultTransport` i `GitResultTransport` publikujące dokładnie jeden result path na branchu `results`, bez force-pusha;
+- ponowny odczyt exact remote bytes po pushu zamiast zaufania samemu exit code;
+- idempotentne rozpoznanie identycznego istniejącego remote resultu;
+- trwałe `RESULT_COLLISION` i przejście command/session do `MANUAL_RECONCILIATION_REQUIRED` bez nadpisania zdalnej treści;
+- recovery po crashu po pushu, ale przed lokalnym ACK, bez drugiego remote commita;
+- preservation session worktree oraz brak ponownego patcha po awarii publikacji.
 
 ## Recovery contract
 
 ```text
-BEFORE
-  target i physical state odpowiadają planowi before
-  → wykonaj lub dokończ zweryfikowany własny temp artifact
+EFFECT_RECORDED + brak staged result
+  → bez ponownego patcha dokończ profil/result
+  → atomowo stage result i enqueue outbox
 
-PLANNED-AFTER
-  target odpowiada planned-after, ale effect nie jest jeszcze zapisany
-  → zapisz effect bez ponownego patcha
+RESULT_STAGED
+  → nie uruchamiaj operacji ani profilu
+  → publikuj wyłącznie immutable staged result
 
-EFFECT
-  effect, Journal i physical state są zgodne
-  → nie stosuj patcha ponownie; profil może zostać ponowiony
+remote path absent
+  → jedna próba publikacji exact bytes
 
-DIVERGED
-  dowolna inna kombinacja stanu, obcy plik, zły HEAD lub mismatch Journalu
-  → MANUAL_RECONCILIATION_REQUIRED, bez cleanupu i bez usuwania dowodów
+remote path identical
+  → RESULT_PUBLISHED bez kolejnego pushu
+
+remote path different
+  → outbox collision
+  → command/session MANUAL_RECONCILIATION_REQUIRED
+
+push success + crash przed lokalnym ACK
+  → po restarcie odczytaj remote path
+  → identyczny hash oznacza RESULT_PUBLISHED bez ponownego commita
 ```
-
-Własny temp artifact jest rozpoznawany wyłącznie po ścieżce wynikającej z persisted plan hash. Jego bytes i hash muszą dokładnie odpowiadać `planned_after_content`. Obce temp/untracked pliki nie są usuwane.
 
 ## Granice
 
-GHB0-4 nie implementuje jeszcze:
+GHB0-5 nie implementuje jeszcze:
 
-- result outbox ani zdalnej publikacji wyników nowego runtime;
-- daemona, service lifecycle lub instance lock;
-- cleanupu worktree;
+- daemona ani pętli działającej stale;
+- CLI `start`, `stop` i `status`;
+- instance lock, PID lub heartbeat;
+- ACK protocol ani przejścia do `ACKNOWLEDGED`;
+- cleanupu session worktree;
+- uploadu artefaktów;
 - GUI, LSP, Browser Lab ani Hermesa;
 - integracji z GicleeApp;
-- podłączenia `ExecutionCoordinator` do legacy `PocBridge`;
-- nowych operacji ani ogólnego terminala.
+- nowych operacji lub ogólnego terminala;
+- podłączenia nowego runtime do legacy `PocBridge`.
 
-Legacy POC-0 pozostaje dostępny przez `bdb_poc` i `poc_bridge.py`, ale nowy execution runtime nie jest z nim jeszcze połączony.
+Legacy POC-0 pozostaje dostępny przez `bdb_poc` i `poc_bridge.py`, ale nie używa durable outboxu GHB0-5.
 
 Repozytorium nie może zawierać tokenów, sekretów, plików `.env` ani prywatnych danych użytkownika.

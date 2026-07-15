@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any, TYPE_CHECKING
 
 
 class Operation(StrEnum):
@@ -14,6 +15,34 @@ class ResultStatus(StrEnum):
     FAILED = "failed"
     TIMEOUT = "timeout"
     INTERNAL_ERROR = "internal_error"
+
+
+class OutboxState(StrEnum):
+    PENDING = "pending"
+    PUBLISHED = "published"
+    COLLISION = "collision"
+
+
+class RemoteResultState(StrEnum):
+    ABSENT = "absent"
+    PRESENT = "present"
+    UNAVAILABLE = "unavailable"
+
+
+class PublishAttemptState(StrEnum):
+    PUBLISHED = "published"
+    IDENTICAL = "identical"
+    BRANCH_MOVED = "branch_moved"
+    UNAVAILABLE = "unavailable"
+    COLLISION = "collision"
+
+
+class OutboxProcessState(StrEnum):
+    NO_DUE = "no_due"
+    PUBLISHED = "published"
+    ALREADY_PUBLISHED = "already_published"
+    RETRY_SCHEDULED = "retry_scheduled"
+    COLLISION = "collision"
 
 
 class BridgeErrorCode(StrEnum):
@@ -123,7 +152,9 @@ COMMAND_TRANSITIONS: dict[CommandState, frozenset[CommandState]] = {
     CommandState.EFFECT_RECORDED: frozenset(
         {CommandState.RESULT_STAGED, CommandState.MANUAL_RECONCILIATION_REQUIRED}
     ),
-    CommandState.RESULT_STAGED: frozenset({CommandState.RESULT_PUBLISHED}),
+    CommandState.RESULT_STAGED: frozenset(
+        {CommandState.RESULT_PUBLISHED, CommandState.MANUAL_RECONCILIATION_REQUIRED}
+    ),
     CommandState.RESULT_PUBLISHED: frozenset({CommandState.ACKNOWLEDGED}),
 }
 
@@ -249,6 +280,71 @@ class ResultRecord:
 
 
 @dataclass(frozen=True)
+class OutboxRecord:
+    command_id: str
+    session_id: str
+    sequence: int
+    result_sha256: str
+    remote_path: str
+    state: OutboxState
+    attempt_count: int
+    next_attempt_at: str | None
+    last_error: str | None
+    published_commit_sha: str | None
+    published_at: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class RemoteResult:
+    state: RemoteResultState
+    remote_path: str
+    content: bytes | None
+    content_sha256: str | None
+    commit_sha: str | None
+    results_head: str | None
+    diagnostic: str | None = None
+
+
+@dataclass(frozen=True)
+class PublishAttempt:
+    state: PublishAttemptState
+    remote_path: str
+    observed_head: str
+    commit_sha: str | None = None
+    remote_sha256: str | None = None
+    diagnostic: str | None = None
+
+
+@dataclass(frozen=True)
+class OutboxProcessOutcome:
+    state: OutboxProcessState
+    command_id: str | None
+    attempt_count: int | None
+    next_attempt_at: str | None
+    published_commit_sha: str | None = None
+    diagnostic: str | None = None
+
+
+@dataclass(frozen=True)
+class StagedResult:
+    command_id: str
+    result_json: str
+    result_bytes: bytes
+    result_sha256: str
+    remote_path: str
+
+
+@dataclass(frozen=True)
+class ResultCoordinationOutcome:
+    command_id: str
+    command_state: CommandState
+    staged: bool
+    publication: OutboxProcessOutcome | None = None
+
+
+@dataclass(frozen=True)
 class JournalEvent:
     event_id: int
     session_id: str | None
@@ -361,7 +457,6 @@ class PollReport:
     error_message: str | None
 
 
-from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .journal_ingestion import CollisionError
 

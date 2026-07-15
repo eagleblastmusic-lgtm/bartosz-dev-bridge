@@ -13,6 +13,7 @@ from .protocol import BridgeError
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+
 JOURNAL_TABLES = frozenset(
     {
         "schema_migrations",
@@ -28,6 +29,7 @@ JOURNAL_TABLES = frozenset(
         "pending_command_documents",
         "operation_plans",
         "operation_effects",
+        "outbox",
     }
 )
 
@@ -235,10 +237,34 @@ MIGRATION_V3_STATEMENTS: tuple[str, ...] = (
 )""",
 )
 
+MIGRATION_V4_STATEMENTS: tuple[str, ...] = (
+    """CREATE TABLE outbox (
+  command_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK (sequence > 0),
+  result_sha256 TEXT NOT NULL,
+  remote_path TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'published', 'collision')),
+  attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+  next_attempt_at TEXT,
+  last_error TEXT,
+  published_commit_sha TEXT,
+  published_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (command_id) REFERENCES results(command_id),
+  FOREIGN KEY (session_id) REFERENCES sessions(session_id),
+  UNIQUE (session_id, sequence),
+  UNIQUE (remote_path)
+)""",
+    "CREATE INDEX idx_outbox_due ON outbox(state, next_attempt_at, created_at, command_id)",
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "journal_v1_initial", MIGRATION_V1_STATEMENTS),
     Migration(2, "journal_v2_ingestion", MIGRATION_V2_STATEMENTS),
     Migration(3, "journal_v3_execution", MIGRATION_V3_STATEMENTS),
+    Migration(4, "journal_v4_result_outbox", MIGRATION_V4_STATEMENTS),
 )
 
 
@@ -358,7 +384,6 @@ def apply_migrations(
         while next_version <= len(migrations):
             migration = migration_map[next_version]
             if migration.version == 2:
-                # Check for multiple active sessions in existing database
                 cur = conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"
                 )
@@ -371,7 +396,6 @@ def apply_migrations(
                             BridgeErrorCode.JOURNAL_MIGRATION_MISMATCH,
                             "Cannot migrate to v2: multiple active or completing sessions exist in database",
                         )
-                # Check for multiple claimed/executing/effect_recorded commands
                 cur = conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'commands'"
                 )
