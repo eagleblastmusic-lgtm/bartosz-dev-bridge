@@ -164,6 +164,18 @@ class BridgeService:
             execute_outcome = "skipped"
         self._fault("AFTER_EXECUTE_PHASE")
 
+        # Execution is a safe phase boundary: observe a durable STOPPING request
+        # immediately after it finishes, before the service can enter another idle wait.
+        if self._should_stop(instance_id):
+            dt = (time.perf_counter() - t0) * 1000.0
+            return BridgeCycleReport(
+                recovery_outcome,
+                outbox_outcome,
+                ingest_outcome,
+                execute_outcome,
+                dt,
+            )
+
         dt = (time.perf_counter() - t0) * 1000.0
         return BridgeCycleReport(
             recovery_outcome=recovery_outcome,
@@ -205,7 +217,14 @@ class BridgeService:
 
                 self.run_cycle(instance_id)
 
+                # A stop requested during execution must not incur a complete
+                # idle_poll_seconds delay after that safe phase has finished.
+                if self._should_stop(instance_id):
+                    continue
+
                 self._fault("BEFORE_IDLE_WAIT")
+                if self._should_stop(instance_id):
+                    continue
                 self.waiter.wait(timeout=self.config.idle_poll_seconds)
                 self.waiter.clear()
 
