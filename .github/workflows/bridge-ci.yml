@@ -56,3 +56,13 @@ jobs:
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
       - name: Run tests
         run: python -m pytest -q
+      - name: Upload temporary source snapshot
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghb07-source-snapshot
+          include-hidden-files: true
+          path: |
+            .
+            !.git/**
+            !**/__pycache__/**
