@@ -31,6 +31,44 @@ MIGRATION_V6_STATEMENTS: tuple[str, ...] = (
   FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 )""",
     "CREATE INDEX idx_workspace_lifecycle_state ON workspace_lifecycle(state, updated_at, session_id)",
+    """CREATE TRIGGER workspace_lifecycle_validate_workspace_update
+BEFORE UPDATE OF revision, state_hash ON workspaces
+WHEN EXISTS (
+  SELECT 1 FROM workspace_lifecycle
+  WHERE session_id = OLD.session_id
+)
+AND NOT EXISTS (
+  SELECT 1 FROM workspace_lifecycle
+  WHERE session_id = OLD.session_id
+    AND workspace_path = OLD.workspace_path
+    AND base_sha = OLD.base_sha
+    AND expected_revision = OLD.revision
+    AND expected_state_hash = OLD.state_hash
+    AND disposition = 'preserve'
+    AND state = 'preserved'
+)
+BEGIN
+  SELECT RAISE(ABORT, 'workspace lifecycle identity conflict');
+END""",
+    """CREATE TRIGGER workspace_lifecycle_sync_workspace_update
+AFTER UPDATE OF revision, state_hash ON workspaces
+WHEN EXISTS (
+  SELECT 1 FROM workspace_lifecycle
+  WHERE session_id = OLD.session_id
+    AND workspace_path = OLD.workspace_path
+    AND base_sha = OLD.base_sha
+    AND expected_revision = OLD.revision
+    AND expected_state_hash = OLD.state_hash
+    AND disposition = 'preserve'
+    AND state = 'preserved'
+)
+BEGIN
+  UPDATE workspace_lifecycle
+  SET expected_revision = NEW.revision,
+      expected_state_hash = NEW.state_hash,
+      updated_at = NEW.updated_at
+  WHERE session_id = NEW.session_id;
+END""",
 )
 
 MIGRATION_V6 = _base.Migration(
