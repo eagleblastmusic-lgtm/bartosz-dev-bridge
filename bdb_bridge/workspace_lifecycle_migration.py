@@ -22,12 +22,12 @@ MIGRATION_V6_STATEMENTS: tuple[str, ...] = (
   state TEXT NOT NULL CHECK (
     state IN ('preserved', 'cleanup_requested', 'removing', 'removed', 'blocked')
   ),
-  requested_at TEXT,
-  started_at TEXT,
-  completed_at TEXT,
+  requested_at TEXT CHECK (requested_at IS NULL OR (length(requested_at) >= 20 AND substr(requested_at, -1) = 'Z')),
+  started_at TEXT CHECK (started_at IS NULL OR (length(started_at) >= 20 AND substr(started_at, -1) = 'Z')),
+  completed_at TEXT CHECK (completed_at IS NULL OR (length(completed_at) >= 20 AND substr(completed_at, -1) = 'Z')),
   last_error TEXT CHECK (last_error IS NULL OR length(last_error) <= 500),
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
+  created_at TEXT NOT NULL CHECK (length(created_at) >= 20 AND substr(created_at, -1) = 'Z'),
+  updated_at TEXT NOT NULL CHECK (length(updated_at) >= 20 AND substr(updated_at, -1) = 'Z'),
   FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 )""",
     "CREATE INDEX idx_workspace_lifecycle_state ON workspace_lifecycle(state, updated_at, session_id)",
