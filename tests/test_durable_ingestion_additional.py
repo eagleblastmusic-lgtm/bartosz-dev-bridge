@@ -5,7 +5,7 @@ import pytest
 
 from bdb_bridge.ingestion import CommandIngestor, calculate_raw_sha256
 from bdb_bridge.journal import Journal
-from bdb_bridge.journal_ingestion import get_session_ingestion, get_command_ingestion
+from bdb_bridge.journal_ingestion import get_session_ingestion, get_command_ingestion, CollisionError, _row_to_ingestion_issue
 from bdb_bridge.models import BridgeErrorCode, CommandState, SessionState
 from bdb_bridge.protocol import BridgeError
 from bdb_bridge.serializers import sha256_text
@@ -167,7 +167,7 @@ def test_v1_upgrade_session_ingestion_check(tmp_path: Path) -> None:
 
     # Record command for this session. Since session_ingestion is None, it must go to staging
     raw_content = json.dumps(command_payload(session_id="018f3f66-6cb3-4f66-9f2e-3d7647d1b701", sequence=1)).encode("utf-8")
-    rec, created = journal.record_ingested_command(
+    rec, created, _ = journal.record_ingested_command(
         source_id="commands",
         snapshot_sha="a" * 40,
         source_path="sessions/018f3f66-6cb3-4f66-9f2e-3d7647d1b701/commands/000001.json",
@@ -384,4 +384,341 @@ def test_registry_schema_verification(tmp_path: Path) -> None:
     from bdb_bridge.migrations import JOURNAL_TABLES
     unknown = user_tables - JOURNAL_TABLES
     assert not unknown, f"Found unregistered tables: {unknown}"
+    journal.close()
+
+
+def get_ingestion_issues(journal: Journal) -> list[IngestionIssue]:
+    rows = journal._connection.execute(
+        """
+        SELECT issue_id, source_id, source_path, snapshot_sha, document_commit_sha,
+               raw_sha256, session_id, command_id, error_code, detail, blocking, created_at
+        FROM ingestion_issues
+        """
+    ).fetchall()
+    return [_row_to_ingestion_issue(row) for row in rows]
+
+
+@pytest.mark.parametrize("collision_type", [
+    "manifest_collision",
+    "v1_session_collision",
+    "staged_command_collision",
+    "direct_command_collision",
+    "staged_promotion_collision"
+])
+def test_single_owner_of_blocked_event(tmp_path: Path, collision_type: str) -> None:
+    db_path = tmp_path / "journal.db"
+    journal = Journal.open(db_path, now_fn=fixed_now)
+
+    session_id = SESSION_ID
+    # Prepare base data depending on collision type
+    if collision_type == "manifest_collision":
+        manifest1 = manifest_payload(session_id)
+        journal.record_session_manifest(
+            source_id="commands",
+            snapshot_sha="a" * 40,
+            source_path=f"sessions/{session_id}/manifest.json",
+            session_id=session_id,
+            manifest_commit_sha="b" * 40,
+            raw_content=json.dumps(manifest1),
+            manifest_json=json.dumps(manifest1),
+            manifest_sha256=sha256_text(json.dumps(manifest1)),
+            raw_sha256="c" * 64,
+            repository_id="origin",
+            base_sha="a" * 40,
+            created_remote_at=fixed_now(),
+            expires_at="2026-07-15T09:00:00Z",
+        )
+
+        manifest2 = {**manifest1, "repository_id": "other"}
+        def trigger_collision():
+            with pytest.raises(CollisionError):
+                journal.record_session_manifest(
+                    source_id="commands",
+                    snapshot_sha="a" * 40,
+                    source_path=f"sessions/{session_id}/manifest.json",
+                    session_id=session_id,
+                    manifest_commit_sha="b" * 40,
+                    raw_content=json.dumps(manifest2),
+                    manifest_json=json.dumps(manifest2),
+                    manifest_sha256=sha256_text(json.dumps(manifest2)),
+                    raw_sha256="d" * 64,
+                    repository_id="other",
+                    base_sha="a" * 40,
+                    created_remote_at=fixed_now(),
+                    expires_at="2026-07-15T09:00:00Z",
+                )
+
+    elif collision_type == "v1_session_collision":
+        with journal._transaction():
+            journal._connection.execute(
+                "INSERT INTO sessions (session_id, repository_id, base_sha, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, "origin", "a" * 40, SessionState.CREATED.value, fixed_now(), fixed_now())
+            )
+
+        manifest = manifest_payload(session_id)
+        manifest["repository_id"] = "other"
+        def trigger_collision():
+            with pytest.raises(CollisionError):
+                journal.record_session_manifest(
+                    source_id="commands",
+                    snapshot_sha="a" * 40,
+                    source_path=f"sessions/{session_id}/manifest.json",
+                    session_id=session_id,
+                    manifest_commit_sha="b" * 40,
+                    raw_content=json.dumps(manifest),
+                    manifest_json=json.dumps(manifest),
+                    manifest_sha256=sha256_text(json.dumps(manifest)),
+                    raw_sha256="c" * 64,
+                    repository_id="other",
+                    base_sha="a" * 40,
+                    created_remote_at=fixed_now(),
+                    expires_at="2026-07-15T09:00:00Z",
+                )
+
+    elif collision_type == "staged_command_collision":
+        cmd1 = json.dumps(command_payload(session_id, 1)).encode("utf-8")
+        journal.record_ingested_command(
+            source_id="commands",
+            snapshot_sha="a" * 40,
+            source_path=f"sessions/{session_id}/commands/000001.json",
+            session_id=session_id,
+            sequence=1,
+            document_commit_sha="b" * 40,
+            raw_content=cmd1,
+            raw_sha256_value="c" * 64,
+        )
+
+        cmd2 = json.dumps({**command_payload(session_id, 1), "operation": "other"}).encode("utf-8")
+        def trigger_collision():
+            with pytest.raises(CollisionError):
+                journal.record_ingested_command(
+                    source_id="commands",
+                    snapshot_sha="a" * 40,
+                    source_path=f"sessions/{session_id}/commands/000001.json",
+                    session_id=session_id,
+                    sequence=1,
+                    document_commit_sha="b" * 40,
+                    raw_content=cmd2,
+                    raw_sha256_value="d" * 64,
+                )
+
+    elif collision_type == "direct_command_collision":
+        manifest = manifest_payload(session_id)
+        journal.record_session_manifest(
+            source_id="commands",
+            snapshot_sha="a" * 40,
+            source_path=f"sessions/{session_id}/manifest.json",
+            session_id=session_id,
+            manifest_commit_sha="b" * 40,
+            raw_content=json.dumps(manifest),
+            manifest_json=json.dumps(manifest),
+            manifest_sha256=sha256_text(json.dumps(manifest)),
+            raw_sha256="c" * 64,
+            repository_id="origin",
+            base_sha="a" * 40,
+            created_remote_at=fixed_now(),
+            expires_at="2026-07-15T09:00:00Z",
+        )
+
+        cmd1 = json.dumps(command_payload(session_id, 1)).encode("utf-8")
+        journal.record_ingested_command(
+            source_id="commands",
+            snapshot_sha="a" * 40,
+            source_path=f"sessions/{session_id}/commands/000001.json",
+            session_id=session_id,
+            sequence=1,
+            document_commit_sha="b" * 40,
+            raw_content=cmd1,
+            raw_sha256_value="c" * 64,
+        )
+
+        cmd2 = json.dumps({**command_payload(session_id, 1), "operation": "other"}).encode("utf-8")
+        def trigger_collision():
+            with pytest.raises(CollisionError):
+                journal.record_ingested_command(
+                    source_id="commands",
+                    snapshot_sha="a" * 40,
+                    source_path=f"sessions/{session_id}/commands/000001.json",
+                    session_id=session_id,
+                    sequence=1,
+                    document_commit_sha="d" * 40,
+                    raw_content=cmd2,
+                    raw_sha256_value="e" * 64,
+                )
+
+    elif collision_type == "staged_promotion_collision":
+        cmd1 = json.dumps(command_payload(session_id, 1)).encode("utf-8")
+        journal.record_ingested_command(
+            source_id="commands",
+            snapshot_sha="a" * 40,
+            source_path=f"sessions/{session_id}/commands/000001.json",
+            session_id=session_id,
+            sequence=1,
+            document_commit_sha="b" * 40,
+            raw_content=cmd1,
+            raw_sha256_value="c" * 64,
+        )
+
+        with journal._transaction():
+            journal._connection.execute(
+                "INSERT INTO sessions (session_id, repository_id, base_sha, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, "origin", "a" * 40, SessionState.CREATED.value, fixed_now(), fixed_now())
+            )
+            journal._connection.execute(
+                "INSERT INTO commands (command_id, session_id, sequence, command_sha256, command_json, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (f"{session_id}:000001", session_id, 1, "c" * 64, "{}", CommandState.DISCOVERED.value, fixed_now(), fixed_now())
+            )
+
+        manifest = manifest_payload(session_id)
+        def trigger_collision():
+            with pytest.raises(CollisionError):
+                journal.record_session_manifest(
+                    source_id="commands",
+                    snapshot_sha="a" * 40,
+                    source_path=f"sessions/{session_id}/manifest.json",
+                    session_id=session_id,
+                    manifest_commit_sha="b" * 40,
+                    raw_content=json.dumps(manifest),
+                    manifest_json=json.dumps(manifest),
+                    manifest_sha256=sha256_text(json.dumps(manifest)),
+                    raw_sha256="c" * 64,
+                    repository_id="origin",
+                    base_sha="a" * 40,
+                    created_remote_at=fixed_now(),
+                    expires_at="2026-07-15T09:00:00Z",
+                )
+
+    trigger_collision()
+
+    issues = get_ingestion_issues(journal)
+    assert len(issues) == 1
+    events = [e for e in journal.list_events() if e.event_type == "ingestion.blocked"]
+    assert len(events) == 1
+
+    journal.close()
+    journal = Journal.open(db_path, now_fn=fixed_now)
+
+    issues = get_ingestion_issues(journal)
+    assert len(issues) == 1
+    events = [e for e in journal.list_events() if e.event_type == "ingestion.blocked"]
+    assert len(events) == 1
+
+    for _ in range(10):
+        trigger_collision()
+
+    issues = get_ingestion_issues(journal)
+    assert len(issues) == 1
+    events = [e for e in journal.list_events() if e.event_type == "ingestion.blocked"]
+    assert len(events) == 1
+
+    journal.close()
+
+
+def test_invalid_utf8_ingestion_semantics(tmp_path: Path) -> None:
+    db_path = tmp_path / "journal.db"
+    journal = Journal.open(db_path, now_fn=fixed_now)
+
+    session_id = SESSION_ID
+    invalid_bytes = b"\xff\xfeinvalid_utf8"
+
+    # 1. staged command with invalid UTF-8 before manifest
+    journal.record_ingested_command(
+        source_id="commands",
+        snapshot_sha="e" * 40,
+        source_path=f"sessions/{session_id}/commands/000001.json",
+        session_id=session_id,
+        sequence=1,
+        document_commit_sha="0000000000000000000000000000000000000001",
+        raw_content=invalid_bytes,
+        raw_sha256_value=calculate_raw_sha256(invalid_bytes),
+    )
+
+    # 2. reopen Journal
+    journal.close()
+    journal = Journal.open(db_path, now_fn=fixed_now)
+
+    # 3. manifest appearance
+    snapshot_manifest = make_snapshot(session_id=session_id, sequences=())
+    ingestor = CommandIngestor(journal, FakeTransport(snapshot_manifest))
+    report = ingestor.poll_once()
+    assert report.error_code is None
+
+    # 4. staged row still exists
+    staged = journal._connection.execute(
+        "SELECT 1 FROM pending_command_documents WHERE session_id = ? AND sequence = 1",
+        (session_id,)
+    ).fetchone()
+    assert staged is not None
+
+    # 5. no commands row
+    cmd = journal.get_command(f"{session_id}:000001")
+    assert cmd is None
+
+    # 6. exactly one non-blocking issue
+    issues = get_ingestion_issues(journal)
+    assert len(issues) == 1
+    assert issues[0].error_code == BridgeErrorCode.INVALID_PAYLOAD.value
+    assert issues[0].blocking is False
+
+    # 7. no ingestion.blocked event
+    events = [e for e in journal.list_events() if e.event_type == "ingestion.blocked"]
+    assert len(events) == 0
+
+    # 8. attempt_count == 0
+    src = journal.get_ingestion_source("commands")
+    assert src.attempt_count == 0
+
+    # 9. poll_once does not return INGESTION_BLOCKED
+    report2 = ingestor.poll_once()
+    assert report2.error_code is None
+
+    # 10. valid command in another session is claimable
+    other_session = "018f3f66-6cb3-4f66-9f2e-3d7647d1b702"
+    snapshot_other = make_snapshot(session_id=other_session, sequences=(1,))
+    ingestor_other = CommandIngestor(journal, FakeTransport(snapshot_other))
+    report_other = ingestor_other.poll_once()
+    assert report_other.error_code is None
+
+    ingestor_other.validate_pending()
+
+    claimed = journal.claim_next_command()
+    assert claimed is not None
+    assert claimed.session_id == other_session
+
+    # repeat poll 10 times
+    for _ in range(10):
+        ingestor.poll_once()
+
+    issues = get_ingestion_issues(journal)
+    assert len(issues) == 1
+    events = [e for e in journal.list_events() if e.event_type == "ingestion.blocked"]
+    assert len(events) == 0
+    src = journal.get_ingestion_source("commands")
+    assert src.attempt_count == 0
+
+    # invalid UTF-8 post manifest
+    third_session = "018f3f66-6cb3-4f66-9f2e-3d7647d1b703"
+    snapshot_third = make_snapshot(session_id=third_session, sequences=())
+    ingestor_third = CommandIngestor(journal, FakeTransport(snapshot_third))
+    report_third = ingestor_third.poll_once()
+    assert report_third.error_code is None
+
+    journal.record_ingested_command(
+        source_id="commands",
+        snapshot_sha=snapshot_third.snapshot_sha,
+        source_path=f"sessions/{third_session}/commands/000001.json",
+        session_id=third_session,
+        sequence=1,
+        document_commit_sha="b" * 40,
+        raw_content=invalid_bytes,
+        raw_sha256_value=calculate_raw_sha256(invalid_bytes),
+    )
+
+    issues_all = get_ingestion_issues(journal)
+    assert len(issues_all) == 2
+
+    issue_third = [i for i in issues_all if i.session_id == third_session][0]
+    assert issue_third.error_code == BridgeErrorCode.INVALID_PAYLOAD.value
+    assert issue_third.blocking is False
+
     journal.close()
