@@ -12,7 +12,7 @@ from bdb_bridge.workspace_lifecycle_migration import MIGRATION_V6, MIGRATION_V6_
 NOW = "2026-07-15T21:00:00Z"
 SESSION = "018f3f66-6cb3-4f66-9f2e-3d7647d1b707"
 HASH = "sha256:" + "a" * 64
-V6_CHECKSUM = "44df37c558a1f315956f32ea4a4d865c239720d2f8d9471386b1fa8c9eb4fc97"
+V6_CHECKSUM = "e4cd247289ad5b7a7d3b19de5db04170d3df60680f97920b7d7e015813a1a140"
 
 
 def test_v6_registry_and_literal_checksum() -> None:
@@ -106,10 +106,12 @@ def test_constraints_one_row_and_no_delete_api(tmp_path: Path) -> None:
 def test_corrupted_lifecycle_row_maps_to_journal_corrupt(tmp_path: Path) -> None:
     journal = Journal.open(tmp_path / "corrupt.db", now_fn=lambda: NOW)
     journal._connection.execute("INSERT INTO sessions VALUES(?,?,?,?,?,?)", (SESSION, "repo", "a" * 40, "active", NOW, NOW))
+    journal._connection.execute("PRAGMA ignore_check_constraints=ON")
     journal._connection.execute(
         "INSERT INTO workspace_lifecycle VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (SESSION, str(tmp_path / SESSION), "a" * 40, 0, HASH, "preserve", "preserved", None, None, None, None, "bad-time", NOW),
     )
+    journal._connection.execute("PRAGMA ignore_check_constraints=OFF")
     with pytest.raises(BridgeError) as exc:
         journal.get_workspace_lifecycle(SESSION)
     assert exc.value.code == "journal_corrupt"
