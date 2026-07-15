@@ -6,6 +6,8 @@ import subprocess
 from functools import wraps
 from typing import Any, Callable, Type
 
+from .journal import Journal
+from .manual_preserve import install_manual_pre_preserve
 from .migrations import map_sqlite_error
 from .protocol import BridgeError, sanitize_diagnostics
 
@@ -43,3 +45,6 @@ def install_workspace_lifecycle_error_mapping(coordinator_cls: Type[object]) -> 
 
         wrapped._ghb07_error_mapped = True
         setattr(coordinator_cls, name, wrapped)
+
+
+install_manual_pre_preserve(Journal)
