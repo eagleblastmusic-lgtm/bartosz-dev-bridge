@@ -49,8 +49,10 @@ def install_workspace_lifecycle_migration(journal_cls: Type[object]) -> None:
     _base._validate_migration_registry(_base.MIGRATIONS)
 
     def migrate(self: object) -> None:
+        from . import journal as _journal
+
         self._ensure_open()
-        _base.apply_migrations(
+        _journal.apply_migrations(
             self._conn,
             migrations=_base.MIGRATIONS,
             now_fn=self._now_fn,
