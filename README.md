@@ -2,14 +2,16 @@
 
 Minimalna implementacja **POC-0** lokalnego Bridge'a dla ChatGPT Plus i GitHuba, zgodna z dokumentacją projektową v1.1.
 
-Aktualny branch implementacyjny:
+Aktualna faza:
 
 ```text
-gpt/poc-0-bootstrap
+GHB0-1 — stabilne granice rdzenia
 ```
 
-Zakres obejmuje wyłącznie:
+Zakres obejmuje:
 
+- pakiet `bdb_bridge` ze stabilnymi granicami protokołu v1.1 (walidacja, serializacja, konfiguracja, modele);
+- warstwę wykonawczą `bdb_poc` z zachowaną kompatybilnością importów POC-0;
 - jednorazowy `poc_bridge.py`;
 - syntetyczne repozytorium `bdb-poc-fixture`;
 - polling branchu `commands`;

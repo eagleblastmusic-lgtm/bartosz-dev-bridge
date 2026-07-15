@@ -50,6 +50,9 @@ jobs:
             }
           }
       - name: Compile Bridge
-        run: python -m py_compile poc_bridge.py
+        run: |
+          python -m py_compile poc_bridge.py
+          python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
+          python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
       - name: Run tests
         run: python -m pytest -q
