@@ -23,10 +23,6 @@ def test_v6_registry_and_literal_checksum() -> None:
     assert MIGRATION_V6.statements == MIGRATION_V6_STATEMENTS
 
 
-def test_empty_and_reopen_apply_v6() -> None:
-    pass
-
-
 def test_empty_and_reopen_apply_v6(tmp_path: Path) -> None:
     path = tmp_path / "journal.db"
     journal = Journal.open(path, now_fn=lambda: NOW)
