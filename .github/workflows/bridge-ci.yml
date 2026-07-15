@@ -10,27 +10,6 @@ permissions:
   contents: read
 
 jobs:
-  snapshot:
-    name: Temporary source snapshot
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ghb07-source-snapshot
-          include-hidden-files: true
-          path: |
-            README.md
-            pyproject.toml
-            poc_bridge.py
-            bdb_bridge
-            bdb_poc
-            bdb-poc-fixture
-            tests
-            scripts
-            .github
-            docs
-
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
