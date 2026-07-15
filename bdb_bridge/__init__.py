@@ -140,3 +140,6 @@ __all__ = [
     "validate_base_sha", "validate_path_pattern", "validate_repo_relative_path",
     "validate_session_id", "parse_git_ref", "sanitize_diagnostics",
 ]
+
+from .ghb07_cli import install_cli
+install_cli()
