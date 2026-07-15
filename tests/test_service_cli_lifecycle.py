@@ -1,94 +1,43 @@
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+
 import pytest
 
-from bdb_bridge import Journal, ServiceStatusReader, ServiceStatus, InstanceLock, BridgeConfig
+from bdb_bridge import Journal, ServiceInstanceState, is_pid_alive
+from tests.helpers.service_lifecycle_fixture import (
+    assert_lock_is_free,
+    cli_command,
+    make_service_config,
+    read_status,
+    wait_for_heartbeat_change,
+    wait_for_status,
+)
 
 
-@pytest.fixture
-def make_config_file(tmp_path: Path):
-    def _make():
-        control = tmp_path / "control"
-        control.mkdir(parents=True, exist_ok=True)
-        # Initialize bare-like or simple git repo to make transports happy
-        subprocess.run(["git", "init"], cwd=control, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # Configure local settings for tests
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=control)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=control)
+def test_foreground_cli_lifecycle_full_contract(tmp_path: Path) -> None:
+    config, config_path, durable_marker = make_service_config(
+        tmp_path,
+        heartbeat_interval_seconds=0.2,
+        heartbeat_stale_seconds=5.0,
+        idle_poll_seconds=2.0,
+    )
+    journal_path = Path(config.journal_path)
+    worktree_root = Path(config.worktree_root)
+    lock_path = Path(config.runtime_dir) / "bridge.instance.lock"
 
-        # Create an initial commit to have a valid HEAD
-        (control / "dummy.txt").write_text("initial")
-        subprocess.run(["git", "add", "dummy.txt"], cwd=control)
-        subprocess.run(["git", "commit", "-m", "initial commit"], cwd=control)
+    initial = read_status(config_path)
+    assert initial["status"] == "OFFLINE"
+    assert initial["instance_id"] is None
+    assert initial["pid"] is None
+    assert initial["lock_held"] is False
 
-        # Create commands and results branch
-        subprocess.run(["git", "checkout", "-b", "commands"], cwd=control, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["git", "checkout", "-b", "results"], cwd=control, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["git", "checkout", "main"], cwd=control, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        cfg = BridgeConfig(
-            control_repo_path=control,
-            fixture_repo_path=tmp_path / "fixture",
-            worktree_root=tmp_path / "worktrees",
-            runtime_dir=tmp_path / "runtime",
-            heartbeat_stale_seconds=5.0,
-            heartbeat_interval_seconds=1.0,
-            idle_poll_seconds=1.0,
-        )
-        (tmp_path / "runtime").mkdir(parents=True, exist_ok=True)
-
-        cfg_dict = {
-            "schema_version": "1.1",
-            "control_repo_path": str(control),
-            "fixture_repo_path": str(tmp_path / "fixture"),
-            "worktree_root": str(tmp_path / "worktrees"),
-            "runtime_dir": str(tmp_path / "runtime"),
-            "heartbeat_stale_seconds": 5.0,
-            "heartbeat_interval_seconds": 1.0,
-            "idle_poll_seconds": 1.0,
-        }
-
-        cfg_path = tmp_path / "config.json"
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump(cfg_dict, f, indent=2)
-
-        return cfg, cfg_path
-    return _make
-
-
-def test_foreground_cli_lifecycle(make_config_file) -> None:
-    config, config_path = make_config_file()
-
-    # 1. Query status initially - should be OFFLINE
-    status_cmd = [
-        sys.executable,
-        "-m", "bdb_bridge",
-        "bridge", "status",
-        "--config", str(config_path),
-        "--json"
-    ]
-    res = subprocess.run(status_cmd, capture_output=True, text=True)
-    assert res.returncode == 0
-    status_data = json.loads(res.stdout.strip())
-    assert status_data["status"] == "OFFLINE"
-    assert status_data["lock_held"] is False
-    assert status_data["pid"] is None
-
-    # 2. Start the service process in foreground (using Popen since start --foreground blocks)
-    start_cmd = [
-        sys.executable,
-        "-m", "bdb_bridge",
-        "bridge", "start",
-        "--config", str(config_path),
-        "--foreground"
-    ]
-
+    start_cmd = cli_command(config_path, "start", "--foreground")
+    stop_cmd = cli_command(config_path, "stop")
     proc = subprocess.Popen(
         start_cmd,
         stdout=subprocess.PIPE,
@@ -96,60 +45,133 @@ def test_foreground_cli_lifecycle(make_config_file) -> None:
         text=True,
     )
 
-    # Wait for the service to start and write RUNNING state
-    start_time = time.time()
-    running = False
-    proc_pid = None
+    try:
+        running = wait_for_status(config_path, "RUNNING")
+        assert running["instance_id"].startswith("inst-")
+        assert running["pid"] == proc.pid
+        assert running["lock_held"] is True
+        assert running["pid_alive"] is True
+        assert is_pid_alive(proc.pid) is True
+        first_heartbeat = running["heartbeat_at"]
+        assert isinstance(first_heartbeat, str)
 
-    while time.time() - start_time < 10.0:
-        time.sleep(0.5)
-        res_status = subprocess.run(status_cmd, capture_output=True, text=True)
-        if res_status.returncode == 0:
-            status_data = json.loads(res_status.stdout.strip())
-            if status_data["status"] == "RUNNING":
-                running = True
-                proc_pid = status_data["pid"]
+        progressed = wait_for_heartbeat_change(config_path, first_heartbeat)
+        assert progressed["heartbeat_at"] != first_heartbeat
+        assert progressed["instance_id"] == running["instance_id"]
+
+        second = subprocess.run(start_cmd, capture_output=True, text=True, check=False)
+        assert second.returncode == 1
+        assert "Another bridge instance is already running" in second.stderr
+
+        stop = subprocess.run(stop_cmd, capture_output=True, text=True, check=False)
+        assert stop.returncode == 0
+        assert "Graceful stop request sent successfully" in stop.stdout
+
+        observed_stopping = False
+        deadline = time.monotonic() + 4.0
+        final_status = None
+        while time.monotonic() < deadline:
+            final_status = read_status(config_path)
+            if final_status["status"] == "STOPPING":
+                observed_stopping = True
+            if final_status["status"] == "OFFLINE":
                 break
+            time.sleep(0.05)
+        assert observed_stopping is True
+        assert final_status is not None and final_status["status"] == "OFFLINE"
 
-        # If the process exited early, fail the test and print logs
-        if proc.poll() is not None:
-            stdout, stderr = proc.communicate()
-            pytest.fail(f"Service process exited prematurely. stdout: {stdout}, stderr: {stderr}")
+        proc.wait(timeout=8.0)
+        assert proc.returncode == 0
+    finally:
+        if proc.poll() is None:
+            subprocess.run(stop_cmd, capture_output=True, text=True, check=False)
+            proc.wait(timeout=10.0)
 
-    assert running is True
-    assert proc_pid is not None
-    from bdb_bridge import is_pid_alive
-    assert is_pid_alive(proc_pid) is True
+    assert journal_path.exists()
+    assert worktree_root.is_dir()
+    assert durable_marker.read_bytes() == b"keep-me"
+    assert lock_path.exists()
+    assert_lock_is_free(config)
 
-    # 3. Double start rejection (should fail lock acquisition)
-    res_double = subprocess.run(start_cmd, capture_output=True, text=True)
-    assert res_double.returncode == 1
-    assert "Error: Another bridge instance is already running" in res_double.stderr
+    journal = Journal.open(journal_path)
+    latest = journal.get_latest_service_instance()
+    assert latest is not None
+    assert latest.state == ServiceInstanceState.STOPPED
+    assert latest.exit_code == 0
+    journal.close()
 
-    # 4. Request Graceful Stop
-    stop_cmd = [
-        sys.executable,
-        "-m", "bdb_bridge",
-        "bridge", "stop",
-        "--config", str(config_path),
-    ]
-    res_stop = subprocess.run(stop_cmd, capture_output=True, text=True)
-    assert res_stop.returncode == 0
-    assert "Graceful stop request sent successfully" in res_stop.stdout
+    from bdb_bridge import cli, service
 
-    # 5. Verify transition to STOPPING, then clean exit to OFFLINE
-    start_time = time.time()
-    stopped = False
-    while time.time() - start_time < 10.0:
-        res_status = subprocess.run(status_cmd, capture_output=True, text=True)
-        status_data = json.loads(res_status.stdout.strip())
-        if status_data["status"] == "OFFLINE":
-            stopped = True
-            break
-        time.sleep(0.5)
+    source = Path(cli.__file__).read_text(encoding="utf-8") + Path(service.__file__).read_text(encoding="utf-8")
+    for forbidden in ("taskkill", "TerminateProcess", "powershell", "schtasks", "CreateService"):
+        assert forbidden.lower() not in source.lower()
 
-    assert stopped is True
 
-    # Verify the child process terminated with exit code 0
-    proc.wait(timeout=5.0)
-    assert proc.returncode == 0
+@pytest.mark.skipif(sys.platform == "win32", reason="non-Windows contract only")
+def test_background_is_controlled_unsupported_on_non_windows(tmp_path: Path) -> None:
+    _config, config_path, _marker = make_service_config(tmp_path)
+    completed = subprocess.run(
+        cli_command(config_path, "start", "--background"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 1
+    assert "only supported on Windows" in completed.stderr
+
+
+def test_fault_after_instance_lock_before_db_start_is_controlled_and_recoverable(
+    tmp_path: Path,
+) -> None:
+    config, config_path, durable_marker = make_service_config(
+        tmp_path,
+        idle_poll_seconds=0.5,
+    )
+    journal_path = Path(config.journal_path)
+    journal = Journal.open(journal_path)
+    journal.close()
+
+    env = os.environ.copy()
+    env["BDB_FAULT_POINT"] = "AFTER_INSTANCE_LOCK_BEFORE_DB_START"
+    faulted = subprocess.run(
+        cli_command(config_path, "start", "--foreground"),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert faulted.returncode == 2
+    assert "Controlled lifecycle fault" in faulted.stderr
+    assert "AFTER_INSTANCE_LOCK_BEFORE_DB_START" in faulted.stderr
+
+    reopened = Journal.open(journal_path)
+    assert reopened.get_active_service_instance() is None
+    reopened.close()
+    assert journal_path.exists()
+    assert durable_marker.read_bytes() == b"keep-me"
+    assert_lock_is_free(config)
+
+    start_cmd = cli_command(config_path, "start", "--foreground")
+    stop_cmd = cli_command(config_path, "stop")
+    proc = subprocess.Popen(
+        start_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        running = wait_for_status(config_path, "RUNNING")
+        assert running["pid"] == proc.pid
+        stopped = subprocess.run(stop_cmd, capture_output=True, text=True, check=False)
+        assert stopped.returncode == 0
+        wait_for_status(config_path, "OFFLINE")
+        proc.wait(timeout=8.0)
+        assert proc.returncode == 0
+    finally:
+        if proc.poll() is None:
+            subprocess.run(stop_cmd, capture_output=True, text=True, check=False)
+            proc.wait(timeout=10.0)
+
+    assert journal_path.exists()
+    assert durable_marker.read_bytes() == b"keep-me"
+    assert_lock_is_free(config)
