@@ -34,7 +34,8 @@ def test_cleanup_removes_only_exact_completed_worktree_and_is_idempotent(tmp_pat
     assert outcome.removed and outcome.state is WorkspaceLifecycleState.REMOVED
     assert not wm.path.exists()
     assert unrelated.exists()
-    assert str(unrelated) in git(Path(cfg.fixture_repo_path), "worktree", "list", "--porcelain")
+    listing = git(Path(cfg.fixture_repo_path), "worktree", "list", "--porcelain").replace("\\", "/")
+    assert unrelated.resolve().as_posix() in listing
     assert git(Path(cfg.fixture_repo_path), "status", "--porcelain=v1") == ""
     replay = _locked(cfg, lambda: coordinator.cleanup(SESSION, confirm_session_id=SESSION, lock_held=True))
     assert replay.already_removed and not replay.removed

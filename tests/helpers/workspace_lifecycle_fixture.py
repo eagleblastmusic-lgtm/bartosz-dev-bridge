@@ -21,11 +21,16 @@ def git(repo: Path, *args: str) -> str:
 
 def make_fixture(root: Path, *, session_id: str = SESSION, session_state: SessionState = SessionState.COMPLETED, command_state: CommandState = CommandState.RESULT_PUBLISHED):
     fixture = root / "fixture"
-    shutil.copytree(Path(__file__).parents[2] / "bdb-poc-fixture", fixture)
+    shutil.copytree(
+        Path(__file__).parents[2] / "bdb-poc-fixture",
+        fixture,
+        ignore=shutil.ignore_patterns(".pytest_cache", "__pycache__", "*.pyc"),
+    )
     git(fixture, "init", "-b", "main")
+    git(fixture, "config", "core.autocrlf", "false")
     git(fixture, "config", "user.name", "Test")
     git(fixture, "config", "user.email", "test@example.invalid")
-    git(fixture, "add", "--", ".gitignore", "pyproject.toml", "src", "tests")
+    git(fixture, "add", "--", ".gitattributes", ".gitignore", "pyproject.toml", "src", "tests")
     git(fixture, "commit", "-m", "baseline")
     base = git(fixture, "rev-parse", "HEAD")
     control = root / "control"

@@ -16,6 +16,8 @@ from tests.helpers.recovery_gate_fixture import (
     wait_for,
 )
 
+CLAMP_LF = b"def clamp_percent(value: int) -> int:\n    return value\n"
+
 
 def test_command_collision_is_persisted_hash_only_and_blocks_execution(tmp_path: Path) -> None:
     env = setup_gate_environment(tmp_path / "command-collision")
@@ -198,3 +200,14 @@ def test_second_real_process_is_rejected_by_os_lock(tmp_path: Path) -> None:
     assert "already running" in second.stderr.lower()
     assert "Traceback" not in second.stderr
     stop_and_wait(env, first)
+
+
+def test_gate_fixture_keeps_lf_bytes_through_detached_worktree(tmp_path: Path) -> None:
+    """Regression: Windows autocrlf must not turn replace_exact old=...\\n into 0 matches."""
+    env = setup_gate_environment(tmp_path / "lf-worktree")
+    assert (env.fixture / "src" / "clamp.py").read_bytes() == CLAMP_LF
+    worktree = env.worktrees / "detached-check"
+    env.worktrees.mkdir(parents=True, exist_ok=True)
+    git(env.fixture, "worktree", "add", "--detach", str(worktree), env.base_sha)
+    assert (worktree / "src" / "clamp.py").read_bytes() == CLAMP_LF
+    assert (worktree / "src" / "clamp.py").read_text(encoding="utf-8").count("    return value\n") == 1

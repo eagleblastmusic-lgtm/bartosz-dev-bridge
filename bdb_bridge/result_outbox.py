@@ -251,10 +251,22 @@ class ResultCoordinator:
         outcome = execution.execute_or_recover(command_id)
         finished_at = self.now_fn()
         command = self.journal.get_command(command_id)
-        session = self.journal.get_session(command.session_id) if command else None
+        if command is None:
+            raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Execution recovery did not preserve command/session/plan/effect")
+        # Divergence / policy / stale paths are terminal without a durable effect+result.
+        if command.state in {
+            CommandState.MANUAL_RECONCILIATION_REQUIRED,
+            CommandState.POLICY_DENIED,
+            CommandState.STALE_REVISION,
+            CommandState.STATE_MISMATCH,
+            CommandState.REJECTED,
+            CommandState.EXPIRED,
+        }:
+            return ResultCoordinationOutcome(command_id, command.state, staged=False)
+        session = self.journal.get_session(command.session_id)
         plan = self.journal.get_operation_plan(command_id)
         effect = self.journal.get_operation_effect(command_id)
-        if command is None or session is None or plan is None or effect is None:
+        if session is None or plan is None or effect is None:
             raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Execution recovery did not preserve command/session/plan/effect")
         value = ResultBuildInput(session, command, plan, effect, outcome, started_at, finished_at)
         staged = self.stager.build(value)

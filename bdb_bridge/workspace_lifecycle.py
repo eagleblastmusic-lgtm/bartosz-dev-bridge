@@ -164,11 +164,12 @@ class WorkspaceLifecycleCoordinator:
             ):
                 reasons.append("workspace lifecycle identity mismatch")
 
-            manager = self._workspace_manager(session_id)
             try:
+                manager = self._workspace_manager(session_id)
                 manager._assert_expected_path()
             except BridgeError as exc:
                 reasons.append(sanitize_diagnostics(str(exc)))
+                return WorkspaceEligibility(False, tuple(dict.fromkeys(reasons)))
             present = manager.path.exists()
             registrations = self._registration_count(manager)
             if not present:
@@ -270,7 +271,10 @@ class WorkspaceLifecycleCoordinator:
         if lifecycle.state is WorkspaceLifecycleState.REMOVED:
             return WorkspaceCleanupOutcome(session_id, lifecycle.state, False, True)
 
-        manager = self._workspace_manager(session_id)
+        try:
+            manager = self._workspace_manager(session_id)
+        except BridgeError as exc:
+            return self._block(session_id, sanitize_diagnostics(str(exc)))
         present = manager.path.exists()
         registrations = self._registration_count(manager)
         if lifecycle.state in {

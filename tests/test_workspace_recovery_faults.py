@@ -19,11 +19,16 @@ def run_git(repo: Path, *args: str) -> str:
 def init_fixture(root: Path) -> tuple[Path, str]:
     root.mkdir(parents=True, exist_ok=True)
     fixture = root / 'fixture'
-    shutil.copytree(Path(__file__).parents[1] / 'bdb-poc-fixture', fixture)
+    shutil.copytree(
+        Path(__file__).parents[1] / 'bdb-poc-fixture',
+        fixture,
+        ignore=shutil.ignore_patterns('.pytest_cache', '__pycache__', '*.pyc'),
+    )
     run_git(fixture, 'init', '-b', 'main')
+    run_git(fixture, 'config', 'core.autocrlf', 'false')
     run_git(fixture, 'config', 'user.name', 'Test')
     run_git(fixture, 'config', 'user.email', 'test@example.invalid')
-    run_git(fixture, 'add', '--', '.gitignore', 'pyproject.toml', 'src', 'tests')
+    run_git(fixture, 'add', '--', '.gitattributes', '.gitignore', 'pyproject.toml', 'src', 'tests')
     run_git(fixture, 'commit', '-m', 'baseline')
     return fixture, run_git(fixture, 'rev-parse', 'HEAD')
 

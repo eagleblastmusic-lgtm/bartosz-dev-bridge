@@ -59,17 +59,39 @@ def git(repo: Path, *args: str, text: bool = True):
     return _run(["git", "-C", str(repo), *args], text=text)
 
 
+_TEXT_SUFFIXES = {".py", ".toml", ".md", ".txt", ".json", ".gitignore"}
+
+
+def _normalize_copied_fixture_to_lf(root: Path) -> None:
+    """Keep exact replace_exact payloads stable under Windows core.autocrlf=true."""
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix not in _TEXT_SUFFIXES and path.name != ".gitignore":
+            continue
+        data = path.read_bytes()
+        if b"\r\n" in data or b"\r" in data:
+            path.write_bytes(data.replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
+
+
 def setup_gate_environment(root: Path, *, session_id: str | None = None) -> GateEnvironment:
     root.mkdir(parents=True, exist_ok=True)
     session_id = session_id or str(uuid.uuid4())
     command_id = f"{session_id}:000001"
 
     fixture = root / "fixture"
-    shutil.copytree(Path(__file__).parents[2] / "bdb-poc-fixture", fixture)
+    shutil.copytree(
+        Path(__file__).parents[2] / "bdb-poc-fixture",
+        fixture,
+        ignore=shutil.ignore_patterns(".pytest_cache", "__pycache__", "*.pyc"),
+    )
+    _normalize_copied_fixture_to_lf(fixture)
     git(fixture, "init", "-b", "main")
+    # Worktree checkouts inherit this local config; keep bytes LF for exact replace.
+    git(fixture, "config", "core.autocrlf", "false")
     git(fixture, "config", "user.name", "GHB0 Gate")
     git(fixture, "config", "user.email", "gate@example.invalid")
-    git(fixture, "add", "--", ".gitignore", "pyproject.toml", "src", "tests")
+    git(fixture, "add", "--", ".gitattributes", ".gitignore", "pyproject.toml", "src", "tests")
     git(fixture, "commit", "-m", "baseline")
     base_sha = git(fixture, "rev-parse", "HEAD").stdout.strip()
 
