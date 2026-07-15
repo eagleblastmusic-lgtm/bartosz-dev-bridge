@@ -47,6 +47,7 @@ def test_empty_db_applies_all_migrations(tmp_path: Path) -> None:
             "pending_command_documents",
             "operation_plans",
             "operation_effects",
+            "outbox",
         }
         migrations = journal._connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
@@ -55,6 +56,7 @@ def test_empty_db_applies_all_migrations(tmp_path: Path) -> None:
             (1, "journal_v1_initial"),
             (2, "journal_v2_ingestion"),
             (3, "journal_v3_execution"),
+            (4, "journal_v4_result_outbox"),
         ]
     finally:
         journal.close()
@@ -87,7 +89,7 @@ def test_reopen_is_noop(tmp_path: Path) -> None:
     journal = Journal.open(path, now_fn=fixed_now)
     try:
         rows = journal._connection.execute("SELECT version FROM schema_migrations").fetchall()
-        assert rows == [(1,), (2,), (3,)]
+        assert rows == [(1,), (2,), (3,), (4,)]
     finally:
         journal.close()
 
@@ -157,7 +159,7 @@ def test_name_mismatch_detected(tmp_path: Path) -> None:
 def test_future_schema_version_rejected(tmp_path: Path) -> None:
     journal = open_db(tmp_path)
     journal._connection.execute(
-        "INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (4, 'future', 'abc', ?)",
+        "INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (5, 'future', 'abc', ?)",
         (FIXED_NOW,),
     )
     journal._connection.commit()
@@ -266,7 +268,7 @@ def test_concurrent_open_empty_db_creates_schema_once(tmp_path: Path) -> None:
     conn = sqlite3.connect(path)
     versions = conn.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
     conn.close()
-    assert versions == [(1,), (2,), (3,)]
+    assert versions == [(1,), (2,), (3,), (4,)]
 
 
 def test_journal_open_closes_connection_on_migration_failure(tmp_path: Path) -> None:
@@ -315,6 +317,7 @@ def test_upgrade_existing_v1_database_to_v2(tmp_path: Path) -> None:
             (1, "journal_v1_initial"),
             (2, "journal_v2_ingestion"),
             (3, "journal_v3_execution"),
+            (4, "journal_v4_result_outbox"),
         ]
         assert journal._connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='ingestion_sources'"
@@ -370,10 +373,9 @@ def test_upgrade_existing_v1_database_to_v2_with_data(tmp_path: Path) -> None:
 
     conn.close()
 
-    # 3. Apply v2 migration
+    # 3. Apply remaining migrations
     journal = Journal.open(path, now_fn=fixed_now)
     try:
-        # Check all versions
         versions = journal._connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall()
@@ -381,9 +383,9 @@ def test_upgrade_existing_v1_database_to_v2_with_data(tmp_path: Path) -> None:
             (1, "journal_v1_initial"),
             (2, "journal_v2_ingestion"),
             (3, "journal_v3_execution"),
+            (4, "journal_v4_result_outbox"),
         ]
 
-        # Verify data preserved byte-for-byte
         v2_sessions = journal._connection.execute("SELECT session_id, repository_id, base_sha, state, created_at, updated_at FROM sessions ORDER BY session_id").fetchall()
         assert v2_sessions == v1_sessions
 
@@ -411,7 +413,6 @@ def test_upgrade_rejects_two_active_sessions_and_rolls_back(tmp_path: Path) -> N
     conn.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)", ("s1", "repo1", "a" * 40, "active", now, now))
     conn.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)", ("s2", "repo1", "b" * 40, "completing", now, now))
 
-    # Save original v1 sessions
     v1_sessions = conn.execute("SELECT * FROM sessions").fetchall()
 
     with pytest.raises(BridgeError) as exc:
@@ -419,16 +420,13 @@ def test_upgrade_rejects_two_active_sessions_and_rolls_back(tmp_path: Path) -> N
     assert exc.value.code == BridgeErrorCode.JOURNAL_MIGRATION_MISMATCH
     assert not conn.in_transaction
 
-    # Ensure v2 tables/indexes are absent
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert "ingestion_sources" not in tables
     assert "pending_command_documents" not in tables
 
-    # Ensure version is still 1
     versions = conn.execute("SELECT version FROM schema_migrations").fetchall()
     assert versions == [(1,)]
 
-    # Check sessions data is preserved
     v1_sessions_after = conn.execute("SELECT * FROM sessions").fetchall()
     assert v1_sessions_after == v1_sessions
     conn.close()
@@ -444,7 +442,6 @@ def test_upgrade_rejects_two_active_workers_and_rolls_back(tmp_path: Path) -> No
     conn.execute("INSERT INTO commands VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("c1", "s1", 1, "sha256:" + "a" * 64, '{}', "c" * 40, "executing", 0, "hash1", now, now))
     conn.execute("INSERT INTO commands VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("c2", "s1", 2, "sha256:" + "b" * 64, '{}', "d" * 40, "claimed", 0, "hash2", now, now))
 
-    # Save original v1 data
     v1_commands = conn.execute("SELECT * FROM commands").fetchall()
 
     with pytest.raises(BridgeError) as exc:
@@ -452,15 +449,12 @@ def test_upgrade_rejects_two_active_workers_and_rolls_back(tmp_path: Path) -> No
     assert exc.value.code == BridgeErrorCode.JOURNAL_MIGRATION_MISMATCH
     assert not conn.in_transaction
 
-    # Ensure v2 tables/indexes are absent
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert "ingestion_sources" not in tables
 
-    # Ensure version is still 1
     versions = conn.execute("SELECT version FROM schema_migrations").fetchall()
     assert versions == [(1,)]
 
-    # Check commands data is preserved
     v1_commands_after = conn.execute("SELECT * FROM commands").fetchall()
     assert v1_commands_after == v1_commands
     conn.close()
