@@ -230,6 +230,10 @@ def test_after_execute_claim_reopens_without_second_claim_or_duplicate_effect(
         "UPDATE commands SET state = ? WHERE command_id = ?",
         (CommandState.VALIDATED.value, COMMAND),
     )
+    journal._connection.execute(
+        "UPDATE session_ingestion SET expires_at = ? WHERE session_id = ?",
+        ("2099-01-01T00:00:00Z", SESSION),
+    )
     transport = FakeTransport()
     processor = OutboxProcessor(journal, transport, now_fn=lambda: NOW)
     coordinator = ResultCoordinator(cfg, journal, processor, now_fn=lambda: NOW)
