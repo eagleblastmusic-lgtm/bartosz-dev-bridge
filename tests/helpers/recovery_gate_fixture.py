@@ -214,8 +214,7 @@ def wait_for(
 def stop_and_wait(env: GateEnvironment, process: subprocess.Popen[str]) -> tuple[str, str]:
     stopped = run_cli(env, "stop")
     if stopped.returncode != 0:
-        process.terminate()
-        raise AssertionError(f"stop failed: {stopped.stderr!r}")
+        raise AssertionError(f"graceful stop failed: {stopped.stderr!r}")
     out, err = process.communicate(timeout=30)
     if process.returncode != 0:
         raise AssertionError(f"foreground stop failed: {process.returncode}, {out!r}, {err!r}")
