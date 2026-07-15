@@ -12,37 +12,106 @@ from .models import (
     StopRequestOutcome,
     CommandRecord,
 )
-from .protocol import BridgeError
+from .protocol import BridgeError, validate_strict_utc_timestamp, sanitize_diagnostics
 from .migrations import map_sqlite_error
+import re
+
+UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def validate_instance_id(value: str) -> None:
+    if not isinstance(value, str):
+        raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "instance_id must be a string")
+    uuid_str = value
+    if value.startswith("inst-"):
+        uuid_str = value[5:]
+    if not UUID_RE.fullmatch(uuid_str):
+        raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, f"Invalid instance_id format: {value!r}")
 
 
 def _row_to_service_instance(row: tuple[Any, ...]) -> ServiceInstanceRecord:
+    try:
+        instance_id = row[0]
+        validate_instance_id(instance_id)
+
+        pid = row[1]
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Invalid PID")
+
+        state_str = row[2]
+        try:
+            state = ServiceInstanceState(state_str)
+        except ValueError as exc:
+            raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, f"Invalid state: {state_str}") from exc
+
+        started_at = row[3]
+        validate_strict_utc_timestamp(started_at, field="started_at")
+
+        heartbeat_at = row[4]
+        validate_strict_utc_timestamp(heartbeat_at, field="heartbeat_at")
+
+        stop_requested_at = row[5]
+        if stop_requested_at is not None:
+            validate_strict_utc_timestamp(stop_requested_at, field="stop_requested_at")
+
+        stopped_at = row[6]
+        if stopped_at is not None:
+            validate_strict_utc_timestamp(stopped_at, field="stopped_at")
+
+        exit_code = row[7]
+        if exit_code is not None:
+            if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+                raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Invalid exit_code")
+
+        last_error = row[8]
+        if last_error is not None:
+            if not isinstance(last_error, str):
+                raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Invalid last_error")
+            last_error = sanitize_diagnostics(last_error)
+
+        created_at = row[9]
+        validate_strict_utc_timestamp(created_at, field="created_at")
+
+        updated_at = row[10]
+        validate_strict_utc_timestamp(updated_at, field="updated_at")
+
+    except BridgeError:
+        raise
+    except Exception as exc:
+        raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, f"Service instance row corrupt: {exc}") from exc
+
     return ServiceInstanceRecord(
-        instance_id=row[0],
-        pid=row[1],
-        state=ServiceInstanceState(row[2]),
-        started_at=row[3],
-        heartbeat_at=row[4],
-        stop_requested_at=row[5],
-        stopped_at=row[6],
-        exit_code=row[7],
-        last_error=row[8],
-        created_at=row[9],
-        updated_at=row[10],
+        instance_id=instance_id,
+        pid=pid,
+        state=state,
+        started_at=started_at,
+        heartbeat_at=heartbeat_at,
+        stop_requested_at=stop_requested_at,
+        stopped_at=stopped_at,
+        exit_code=exit_code,
+        last_error=last_error,
+        created_at=created_at,
+        updated_at=updated_at,
     )
 
 
 def get_service_instance(self: Any, instance_id: str) -> ServiceInstanceRecord | None:
     self._ensure_open()
-    row = self._conn.execute(
-        """
-        SELECT instance_id, pid, state, started_at, heartbeat_at,
-               stop_requested_at, stopped_at, exit_code, last_error,
-               created_at, updated_at
-        FROM service_instances WHERE instance_id = ?
-        """,
-        (instance_id,),
-    ).fetchone()
+    validate_instance_id(instance_id)
+    try:
+        row = self._conn.execute(
+            """
+            SELECT instance_id, pid, state, started_at, heartbeat_at,
+                   stop_requested_at, stopped_at, exit_code, last_error,
+                   created_at, updated_at
+            FROM service_instances WHERE instance_id = ?
+            """,
+            (instance_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise map_sqlite_error(exc, context="get service instance") from exc
     if row is None:
         return None
     return _row_to_service_instance(row)
@@ -50,32 +119,43 @@ def get_service_instance(self: Any, instance_id: str) -> ServiceInstanceRecord |
 
 def get_active_service_instance(self: Any) -> ServiceInstanceRecord | None:
     self._ensure_open()
-    row = self._conn.execute(
-        """
-        SELECT instance_id, pid, state, started_at, heartbeat_at,
-               stop_requested_at, stopped_at, exit_code, last_error,
-               created_at, updated_at
-        FROM service_instances
-        WHERE state IN ('running', 'stopping')
-        """
-    ).fetchone()
-    if row is None:
+    try:
+        rows = self._conn.execute(
+            """
+            SELECT instance_id, pid, state, started_at, heartbeat_at,
+                   stop_requested_at, stopped_at, exit_code, last_error,
+                   created_at, updated_at
+            FROM service_instances
+            WHERE state IN ('running', 'stopping')
+            """
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise map_sqlite_error(exc, context="get active service instance") from exc
+    if not rows:
         return None
-    return _row_to_service_instance(row)
+    if len(rows) > 1:
+        raise BridgeError(
+            BridgeErrorCode.JOURNAL_CORRUPT,
+            f"Database corruption: multiple active service instances found ({len(rows)}), only one allowed.",
+        )
+    return _row_to_service_instance(rows[0])
 
 
 def get_latest_service_instance(self: Any) -> ServiceInstanceRecord | None:
     self._ensure_open()
-    row = self._conn.execute(
-        """
-        SELECT instance_id, pid, state, started_at, heartbeat_at,
-               stop_requested_at, stopped_at, exit_code, last_error,
-               created_at, updated_at
-        FROM service_instances
-        ORDER BY started_at DESC, instance_id DESC
-        LIMIT 1
-        """
-    ).fetchone()
+    try:
+        row = self._conn.execute(
+            """
+            SELECT instance_id, pid, state, started_at, heartbeat_at,
+                   stop_requested_at, stopped_at, exit_code, last_error,
+                   created_at, updated_at
+            FROM service_instances
+            ORDER BY started_at DESC, instance_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise map_sqlite_error(exc, context="get latest service instance") from exc
     if row is None:
         return None
     return _row_to_service_instance(row)
@@ -85,12 +165,10 @@ def start_service_instance(
     self: Any, instance_id: str, pid: int, started_at: str
 ) -> ServiceInstanceRecord:
     self._ensure_open()
-    if not instance_id or not isinstance(instance_id, str):
-        raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Invalid instance_id")
-    if pid <= 0:
-        raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "PID must be positive")
-    if not started_at or not isinstance(started_at, str):
-        raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Invalid started_at timestamp")
+    validate_instance_id(instance_id)
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "PID must be positive integer")
+    validate_strict_utc_timestamp(started_at, field="started_at")
 
     now = self._now_fn()
     try:
@@ -143,7 +221,7 @@ def start_service_instance(
 
 def mark_abandoned_service_instances_stale(self: Any, diagnostic: str) -> int:
     self._ensure_open()
-    diag = (diagnostic or "Abandoned instance").strip()[:1000]
+    diag = sanitize_diagnostics(diagnostic or "Abandoned instance")
     now = self._now_fn()
 
     try:
@@ -178,6 +256,7 @@ def mark_abandoned_service_instances_stale(self: Any, diagnostic: str) -> int:
 
 def heartbeat_service_instance(self: Any, instance_id: str) -> None:
     self._ensure_open()
+    validate_instance_id(instance_id)
     now = self._now_fn()
     try:
         with self._transaction():
@@ -210,6 +289,7 @@ def heartbeat_service_instance(self: Any, instance_id: str) -> None:
 
 def request_service_stop(self: Any, instance_id: str) -> StopRequestOutcome:
     self._ensure_open()
+    validate_instance_id(instance_id)
     now = self._now_fn()
     try:
         with self._transaction():
@@ -264,6 +344,7 @@ def request_service_stop(self: Any, instance_id: str) -> StopRequestOutcome:
 
 def mark_service_instance_stopped(self: Any, instance_id: str, exit_code: int) -> None:
     self._ensure_open()
+    validate_instance_id(instance_id)
     now = self._now_fn()
     try:
         with self._transaction():
@@ -314,8 +395,9 @@ def mark_service_instance_stopped(self: Any, instance_id: str, exit_code: int) -
 
 def mark_service_instance_failed(self: Any, instance_id: str, error: str) -> None:
     self._ensure_open()
+    validate_instance_id(instance_id)
     now = self._now_fn()
-    sanitized_error = str(error)[:1000]
+    sanitized_error = sanitize_diagnostics(error)
     try:
         with self._transaction():
             row = self._conn.execute(
@@ -366,15 +448,18 @@ def mark_service_instance_failed(self: Any, instance_id: str, error: str) -> Non
 
 def get_recoverable_command(self: Any) -> CommandRecord | None:
     self._ensure_open()
-    rows = self._conn.execute(
-        """
-        SELECT command_id, session_id, sequence, command_sha256, command_json,
-               command_commit_sha, state, expected_revision, expected_state_hash,
-               created_at, updated_at
-        FROM commands
-        WHERE state IN ('claimed', 'executing', 'effect_recorded')
-        """
-    ).fetchall()
+    try:
+        rows = self._conn.execute(
+            """
+            SELECT command_id, session_id, sequence, command_sha256, command_json,
+                   command_commit_sha, state, expected_revision, expected_state_hash,
+                   created_at, updated_at
+            FROM commands
+            WHERE state IN ('claimed', 'executing', 'effect_recorded')
+            """
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise map_sqlite_error(exc, context="get recoverable command") from exc
     if not rows:
         return None
     if len(rows) > 1:

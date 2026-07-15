@@ -103,4 +103,26 @@ def test_lock_invalid_path_mapped(tmp_path: Path) -> None:
     lock = InstanceLock(lock_file)
     with pytest.raises(BridgeError) as exc:
         lock.acquire()
-    assert exc.value.code == BridgeErrorCode.JOURNAL_CONFLICT
+    assert exc.value.code == BridgeErrorCode.INSTANCE_LOCK_FAILED
+
+
+def test_lock_fake_backend_error(tmp_path: Path, monkeypatch) -> None:
+    # Verify that standard platform locking errors are mapped correctly
+    lock_file = tmp_path / "bridge_fake.lock"
+    lock = InstanceLock(lock_file)
+
+    def mock_raise(*args, **kwargs):
+        raise OSError(9, "Bad file descriptor")
+
+    import sys
+    if sys.platform == "win32":
+        import msvcrt
+        monkeypatch.setattr(msvcrt, "locking", mock_raise)
+    else:
+        import fcntl
+        monkeypatch.setattr(fcntl, "flock", mock_raise)
+
+    with pytest.raises(BridgeError) as exc:
+        lock.acquire()
+
+    assert exc.value.code == BridgeErrorCode.INSTANCE_LOCK_FAILED

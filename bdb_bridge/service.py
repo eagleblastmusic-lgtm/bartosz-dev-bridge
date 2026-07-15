@@ -23,6 +23,19 @@ from .heartbeat import HeartbeatWorker
 from .execution import SystemCrash
 
 
+def is_fatal_error(exc: Exception) -> bool:
+    if isinstance(exc, SystemCrash):
+        return True
+    if isinstance(exc, BridgeError):
+        if exc.code in (
+            BridgeErrorCode.TRANSPORT_UNAVAILABLE.value,
+            BridgeErrorCode.GIT_ERROR.value,
+        ):
+            return False
+        return True
+    return True
+
+
 class BridgeService:
     def __init__(
         self,
@@ -84,9 +97,9 @@ class BridgeService:
                 outcome = self.result_coordinator.process(rec_cmd.command_id)
                 recovery_outcome = f"recovered:{outcome.command_state}"
             except Exception as exc:
-                recovery_outcome = f"failed:{type(exc).__name__}"
-                if isinstance(exc, SystemCrash):
+                if is_fatal_error(exc):
                     raise
+                recovery_outcome = f"failed:{type(exc).__name__}"
         else:
             recovery_outcome = "none"
         self._fault("AFTER_RECOVERY_PHASE")
@@ -103,9 +116,9 @@ class BridgeService:
             else:
                 outbox_outcome = "none"
         except Exception as exc:
-            outbox_outcome = f"failed:{type(exc).__name__}"
-            if isinstance(exc, SystemCrash):
+            if is_fatal_error(exc):
                 raise
+            outbox_outcome = f"failed:{type(exc).__name__}"
         self._fault("AFTER_OUTBOX_PHASE")
 
         if self._should_stop(instance_id):
@@ -122,9 +135,9 @@ class BridgeService:
             else:
                 ingest_outcome = "none"
         except Exception as exc:
-            ingest_outcome = f"failed:{type(exc).__name__}"
-            if isinstance(exc, SystemCrash):
+            if is_fatal_error(exc):
                 raise
+            ingest_outcome = f"failed:{type(exc).__name__}"
         self._fault("AFTER_INGEST_PHASE")
 
         if self._should_stop(instance_id):
@@ -135,16 +148,16 @@ class BridgeService:
         has_blocking = self.journal.has_blocking_ingestion_issues()
 
         if rec_cmd is None and not has_blocking:
-            self._fault("AFTER_EXECUTE_CLAIM")
             cmd = self.scheduler.claim_next()
             if cmd is not None:
+                self._fault("AFTER_EXECUTE_CLAIM")
                 try:
                     outcome = self.result_coordinator.process(cmd.command_id)
                     execute_outcome = f"executed:{outcome.command_state}"
                 except Exception as exc:
-                    execute_outcome = f"failed:{type(exc).__name__}"
-                    if isinstance(exc, SystemCrash):
+                    if is_fatal_error(exc):
                         raise
+                    execute_outcome = f"failed:{type(exc).__name__}"
             else:
                 execute_outcome = "none"
         else:
@@ -161,8 +174,6 @@ class BridgeService:
         )
 
     def run(self, instance_id: str) -> ServiceRunOutcome:
-        self._fault("AFTER_INSTANCE_LOCK_BEFORE_DB_START")
-
         now = self.clock()
         try:
             self.journal.mark_abandoned_service_instances_stale("Abandoned after process crash")
@@ -173,7 +184,7 @@ class BridgeService:
         self._fault("AFTER_SERVICE_ROW_BEFORE_HEARTBEAT")
 
         heartbeat = HeartbeatWorker(
-            self.journal._db_path,
+            self.journal.path,
             instance_id,
             self.config.heartbeat_interval_seconds,
             now_fn=self.clock,

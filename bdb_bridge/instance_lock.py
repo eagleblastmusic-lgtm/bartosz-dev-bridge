@@ -34,12 +34,13 @@ class InstanceLock:
                     pass
                 self._file = None
             raise BridgeError(
-                BridgeErrorCode.JOURNAL_CONFLICT,
+                BridgeErrorCode.INSTANCE_LOCK_FAILED,
                 f"Failed to open lock file: {exc}",
             ) from exc
 
         if sys.platform == "win32":
             import msvcrt
+            import errno
             try:
                 self._file.seek(0)
                 msvcrt.locking(self._file.fileno(), msvcrt.LK_NBLCK, 1)
@@ -47,22 +48,35 @@ class InstanceLock:
                 return True
             except (OSError, IOError) as exc:
                 self.close()
-                raise BridgeError(
-                    BridgeErrorCode.INSTANCE_ALREADY_RUNNING,
-                    f"Instance already running (lock held by another process): {exc}",
-                ) from exc
+                if exc.errno in (errno.EACCES, errno.EAGAIN):
+                    raise BridgeError(
+                        BridgeErrorCode.INSTANCE_ALREADY_RUNNING,
+                        f"Instance already running (lock held by another process): {exc}",
+                    ) from exc
+                else:
+                    raise BridgeError(
+                        BridgeErrorCode.INSTANCE_LOCK_FAILED,
+                        f"Failed to acquire instance lock: {exc}",
+                    ) from exc
         else:
             import fcntl
+            import errno
             try:
                 fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 self._locked = True
                 return True
             except (OSError, IOError) as exc:
                 self.close()
-                raise BridgeError(
-                    BridgeErrorCode.INSTANCE_ALREADY_RUNNING,
-                    f"Instance already running (lock held by another process): {exc}",
-                ) from exc
+                if exc.errno in (errno.EACCES, errno.EAGAIN):
+                    raise BridgeError(
+                        BridgeErrorCode.INSTANCE_ALREADY_RUNNING,
+                        f"Instance already running (lock held by another process): {exc}",
+                    ) from exc
+                else:
+                    raise BridgeError(
+                        BridgeErrorCode.INSTANCE_LOCK_FAILED,
+                        f"Failed to acquire instance lock: {exc}",
+                    ) from exc
 
     def release(self) -> None:
         if not self._locked or not self._file:

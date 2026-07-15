@@ -93,6 +93,7 @@ class BridgeErrorCode(StrEnum):
     EFFECT_COLLISION = "effect_collision"
     MANUAL_RECONCILIATION_REQUIRED = "manual_reconciliation_required"
     INSTANCE_ALREADY_RUNNING = "instance_already_running"
+    INSTANCE_LOCK_FAILED = "instance_lock_failed"
 
 
 class CommandState(StrEnum):

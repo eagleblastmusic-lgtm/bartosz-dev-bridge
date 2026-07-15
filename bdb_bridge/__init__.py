@@ -73,6 +73,8 @@ from .protocol import (
     manifest_path_for,
     parse_command_path,
     parse_manifest_path,
+    parse_git_ref,
+    sanitize_diagnostics,
     path_matches,
     require_int,
     require_string,
@@ -113,4 +115,5 @@ __all__ = [
     "manifest_path_for", "parse_command_path", "parse_manifest_path", "path_matches",
     "require_int", "require_string", "result_path_for", "sha256_bytes", "sha256_text", "tail",
     "validate_base_sha", "validate_path_pattern", "validate_repo_relative_path", "validate_session_id",
+    "parse_git_ref", "sanitize_diagnostics",
 ]

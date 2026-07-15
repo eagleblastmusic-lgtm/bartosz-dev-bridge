@@ -30,7 +30,7 @@ class HeartbeatWorker:
         self._thread = threading.Thread(
             target=self._run,
             name=f"heartbeat-{self.instance_id}",
-            daemon=True,
+            daemon=False,
         )
         self._thread.start()
 
@@ -39,28 +39,35 @@ class HeartbeatWorker:
             return
         self._stop_event.set()
         self._thread.join(timeout=5.0)
+        if self._thread.is_alive():
+            raise RuntimeError(f"Heartbeat thread {self._thread.name} failed to terminate within timeout")
         self._thread = None
 
     def get_error(self) -> Exception | None:
         return self._error
 
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     def _run(self) -> None:
         journal: Journal | None = None
         try:
             journal = Journal.open(self.journal_path, now_fn=self.now_fn)
+            try:
+                journal.heartbeat_service_instance(self.instance_id)
+            except Exception as exc:
+                self._error = exc
+                return
+
             while not self._stop_event.is_set():
+                signaled = self._stop_event.wait(self.interval_seconds)
+                if signaled:
+                    break
                 try:
                     journal.heartbeat_service_instance(self.instance_id)
                 except Exception as exc:
                     self._error = exc
                     break
-
-                elapsed = 0.0
-                while elapsed < self.interval_seconds:
-                    if self._stop_event.is_set():
-                        break
-                    time.sleep(0.1)
-                    elapsed += 0.1
         except Exception as exc:
             self._error = exc
         finally:

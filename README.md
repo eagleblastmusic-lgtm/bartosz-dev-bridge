@@ -5,69 +5,32 @@ Lokalny Bridge dla ChatGPT Plus i GitHuba, rozwijany etapami na podstawie potwie
 Aktualna faza:
 
 ```text
-GHB0-5 — Result staging i durable outbox
+GHB0-6 — Service lifecycle i pojedyncza instancja
 ```
 
-## Zakres GHB0-5
+## CLI i Cykl Życia
 
-Rdzeń zachowuje protokół `1.1`, recovery worktree z GHB0-4 oraz dotychczasowe granice bezpieczeństwa. Nowa warstwa wyników obejmuje:
+Usługa działa w pętli obsługującej cztery fazy (Recovery, Outbox, Ingestion, Execution) i jest zarządzana za pomocą CLI:
 
-- `ResultStager`, który buduje deterministyczny wynik wyłącznie z trwałych rekordów session, command, plan, effect oraz kontrolowanego `ExecutionOutcome`;
-- `finalize_result()` jako jedyny finalny serializer, bez zmiany limitu 16 KiB ani end markera;
-- exact UTF-8 bytes bez BOM, dopisywania newline i normalizacji końców linii;
-- SHA-256 liczony z pełnych exact staged bytes;
-- atomowe `result + outbox + RESULT_STAGED + events` w jednym `BEGIN IMMEDIATE`;
-- tabelę SQLite `outbox` z persisted attempt count, next-attempt time, bounded diagnostic oraz trwałymi stanami `pending`, `published` i `collision`;
-- deterministyczny backoff `1, 2, 4, 8…`, ograniczony do 60 sekund, bez jittera i bez `sleep`;
-- `OutboxProcessor`, którego pojedyncze wywołanie wykonuje najwyżej jedną próbę publikacji jednego wpisu;
-- `ResultTransport` i `GitResultTransport` publikujące dokładnie jeden result path na branchu `results`, bez force-pusha;
-- ponowny odczyt exact remote bytes po pushu zamiast zaufania samemu exit code;
-- idempotentne rozpoznanie identycznego istniejącego remote resultu;
-- trwałe `RESULT_COLLISION` i przejście command/session do `MANUAL_RECONCILIATION_REQUIRED` bez nadpisania zdalnej treści;
-- recovery po crashu po pushu, ale przed lokalnym ACK, bez drugiego remote commita;
-- preservation session worktree oraz brak ponownego patcha po awarii publikacji.
+- `bdb bridge start --config <path> [--foreground] [--background]` - Uruchomienie usługi w tle lub pierwszoplanowo.
+- `bdb bridge stop --config <path>` - Wysłanie żądania bezpiecznego i graceful zatrzymania usługi.
+- `bdb bridge status --config <path> [--json]` - Odpytanie o stan usługi (OFFLINE, RUNNING, STOPPING, STALE).
 
-## Recovery contract
+### Stany Usługi
 
-```text
-EFFECT_RECORDED + brak staged result
-  → bez ponownego patcha dokończ profil/result
-  → atomowo stage result i enqueue outbox
+- `OFFLINE`: Usługa nie działa i lock jest wolny.
+- `RUNNING`: Usługa działa i regularnie odświeża heartbeat.
+- `STOPPING`: Wysłano żądanie zatrzymania, usługa kończy aktualny cykl.
+- `STALE`: Lock jest trzymany, ale proces o danym PID nie żyje lub nie odświeżał heartbeatu przez ustalony czas.
 
-RESULT_STAGED
-  → nie uruchamiaj operacji ani profilu
-  → publikuj wyłącznie immutable staged result
+### Gwarancje Jednej Instancji
 
-remote path absent
-  → jedna próba publikacji exact bytes
+- Wykorzystanie platformowych blokad plików (`InstanceLock` z `msvcrt` na Windows i `flock` na POSIX).
+- Kontrola kolizji blokad (contention mapowana na `INSTANCE_ALREADY_RUNNING`, uszkodzenia filesystemu na `INSTANCE_LOCK_FAILED`).
+- `HeartbeatWorker` działa w osobnym wątku (`daemon=False`) z deterministycznym startem i bezpieczną procedurą `join()`.
 
-remote path identical
-  → RESULT_PUBLISHED bez kolejnego pushu
+### Błędy SQLite i Invarianty
 
-remote path different
-  → outbox collision
-  → command/session MANUAL_RECONCILIATION_REQUIRED
-
-push success + crash przed lokalnym ACK
-  → po restarcie odczytaj remote path
-  → identyczny hash oznacza RESULT_PUBLISHED bez ponownego commita
-```
-
-## Granice
-
-GHB0-5 nie implementuje jeszcze:
-
-- daemona ani pętli działającej stale;
-- CLI `start`, `stop` i `status`;
-- instance lock, PID lub heartbeat;
-- ACK protocol ani przejścia do `ACKNOWLEDGED`;
-- cleanupu session worktree;
-- uploadu artefaktów;
-- GUI, LSP, Browser Lab ani Hermesa;
-- integracji z GicleeApp;
-- nowych operacji lub ogólnego terminala;
-- podłączenia nowego runtime do legacy `PocBridge`.
-
-Legacy POC-0 pozostaje dostępny przez `bdb_poc` i `poc_bridge.py`, ale nie używa durable outboxu GHB0-5.
-
-Repozytorium nie może zawierać tokenów, sekretów, plików `.env` ani prywatnych danych użytkownika.
+- Wszystkie odczyty z publicznych getterów bazy są zabezpieczone przed propagacją surowych `sqlite3.Error`.
+- Wykrycie niespójności w bazie danych (np. >1 aktywnej instancji) mapuje rekord na `JOURNAL_CORRUPT` i zatrzymuje usługę.
+- Transient błędy sieciowe/transportowe nie przerywają pętli głównej, podczas gdy fatal błędy (np. korupcja bazy, błędy stanów) natychmiast wyłączają usługę i zwalniają lock.

@@ -51,34 +51,34 @@ def test_status_scenarios(tmp_path: Path, make_config) -> None:
     lock = InstanceLock(runtime_dir / "bridge.instance.lock")
     assert lock.acquire() is True
     
-    journal.start_service_instance("inst-1", pid=os.getpid(), started_at="2026-07-15T12:00:00Z")
+    journal.start_service_instance("inst-11111111-1111-1111-1111-111111111111", pid=os.getpid(), started_at="2026-07-15T12:00:00Z")
     
     status = reader.get_status(journal)
     assert status.status == ServiceStatus.RUNNING
-    assert status.instance_id == "inst-1"
+    assert status.instance_id == "inst-11111111-1111-1111-1111-111111111111"
     assert status.pid == os.getpid()
     assert status.lock_held is True
     assert status.diagnostic is None
 
     # 3. STOPPING
-    journal.request_service_stop("inst-1")
+    journal.request_service_stop("inst-11111111-1111-1111-1111-111111111111")
     status = reader.get_status(journal)
     assert status.status == ServiceStatus.STOPPING
-    assert status.instance_id == "inst-1"
+    assert status.instance_id == "inst-11111111-1111-1111-1111-111111111111"
     assert status.stop_requested is True
 
     # Complete stop -> OFFLINE
-    journal.mark_service_instance_stopped("inst-1", exit_code=0)
+    journal.mark_service_instance_stopped("inst-11111111-1111-1111-1111-111111111111", exit_code=0)
     lock.release()
     
     status = reader.get_status(journal)
     assert status.status == ServiceStatus.OFFLINE
-    assert status.instance_id == "inst-1"
+    assert status.instance_id == "inst-11111111-1111-1111-1111-111111111111"
     assert status.lock_held is False
 
     # 4. STALE - lock free but active record in DB
     # Start inst-2 but do not acquire lock
-    journal.start_service_instance("inst-2", pid=os.getpid(), started_at="2026-07-15T12:00:00Z")
+    journal.start_service_instance("inst-22222222-2222-2222-2222-222222222222", pid=os.getpid(), started_at="2026-07-15T12:00:00Z")
     status = reader.get_status(journal)
     assert status.status == ServiceStatus.STALE
     assert "lock file is not locked" in status.diagnostic
@@ -100,11 +100,11 @@ def test_status_scenarios(tmp_path: Path, make_config) -> None:
     journal = Journal.open(db_path, now_fn=lambda: "2026-07-15T12:00:00Z")
     # Mark stale by using a dead PID (e.g. 99999999 on Windows or 999999 on Unix)
     # Let's update instance in DB with a definitely dead PID
-    journal._connection.execute(
-        "UPDATE service_instances SET pid = ? WHERE instance_id = 'inst-2'",
+    journal._conn.execute(
+        "UPDATE service_instances SET pid = ? WHERE instance_id = 'inst-22222222-2222-2222-2222-222222222222'",
         (99999999,),
     )
-    journal._connection.commit()
+    journal._conn.commit()
     
     status = reader.get_status(journal)
     assert status.status == ServiceStatus.STALE
