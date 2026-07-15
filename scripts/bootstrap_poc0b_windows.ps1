@@ -16,6 +16,15 @@ function Require-Command {
     return $command.Source
 }
 
+function Write-Utf8NoBom {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Content
+    )
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Content + [Environment]::NewLine, $encoding)
+}
+
 $Git = Require-Command -Name "git"
 $Python = Require-Command -Name "python"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -124,11 +133,11 @@ def test_contract_edge_case() -> None:
 $HiddenAssertion
 "@
 
-$GitIgnore | Set-Content -Encoding UTF8 -Path (Join-Path $FixturePath ".gitignore")
-$PyProject | Set-Content -Encoding UTF8 -Path (Join-Path $FixturePath "pyproject.toml")
-$Init | Set-Content -Encoding UTF8 -Path (Join-Path $FixturePath "src\__init__.py")
-$Source | Set-Content -Encoding UTF8 -Path (Join-Path $FixturePath "src\normalize.py")
-$Tests | Set-Content -Encoding UTF8 -Path (Join-Path $FixturePath "tests\test_normalize.py")
+Write-Utf8NoBom -Path (Join-Path $FixturePath ".gitignore") -Content $GitIgnore
+Write-Utf8NoBom -Path (Join-Path $FixturePath "pyproject.toml") -Content $PyProject
+Write-Utf8NoBom -Path (Join-Path $FixturePath "src\__init__.py") -Content $Init
+Write-Utf8NoBom -Path (Join-Path $FixturePath "src\normalize.py") -Content $Source
+Write-Utf8NoBom -Path (Join-Path $FixturePath "tests\test_normalize.py") -Content $Tests
 
 & $Git -C $FixturePath init -b main
 & $Git -C $FixturePath config user.name "Bartosz Dev Bridge POC"
