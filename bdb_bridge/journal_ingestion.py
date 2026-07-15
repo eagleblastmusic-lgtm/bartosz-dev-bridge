@@ -43,17 +43,26 @@ def is_hex(s: str) -> bool:
 
 def validate_sha40(name: str, val: str) -> None:
     if not isinstance(val, str) or len(val) != 40 or not is_hex(val):
-        raise ValueError(f"{name} must be a 40-character hex string, got {val!r}")
+        raise BridgeError(
+            BridgeErrorCode.INVALID_PAYLOAD,
+            f"{name} must be a 40-character hex string, got {val!r}",
+        )
 
 
 def validate_sha64(name: str, val: str) -> None:
     if not isinstance(val, str):
-        raise ValueError(f"{name} must be a string")
+        raise BridgeError(
+            BridgeErrorCode.INVALID_PAYLOAD,
+            f"{name} must be a string",
+        )
     actual = val
     if val.startswith("sha256:"):
         actual = val[7:]
     if len(actual) != 64 or not is_hex(actual):
-        raise ValueError(f"{name} must be a 64-character hex string (optionally prefixed with sha256:), got {val!r}")
+        raise BridgeError(
+            BridgeErrorCode.INVALID_PAYLOAD,
+            f"{name} must be a 64-character hex string (optionally prefixed with sha256:), got {val!r}",
+        )
 
 
 def compute_backoff_delay(attempt_count: int, *, base_delay: float = 1.0, max_delay: float = 60.0) -> float:
@@ -531,23 +540,32 @@ def record_session_manifest(
                 session_id=session_id,
                 created_at=now,
             )
+            if issue_created:
+                journal._append_event_in_transaction(
+                    session_id=session_id,
+                    event_type="ingestion.blocked",
+                    payload={"error_code": BridgeErrorCode.SESSION_ID_COLLISION.value},
+                    created_at=now,
+                )
         raise CollisionError(
             BridgeErrorCode.SESSION_ID_COLLISION,
             f"Manifest collision for session {session_id}",
             issue_created=issue_created,
         )
 
+    # Check for session collision with existing v1 database session row
+    session_row = None
     with journal._transaction():
-        # Verify repository_id and base_sha match if session already exists in sessions
         session_row = journal._connection.execute(
             "SELECT session_id, repository_id, base_sha FROM sessions WHERE session_id = ?",
             (session_id,),
         ).fetchone()
 
-        if session_row is not None:
-            existing_repo_id = session_row[1]
-            existing_base_sha = session_row[2]
-            if existing_repo_id != repository_id or existing_base_sha != base_sha:
+    if session_row is not None:
+        existing_repo_id = session_row[1]
+        existing_base_sha = session_row[2]
+        if existing_repo_id != repository_id or existing_base_sha != base_sha:
+            with journal._transaction():
                 issue_created = record_ingestion_issue_in_transaction(
                     journal,
                     source_id=source_id,
@@ -561,12 +579,22 @@ def record_session_manifest(
                     session_id=session_id,
                     created_at=now,
                 )
-                raise CollisionError(
-                    BridgeErrorCode.SESSION_ID_COLLISION,
-                    f"Session collision for session {session_id}",
-                    issue_created=issue_created,
-                )
+                if issue_created:
+                    journal._append_event_in_transaction(
+                        session_id=session_id,
+                        event_type="ingestion.blocked",
+                        payload={"error_code": BridgeErrorCode.SESSION_ID_COLLISION.value},
+                        created_at=now,
+                    )
+            raise CollisionError(
+                BridgeErrorCode.SESSION_ID_COLLISION,
+                f"Session collision for session {session_id}",
+                issue_created=issue_created,
+            )
 
+    promoted_count = 0
+    collisions = []
+    with journal._transaction():
         if session_row is None:
             journal._connection.execute(
                 """
@@ -611,10 +639,14 @@ def record_session_manifest(
         )
 
         # Promote staged commands for this session
-        promoted_count = _promote_pending_commands_in_transaction(journal, session_id, now)
+        promoted_count, collisions = _promote_pending_commands_in_transaction(journal, session_id, now)
 
     rec = get_session_ingestion(journal, session_id)
     assert rec is not None
+
+    if collisions:
+        raise collisions[0]
+
     return rec, True, promoted_count
 
 
@@ -627,7 +659,7 @@ def record_ingested_command(
     session_id: str,
     sequence: int,
     document_commit_sha: str,
-    raw_content: str,
+    raw_content: bytes,
     raw_sha256_value: str,
 ) -> tuple[CommandIngestionRecord | None, bool]:
     journal._ensure_open()
@@ -643,12 +675,13 @@ def record_ingested_command(
     rec: CommandIngestionRecord | None = None
 
     with journal._transaction():
-        session_row = journal.get_session(session_id)
-        if session_row is None:
+        # O obecności manifestu decyduje session_ingestion
+        session_ingestion_row = get_session_ingestion(journal, session_id)
+        if session_ingestion_row is None:
             # Staging flow
             existing_staged = journal._connection.execute(
                 """
-                SELECT source_path, document_commit_sha, raw_sha256
+                SELECT source_path, document_commit_sha, raw_sha256, content
                 FROM pending_command_documents
                 WHERE session_id = ? AND sequence = ?
                 """,
@@ -656,11 +689,12 @@ def record_ingested_command(
             ).fetchone()
 
             if existing_staged is not None:
-                staged_path, staged_commit, staged_hash = existing_staged
+                staged_path, staged_commit, staged_hash, staged_content = existing_staged
                 if (
                     staged_path == source_path
                     and staged_commit == document_commit_sha
                     and staged_hash == raw_sha256_value
+                    and staged_content == raw_content
                 ):
                     journal._connection.execute(
                         """
@@ -686,6 +720,14 @@ def record_ingested_command(
                         session_id=session_id,
                         command_id=command_id,
                     )
+                    if issue_created:
+                        journal._append_event_in_transaction(
+                            session_id=session_id,
+                            command_id=command_id,
+                            event_type="ingestion.blocked",
+                            payload={"error_code": BridgeErrorCode.SEQUENCE_COLLISION.value},
+                            created_at=now,
+                        )
                     collision_err = CollisionError(
                         BridgeErrorCode.SEQUENCE_COLLISION,
                         f"Staged sequence collision for session {session_id} sequence {sequence}",
@@ -765,6 +807,14 @@ def record_ingested_command(
                         command_id=command_id,
                         created_at=now,
                     )
+                    if issue_created:
+                        journal._append_event_in_transaction(
+                            session_id=session_id,
+                            command_id=command_id,
+                            event_type="ingestion.blocked",
+                            payload={"error_code": BridgeErrorCode.COMMAND_ID_COLLISION.value},
+                            created_at=now,
+                        )
                     collision_err = CollisionError(
                         BridgeErrorCode.COMMAND_ID_COLLISION,
                         f"Command document collision for {command_id}",
@@ -772,10 +822,16 @@ def record_ingested_command(
                     )
 
             elif existing_command is not None:
+                try:
+                    decoded_content = raw_content.decode("utf-8", errors="strict")
+                    content_matches = (existing_command[4] == decoded_content)
+                except UnicodeDecodeError:
+                    content_matches = False
+
                 if (
                     existing_command[1] == session_id
                     and existing_command[2] == sequence
-                    and existing_command[4] == raw_content
+                    and content_matches
                     and existing_command[5] == document_commit_sha
                 ):
                     journal._connection.execute(
@@ -804,6 +860,14 @@ def record_ingested_command(
                         command_id=command_id,
                         created_at=now,
                     )
+                    if issue_created:
+                        journal._append_event_in_transaction(
+                            session_id=session_id,
+                            command_id=command_id,
+                            event_type="ingestion.blocked",
+                            payload={"error_code": BridgeErrorCode.SEQUENCE_COLLISION.value},
+                            created_at=now,
+                        )
                     collision_err = CollisionError(
                         BridgeErrorCode.SEQUENCE_COLLISION,
                         f"Sequence collision for session {session_id} sequence {sequence}",
@@ -829,12 +893,28 @@ def record_ingested_command(
                         command_id=command_id,
                         created_at=now,
                     )
+                    if issue_created:
+                        journal._append_event_in_transaction(
+                            session_id=session_id,
+                            command_id=command_id,
+                            event_type="ingestion.blocked",
+                            payload={"error_code": BridgeErrorCode.SEQUENCE_COLLISION.value},
+                            created_at=now,
+                        )
                     collision_err = CollisionError(
                         BridgeErrorCode.SEQUENCE_COLLISION,
                         f"Sequence collision for session {session_id} sequence {sequence}",
                         issue_created=issue_created,
                     )
                 else:
+                    try:
+                        decoded_content = raw_content.decode("utf-8", errors="strict")
+                    except UnicodeDecodeError as decode_exc:
+                        raise BridgeError(
+                            BridgeErrorCode.INVALID_PAYLOAD,
+                            f"Command content must be valid UTF-8: {decode_exc}",
+                        )
+
                     journal._connection.execute(
                         """
                         INSERT INTO commands (
@@ -848,7 +928,7 @@ def record_ingested_command(
                             session_id,
                             sequence,
                             raw_sha256_value,
-                            raw_content,
+                            decoded_content,
                             document_commit_sha,
                             CommandState.DISCOVERED.value,
                             now,
@@ -1235,7 +1315,7 @@ def expire_stale_sessions(journal: Journal, *, now_dt: datetime) -> None:
         journal.expire_session_and_pending_commands(record.session_id, record.expires_at)
 
 
-def _promote_pending_commands_in_transaction(journal: Journal, session_id: str, now: str) -> int:
+def _promote_pending_commands_in_transaction(journal: Journal, session_id: str, now: str) -> tuple[int, list[CollisionError]]:
     pending_rows = journal._connection.execute(
         """
         SELECT sequence, source_id, snapshot_sha, source_path, document_commit_sha, raw_sha256, content, first_seen_at, last_seen_at
@@ -1246,16 +1326,15 @@ def _promote_pending_commands_in_transaction(journal: Journal, session_id: str, 
     ).fetchall()
 
     promoted_count = 0
+    collisions = []
     for seq, src_id, snap_sha, src_path, doc_commit_sha, r_sha256, content, first_seen, last_seen in pending_rows:
         command_id = command_id_for(session_id, seq)
-        # Check if the command sequence is already taken in the commands table
         existing_row = journal._connection.execute(
             "SELECT 1 FROM commands WHERE session_id = ? AND sequence = ?",
             (session_id, seq),
         ).fetchone()
         if existing_row is not None:
-            # Staged command conflicts with existing command!
-            record_ingestion_issue_in_transaction(
+            issue_created = record_ingestion_issue_in_transaction(
                 journal,
                 source_id=src_id,
                 source_path=src_path,
@@ -1269,14 +1348,60 @@ def _promote_pending_commands_in_transaction(journal: Journal, session_id: str, 
                 session_id=session_id,
                 command_id=command_id,
             )
-            # Raise collision
-            raise CollisionError(
-                BridgeErrorCode.SEQUENCE_COLLISION,
-                f"Sequence collision during staged promotion for session {session_id} sequence {seq}",
-                issue_created=True,
+            if issue_created:
+                journal._append_event_in_transaction(
+                    session_id=session_id,
+                    command_id=command_id,
+                    event_type="ingestion.blocked",
+                    payload={"error_code": BridgeErrorCode.SEQUENCE_COLLISION.value},
+                    created_at=now,
+                )
+            collisions.append(
+                CollisionError(
+                    BridgeErrorCode.SEQUENCE_COLLISION,
+                    f"Sequence collision during staged promotion for session {session_id} sequence {seq}",
+                    issue_created=issue_created,
+                )
             )
+            continue
 
-        # Promotion inserts command directly into commands and command_ingestion
+        if isinstance(content, str):
+            decoded_content = content
+        else:
+            try:
+                decoded_content = content.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as decode_exc:
+                issue_created = record_ingestion_issue_in_transaction(
+                    journal,
+                    source_id=src_id,
+                    source_path=src_path,
+                    snapshot_sha=snap_sha,
+                    raw_sha256=r_sha256,
+                    error_code=BridgeErrorCode.INVALID_PAYLOAD.value,
+                    detail=f"UTF-8 decode failed for staged command: {decode_exc}",
+                    blocking=True,
+                    created_at=now,
+                    document_commit_sha=doc_commit_sha,
+                    session_id=session_id,
+                    command_id=command_id,
+                )
+                if issue_created:
+                    journal._append_event_in_transaction(
+                        session_id=session_id,
+                        command_id=command_id,
+                        event_type="ingestion.blocked",
+                        payload={"error_code": BridgeErrorCode.INVALID_PAYLOAD.value},
+                        created_at=now,
+                    )
+                collisions.append(
+                    CollisionError(
+                        BridgeErrorCode.INVALID_PAYLOAD,
+                        f"UTF-8 decode failed for staged command: {decode_exc}",
+                        issue_created=issue_created,
+                    )
+                )
+                continue
+
         journal._connection.execute(
             """
             INSERT INTO commands (
@@ -1290,7 +1415,7 @@ def _promote_pending_commands_in_transaction(journal: Journal, session_id: str, 
                 session_id,
                 seq,
                 r_sha256,
-                content,
+                decoded_content,
                 doc_commit_sha,
                 CommandState.DISCOVERED.value,
                 first_seen,
@@ -1315,14 +1440,14 @@ def _promote_pending_commands_in_transaction(journal: Journal, session_id: str, 
             payload={"sequence": seq, "source_path": src_path},
             created_at=now,
         )
+
+        journal._connection.execute(
+            "DELETE FROM pending_command_documents WHERE session_id = ? AND sequence = ?",
+            (session_id, seq),
+        )
         promoted_count += 1
 
-    if promoted_count > 0:
-        journal._connection.execute(
-            "DELETE FROM pending_command_documents WHERE session_id = ?",
-            (session_id,),
-        )
-    return promoted_count
+    return promoted_count, collisions
 
 
 def _add_seconds_iso(iso_timestamp: str, seconds: float) -> str:

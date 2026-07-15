@@ -25,6 +25,7 @@ JOURNAL_TABLES = frozenset(
         "session_ingestion",
         "command_ingestion",
         "ingestion_issues",
+        "pending_command_documents",
     }
 )
 
@@ -160,7 +161,7 @@ MIGRATION_V2_STATEMENTS: tuple[str, ...] = (
   source_path TEXT NOT NULL,
   document_commit_sha TEXT NOT NULL,
   raw_sha256 TEXT NOT NULL,
-  content TEXT NOT NULL,
+  content BLOB NOT NULL,
   first_seen_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL,
   PRIMARY KEY (session_id, sequence)

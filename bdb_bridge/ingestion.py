@@ -116,8 +116,19 @@ class CommandIngestor:
             )
 
         self._journal.record_transport_success(self._source_id, snapshot.snapshot_sha)
-        ingestion = self.ingest_snapshot(snapshot)
-        validation = self.validate_pending(snapshot_sha=snapshot.snapshot_sha)
+        try:
+            try:
+                ingestion = self.ingest_snapshot(snapshot)
+            except CollisionError as exc:
+                ingestion = exc.report
+            validation = self.validate_pending()
+        except BridgeError:
+            raise
+        except Exception as exc:
+            raise BridgeError(
+                BridgeErrorCode.INVALID_PAYLOAD,
+                f"Unexpected error during polling: {exc}",
+            )
 
         has_blocking = self._journal.has_blocking_ingestion_issues()
         combined = IngestionReport(
@@ -213,14 +224,6 @@ class CommandIngestor:
         for document in command_docs:
             try:
                 session_id, sequence = parse_command_path(document.path)
-                try:
-                    decoded = document.content.decode("utf-8", errors="strict")
-                except UnicodeDecodeError as decode_exc:
-                    raise BridgeError(
-                        BridgeErrorCode.INVALID_PAYLOAD,
-                        f"Command content must be valid UTF-8: {decode_exc}",
-                    )
-
                 raw_hash = calculate_raw_sha256(document.content)
 
                 outcome = self._journal.record_ingested_command(
@@ -230,7 +233,7 @@ class CommandIngestor:
                     session_id=session_id,
                     sequence=sequence,
                     document_commit_sha=document.document_commit_sha,
-                    raw_content=decoded,
+                    raw_content=document.content,
                     raw_sha256_value=raw_hash,
                 )
                 if outcome is not None:
@@ -302,14 +305,18 @@ class CommandIngestor:
             if session_ingestion is None:
                 continue
 
-            source_path = command_path_for(command.session_id, command.sequence)
             ingestion_meta = self._journal.get_command_ingestion(command.command_id)
-            if ingestion_meta is not None:
-                source_path = ingestion_meta.source_path
+            if ingestion_meta is None:
+                raise BridgeError(
+                    BridgeErrorCode.JOURNAL_CONFLICT,
+                    f"Command ingestion metadata missing for discovered command {command.command_id}",
+                )
 
-            actual_snapshot_sha = snapshot_sha or (ingestion_meta.snapshot_sha if ingestion_meta else "0000000000000000000000000000000000000000")
-            actual_raw_sha256 = ingestion_meta.raw_sha256 if ingestion_meta else command.command_sha256
-            actual_doc_sha = ingestion_meta.document_commit_sha if ingestion_meta else "0000000000000000000000000000000000000000"
+            source_id = ingestion_meta.source_id
+            source_path = ingestion_meta.source_path
+            actual_snapshot_sha = ingestion_meta.snapshot_sha
+            actual_raw_sha256 = ingestion_meta.raw_sha256
+            actual_doc_sha = ingestion_meta.document_commit_sha
 
             if is_expired(session_ingestion.expires_at, now=now_dt):
                 self._journal.expire_session_and_pending_commands(command.session_id, session_ingestion.expires_at)
@@ -329,7 +336,7 @@ class CommandIngestor:
                     command.command_id,
                     error_code=str(exc.code),
                     detail=str(exc),
-                    source_id=self._source_id,
+                    source_id=source_id,
                     source_path=source_path,
                     snapshot_sha=actual_snapshot_sha,
                     raw_sha256=actual_raw_sha256,
