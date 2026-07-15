@@ -113,7 +113,10 @@ from .workspace_types import (
     WorkspaceStatusSnapshot,
 )
 from .workspace_lifecycle import WorkspaceLifecycleCoordinator
+from .workspace_lifecycle_errors import install_workspace_lifecycle_error_mapping
 from .session_finalization import SessionFinalizationOutcome, SessionFinalizer
+
+install_workspace_lifecycle_error_mapping(WorkspaceLifecycleCoordinator)
 
 __all__ = [
     "BridgeConfig", "BridgeError", "BridgeErrorCode", "BridgeService", "COMMAND_PATH_RE",
