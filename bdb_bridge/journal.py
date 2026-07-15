@@ -10,13 +10,19 @@ from typing import Any, Callable, Iterator
 from .migrations import apply_migrations, map_sqlite_error, utc_now_iso, _safe_rollback
 from .models import (
     BridgeErrorCode,
+    CommandIngestionRecord,
     CommandRecord,
     CommandState,
+    IngestionIssue,
+    IngestionReport,
     JournalEvent,
+    PollReport,
     ResultRecord,
     ResultStatus,
+    SessionIngestionRecord,
     SessionRecord,
     SessionState,
+    TransportRetryRecord,
     WorkspaceRecord,
     validate_command_transition,
     validate_session_transition,
@@ -713,6 +719,151 @@ class Journal:
         query += " ORDER BY event_id ASC"
         rows = self._conn.execute(query, params).fetchall()
         return [_row_to_event(row) for row in rows]
+
+    def get_ingestion_source(self, source_id: str) -> TransportRetryRecord:
+        from . import journal_ingestion as _ji
+
+        return _ji.get_ingestion_source(self, source_id)
+
+    def record_transport_failure(
+        self,
+        source_id: str,
+        error_message: str,
+        *,
+        base_delay: float = 1.0,
+        max_delay: float = 60.0,
+    ) -> TransportRetryRecord:
+        from . import journal_ingestion as _ji
+
+        return _ji.record_transport_failure(
+            self,
+            source_id,
+            error_message,
+            base_delay=base_delay,
+            max_delay=max_delay,
+        )
+
+    def record_transport_success(self, source_id: str, snapshot_sha: str) -> TransportRetryRecord:
+        from . import journal_ingestion as _ji
+
+        return _ji.record_transport_success(self, source_id, snapshot_sha)
+
+    def get_session_ingestion(self, session_id: str) -> SessionIngestionRecord | None:
+        from . import journal_ingestion as _ji
+
+        return _ji.get_session_ingestion(self, session_id)
+
+    def get_command_ingestion(self, command_id: str) -> CommandIngestionRecord | None:
+        from . import journal_ingestion as _ji
+
+        return _ji.get_command_ingestion(self, command_id)
+
+    def has_blocking_ingestion_issues(self) -> bool:
+        from . import journal_ingestion as _ji
+
+        return _ji.has_blocking_ingestion_issues(self)
+
+    def record_ingestion_issue(
+        self,
+        *,
+        source_id: str,
+        source_path: str,
+        snapshot_sha: str,
+        raw_sha256: str,
+        error_code: str,
+        detail: str,
+        blocking: bool,
+        document_commit_sha: str | None = None,
+        session_id: str | None = None,
+        command_id: str | None = None,
+    ) -> IngestionIssue | None:
+        from . import journal_ingestion as _ji
+
+        return _ji.record_ingestion_issue(
+            self,
+            source_id=source_id,
+            source_path=source_path,
+            snapshot_sha=snapshot_sha,
+            raw_sha256=raw_sha256,
+            error_code=error_code,
+            detail=detail,
+            blocking=blocking,
+            document_commit_sha=document_commit_sha,
+            session_id=session_id,
+            command_id=command_id,
+        )
+
+    def record_session_manifest(
+        self,
+        *,
+        source_id: str,
+        snapshot_sha: str,
+        source_path: str,
+        session_id: str,
+        manifest_commit_sha: str,
+        raw_content: str,
+        manifest_json: str,
+        manifest_sha256: str,
+        raw_sha256: str,
+        repository_id: str,
+        base_sha: str,
+        created_remote_at: str,
+        expires_at: str,
+    ) -> SessionIngestionRecord:
+        from . import journal_ingestion as _ji
+
+        return _ji.record_session_manifest(
+            self,
+            source_id=source_id,
+            snapshot_sha=snapshot_sha,
+            source_path=source_path,
+            session_id=session_id,
+            manifest_commit_sha=manifest_commit_sha,
+            raw_content=raw_content,
+            manifest_json=manifest_json,
+            manifest_sha256=manifest_sha256,
+            raw_sha256=raw_sha256,
+            repository_id=repository_id,
+            base_sha=base_sha,
+            created_remote_at=created_remote_at,
+            expires_at=expires_at,
+        )
+
+    def record_ingested_command(
+        self,
+        *,
+        source_id: str,
+        snapshot_sha: str,
+        source_path: str,
+        session_id: str,
+        sequence: int,
+        document_commit_sha: str,
+        raw_content: str,
+        raw_sha256_value: str,
+    ) -> CommandIngestionRecord | None:
+        from . import journal_ingestion as _ji
+
+        return _ji.record_ingested_command(
+            self,
+            source_id=source_id,
+            snapshot_sha=snapshot_sha,
+            source_path=source_path,
+            session_id=session_id,
+            sequence=sequence,
+            document_commit_sha=document_commit_sha,
+            raw_content=raw_content,
+            raw_sha256_value=raw_sha256_value,
+        )
+
+    def list_discovered_commands(self) -> list[CommandRecord]:
+        from . import journal_ingestion as _ji
+
+        return _ji.list_discovered_commands(self)
+
+    def claim_next_command(self) -> CommandRecord | None:
+        from . import journal_ingestion as _ji
+
+        return _ji.claim_next_command(self)
 
     def _append_event_in_transaction(
         self,

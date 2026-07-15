@@ -21,6 +21,10 @@ JOURNAL_TABLES = frozenset(
         "workspaces",
         "results",
         "events",
+        "ingestion_sources",
+        "session_ingestion",
+        "command_ingestion",
+        "ingestion_issues",
     }
 )
 
@@ -112,8 +116,72 @@ BEGIN
 END""",
 )
 
+MIGRATION_V2_STATEMENTS: tuple[str, ...] = (
+    """CREATE TABLE ingestion_sources (
+  source_id TEXT PRIMARY KEY,
+  last_observed_sha TEXT,
+  attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+  next_attempt_at TEXT,
+  last_error TEXT,
+  last_success_at TEXT,
+  updated_at TEXT NOT NULL
+)""",
+    """CREATE TABLE session_ingestion (
+  session_id TEXT PRIMARY KEY,
+  source_path TEXT NOT NULL,
+  manifest_commit_sha TEXT NOT NULL,
+  raw_sha256 TEXT NOT NULL,
+  manifest_sha256 TEXT NOT NULL,
+  manifest_json TEXT NOT NULL,
+  created_remote_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+)""",
+    """CREATE TABLE command_ingestion (
+  command_id TEXT PRIMARY KEY,
+  source_path TEXT NOT NULL,
+  document_commit_sha TEXT NOT NULL,
+  raw_sha256 TEXT NOT NULL,
+  created_remote_at TEXT,
+  expires_at TEXT,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  FOREIGN KEY (command_id) REFERENCES commands(command_id)
+)""",
+    """CREATE TABLE ingestion_issues (
+  issue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id TEXT NOT NULL,
+  source_path TEXT NOT NULL,
+  snapshot_sha TEXT NOT NULL,
+  document_commit_sha TEXT,
+  raw_sha256 TEXT NOT NULL,
+  session_id TEXT,
+  command_id TEXT,
+  error_code TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  blocking INTEGER NOT NULL CHECK (blocking IN (0, 1)),
+  created_at TEXT NOT NULL,
+  UNIQUE (source_id, source_path, error_code, raw_sha256)
+)""",
+    "CREATE INDEX idx_commands_state ON commands(state)",
+    "CREATE INDEX idx_commands_session_seq ON commands(session_id, sequence)",
+    "CREATE INDEX idx_sessions_created ON sessions(created_at, session_id)",
+    "CREATE INDEX idx_ingestion_issues_blocking ON ingestion_issues(blocking) WHERE blocking = 1",
+    """ALTER TABLE sessions ADD COLUMN active_slot TEXT GENERATED ALWAYS AS (
+  CASE WHEN state IN ('active', 'completing') THEN 'occupied' ELSE NULL END
+) STORED""",
+    "CREATE UNIQUE INDEX idx_sessions_one_active ON sessions(active_slot) WHERE active_slot IS NOT NULL",
+    """ALTER TABLE commands ADD COLUMN worker_slot TEXT GENERATED ALWAYS AS (
+  CASE WHEN state IN ('claimed', 'executing', 'effect_recorded') THEN 'occupied' ELSE NULL END
+) STORED""",
+    "CREATE UNIQUE INDEX idx_commands_one_worker ON commands(worker_slot) WHERE worker_slot IS NOT NULL",
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "journal_v1_initial", MIGRATION_V1_STATEMENTS),
+    Migration(2, "journal_v2_ingestion", MIGRATION_V2_STATEMENTS),
 )
 
 

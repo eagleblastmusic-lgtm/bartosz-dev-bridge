@@ -56,6 +56,9 @@ class BridgeErrorCode(StrEnum):
     UNSUPPORTED_OPERATION = "unsupported_operation"
     UNSUPPORTED_SCHEMA = "unsupported_schema"
     WORKSPACE_EXISTS = "workspace_exists"
+    SESSION_ID_COLLISION = "session_id_collision"
+    TRANSPORT_UNAVAILABLE = "transport_unavailable"
+    INGESTION_BLOCKED = "ingestion_blocked"
 
 
 class CommandState(StrEnum):
@@ -249,3 +252,104 @@ class JournalEvent:
     event_type: str
     payload_json: str | None
     created_at: str
+
+
+SCHEDULER_PREDECESSOR_DONE_STATES: frozenset[CommandState] = frozenset(
+    {
+        CommandState.RESULT_STAGED,
+        CommandState.RESULT_PUBLISHED,
+        CommandState.ACKNOWLEDGED,
+        CommandState.REJECTED,
+        CommandState.EXPIRED,
+        CommandState.POLICY_DENIED,
+        CommandState.STALE_REVISION,
+        CommandState.STATE_MISMATCH,
+        CommandState.MANUAL_RECONCILIATION_REQUIRED,
+        CommandState.CANCELLED,
+    }
+)
+
+SCHEDULER_PREDECESSOR_BLOCKING_STATES: frozenset[CommandState] = frozenset(
+    {
+        CommandState.DISCOVERED,
+        CommandState.VALIDATED,
+        CommandState.CLAIMED,
+        CommandState.EXECUTING,
+        CommandState.EFFECT_RECORDED,
+    }
+)
+
+
+@dataclass(frozen=True)
+class TransportRetryRecord:
+    source_id: str
+    last_observed_sha: str | None
+    attempt_count: int
+    next_attempt_at: str | None
+    last_error: str | None
+    last_success_at: str | None
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class SessionIngestionRecord:
+    session_id: str
+    source_path: str
+    manifest_commit_sha: str
+    raw_sha256: str
+    manifest_sha256: str
+    manifest_json: str
+    created_remote_at: str
+    expires_at: str
+    first_seen_at: str
+    last_seen_at: str
+
+
+@dataclass(frozen=True)
+class CommandIngestionRecord:
+    command_id: str
+    source_path: str
+    document_commit_sha: str
+    raw_sha256: str
+    created_remote_at: str | None
+    expires_at: str | None
+    first_seen_at: str
+    last_seen_at: str
+
+
+@dataclass(frozen=True)
+class IngestionIssue:
+    issue_id: int
+    source_id: str
+    source_path: str
+    snapshot_sha: str
+    document_commit_sha: str | None
+    raw_sha256: str
+    session_id: str | None
+    command_id: str | None
+    error_code: str
+    detail: str
+    blocking: bool
+    created_at: str
+
+
+@dataclass(frozen=True)
+class IngestionReport:
+    manifests_recorded: int
+    commands_discovered: int
+    commands_validated: int
+    commands_rejected: int
+    commands_expired: int
+    issues_recorded: int
+    blocking_issues: bool
+
+
+@dataclass(frozen=True)
+class PollReport:
+    transport_called: bool
+    transport_skipped: bool
+    transport_succeeded: bool
+    snapshot_sha: str | None
+    ingestion: IngestionReport | None
+    error_code: str | None
+    error_message: str | None
