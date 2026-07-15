@@ -13,6 +13,7 @@ V1_CHECKSUM = "1d293179f582464fa10eecd37fb381c0a5913d85ed629c9ec244c8bfdb2fe31a"
 V2_CHECKSUM = "80178c2da604e77b9f568467ffa54865dbad3867193dc9f489e002cb5c3dbc33"
 V3_CHECKSUM = "4dffb2c3e5807cba98d8f5323554e625e4acc58559cc807e2728eab7f07bb9db"
 V4_CHECKSUM = "b19f7ef96b5c9e25ad9cad9c6d2160a667c5c1b5db68d1d0e7accb2f1f2ba3c9"
+V5_CHECKSUM = "9bfc62c82e71ebbf968f6a171eb0b320a4d2510dec158db13a8d940afd315670"
 
 
 def fixed_now() -> str:
@@ -25,12 +26,13 @@ def test_ghb04_v1_v2_v3_literal_golden_checksums() -> None:
         (2, "journal_v2_ingestion", V2_CHECKSUM),
         (3, "journal_v3_execution", V3_CHECKSUM),
         (4, "journal_v4_result_outbox", V4_CHECKSUM),
+        (5, "journal_v5_service_lifecycle", V5_CHECKSUM),
     ]
 
 
 def test_ghb04_empty_and_populated_v2_upgrade_to_v3(tmp_path: Path) -> None:
     empty = Journal.open(tmp_path / "empty.db", now_fn=fixed_now)
-    assert empty._connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,)]
+    assert empty._connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,), (5,)]
     assert {r[0] for r in empty._connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")} == JOURNAL_TABLES
     empty.close()
 
@@ -78,7 +80,7 @@ def test_ghb04_v3_reopen_noop_checksum_mismatch_and_future_version(tmp_path: Pat
 
     future = tmp_path / "future.db"
     journal = Journal.open(future, now_fn=fixed_now)
-    journal._connection.execute("INSERT INTO schema_migrations VALUES (5, 'future', 'x', ?)", (FIXED_NOW,))
+    journal._connection.execute("INSERT INTO schema_migrations VALUES (6, 'future', 'x', ?)", (FIXED_NOW,))
     journal.close()
     with pytest.raises(BridgeError) as exc:
         Journal.open(future, now_fn=fixed_now)
@@ -86,10 +88,11 @@ def test_ghb04_v3_reopen_noop_checksum_mismatch_and_future_version(tmp_path: Pat
 
 
 def test_ghb04_migration_registry_is_exact() -> None:
-    assert tuple(m.version for m in MIGRATIONS) == (1, 2, 3, 4)
+    assert tuple(m.version for m in MIGRATIONS) == (1, 2, 3, 4, 5)
     assert tuple(m.name for m in MIGRATIONS) == (
         "journal_v1_initial",
         "journal_v2_ingestion",
         "journal_v3_execution",
         "journal_v4_result_outbox",
+        "journal_v5_service_lifecycle",
     )

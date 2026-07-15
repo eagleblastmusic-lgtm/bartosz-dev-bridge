@@ -12,6 +12,9 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8,<9"]
 
+[project.scripts]
+bdb = "bdb_bridge.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["bdb_bridge*", "bdb_poc*"]
 

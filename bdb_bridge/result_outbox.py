@@ -240,8 +240,11 @@ class ResultCoordinator:
             updated = self.journal.get_command(command_id)
             assert updated is not None
             return ResultCoordinationOutcome(command_id, updated.state, staged=True, publication=publication)
-        if command.state != CommandState.EFFECT_RECORDED:
-            raise BridgeError(BridgeErrorCode.INVALID_STATE_TRANSITION, f"Result coordination requires EFFECT_RECORDED/RESULT_STAGED/RESULT_PUBLISHED, got {command.state.value}")
+        if command.state not in (CommandState.CLAIMED, CommandState.EXECUTING, CommandState.EFFECT_RECORDED):
+            raise BridgeError(
+                BridgeErrorCode.INVALID_STATE_TRANSITION,
+                f"Result coordination requires CLAIMED/EXECUTING/EFFECT_RECORDED/RESULT_STAGED/RESULT_PUBLISHED, got {command.state.value}",
+            )
 
         started_at = self.now_fn()
         execution = self.execution_factory(self.config, self.journal, self.fault_hook)

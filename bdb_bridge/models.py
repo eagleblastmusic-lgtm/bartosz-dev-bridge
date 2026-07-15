@@ -92,6 +92,7 @@ class BridgeErrorCode(StrEnum):
     OPERATION_PLAN_COLLISION = "operation_plan_collision"
     EFFECT_COLLISION = "effect_collision"
     MANUAL_RECONCILIATION_REQUIRED = "manual_reconciliation_required"
+    INSTANCE_ALREADY_RUNNING = "instance_already_running"
 
 
 class CommandState(StrEnum):
@@ -533,3 +534,77 @@ class ExecutionOutcome:
     diff: str
     profile_run: ProfileRunOutcome | None = None
     manual_reconciliation_details: dict[str, Any] | None = None
+
+
+class ServiceInstanceState(StrEnum):
+    RUNNING = "running"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+    STALE = "stale"
+    FAILED = "failed"
+
+
+class ServiceStatus(StrEnum):
+    RUNNING = "RUNNING"
+    STOPPING = "STOPPING"
+    STALE = "STALE"
+    OFFLINE = "OFFLINE"
+
+
+@dataclass(frozen=True)
+class ServiceInstanceRecord:
+    instance_id: str
+    pid: int
+    state: ServiceInstanceState
+    started_at: str
+    heartbeat_at: str
+    stop_requested_at: str | None
+    stopped_at: str | None
+    exit_code: int | None
+    last_error: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class ServiceStatusSnapshot:
+    status: ServiceStatus
+    instance_id: str | None
+    pid: int | None
+    started_at: str | None
+    heartbeat_at: str | None
+    heartbeat_age_seconds: float | None
+    lock_held: bool
+    pid_alive: bool | None
+    stop_requested: bool
+    diagnostic: str | None
+
+
+@dataclass(frozen=True)
+class BridgeCycleReport:
+    recovery_outcome: str | None
+    outbox_outcome: str | None
+    ingest_outcome: str | None
+    execute_outcome: str | None
+    cycle_time_ms: float
+
+
+@dataclass(frozen=True)
+class ServiceRunOutcome:
+    instance_id: str
+    exit_code: int
+    error: str | None
+
+
+@dataclass(frozen=True)
+class StopRequestOutcome:
+    instance_id: str
+    status: ServiceStatus
+    stop_requested: bool
+
+
+@dataclass(frozen=True)
+class BackgroundStartOutcome:
+    pid: int
+    started: bool
+    status: ServiceStatus
