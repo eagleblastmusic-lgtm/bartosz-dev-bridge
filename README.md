@@ -1,53 +1,63 @@
 # Bartosz Dev Bridge
 
-Minimalna implementacja **POC-0** lokalnego Bridge'a dla ChatGPT Plus i GitHuba, zgodna z dokumentacją projektową v1.1.
+Lokalny Bridge dla ChatGPT Plus i GitHuba, rozwijany etapami na podstawie potwierdzonego POC-0.
 
 Aktualna faza:
 
 ```text
-GHB0-3 — Durable ingestion i pojedyncza kolejka
+GHB0-4 — Workspace recovery i effect journal
 ```
 
-Zakres obejmuje:
+## Zakres GHB0-4
 
-- pakiet `bdb_bridge` ze stabilnymi granicami protokołu v1.1 (walidacja, serializacja, konfiguracja, modele);
-- **SQLite Journal v2** — trwały moduł `bdb_bridge.journal` z wersjonowanymi migracjami (v1 + v2), idempotency komend i wyników, compare-and-swap workspace, append-only event log oraz warstwą ingestion;
-- **durable command ingestion** — `CommandIngestor` zapisuje manifesty i komendy lokalnie przed wykonaniem, wznawia walidację po restarcie, obsługuje TTL i kolizje;
-- **immutable transport snapshots** — `GitCommandTransport` rozwiązuje jeden `snapshot_sha` i odczytuje dokumenty oraz per-document commit SHA z tego samego snapshotu;
-- **persisted transport backoff** — retry transportu z exponential backoff zapisany w `ingestion_sources`;
-- **single active session** i **atomic command claim** — `SingleQueueScheduler` / `Journal.claim_next_command()` w jednej transakcji SQLite;
-- warstwę wykonawczą `bdb_poc` z zachowaną kompatybilnością importów POC-0 (`PocBridge` bez integracji z nowym ingestorem);
-- jednorazowy `poc_bridge.py`;
-- syntetyczne repozytorium `bdb-poc-fixture`;
-- polling branchu `commands` (POC-0);
-- publikację małych wyników na branch `results` (POC-0);
-- operacje `open_read` i `replace_exact_and_test` (POC-0);
-- stały lokalny profil `python -m pytest -q`;
-- testy jednostkowe/integracyjne oraz GitHub Actions.
+Rdzeń zachowuje protokół `1.1` oraz dotychczasowe granice bezpieczeństwa. Nowa warstwa wykonawcza obejmuje:
 
-Journal v2 jest fundamentem danych dla ingestion i schedulera. **Nie wykonuje jeszcze operacji komend**, nie tworzy worktree, nie publikuje wyników przez outbox i nie jest podłączony do działającego `PocBridge`.
+- kontrolowany `WorkspaceManager` dla detached worktree z exact base SHA;
+- trwały, immutable operation plan zapisany przed zmianą pliku;
+- exact-byte SHA-256 dla treści przed i po edycji;
+- atomowy file effect: temp w katalogu targetu, flush, `fsync`, `os.replace` i ponowny odczyt bytes;
+- atomowy effect journal: workspace CAS, effect row, przejście command i event w jednym `BEGIN IMMEDIATE`;
+- idempotentne replaye planu i effectu z kontrolą wszystkich immutable pól;
+- recovery rozróżniający stany `BEFORE`, `PLANNED-AFTER`, `EFFECT` i `DIVERGED`;
+- atomowe przejście command/session do `MANUAL_RECONCILIATION_REQUIRED`;
+- zachowanie worktree i plików diagnostycznych przy failure lub divergence;
+- jedyny profil wykonawczy `poc_pytest`, uruchamiany jako `<python_executable> -m pytest -q` bez `shell=True`;
+- testy fault-injection, migration golden checksums oraz regresje Windows/Ubuntu.
 
-Przykład ingestion + scheduler:
-
-```python
-from bdb_bridge import CommandIngestor, Journal, SingleQueueScheduler
-from bdb_poc.transport import GitCommandTransport
-
-journal = Journal.open("path/to/journal.db")
-ingestor = CommandIngestor(journal, GitCommandTransport(control_repo_path))
-ingestor.poll_once()
-claimed = SingleQueueScheduler(journal).claim_next()
-journal.close()
-```
-
-Schemat obejmuje tabele: `schema_migrations`, `sessions`, `commands`, `workspaces`, `results`, `events`, `ingestion_sources`, `session_ingestion`, `command_ingestion`, `ingestion_issues`.
-
-Poza zakresem pozostają wykonywanie operacji komend, recovery worktree, durable result outbox, daemon, automatyczne wznawianie w runtime, GUI, LSP, Browser Lab, Hermes, prawdziwe repozytoria GicleeApp oraz operacje produkcyjne.
-
-Instrukcja uruchomienia:
+## Recovery contract
 
 ```text
-POC_0_WINDOWS_START.md
+BEFORE
+  target i physical state odpowiadają planowi before
+  → wykonaj lub dokończ zweryfikowany własny temp artifact
+
+PLANNED-AFTER
+  target odpowiada planned-after, ale effect nie jest jeszcze zapisany
+  → zapisz effect bez ponownego patcha
+
+EFFECT
+  effect, Journal i physical state są zgodne
+  → nie stosuj patcha ponownie; profil może zostać ponowiony
+
+DIVERGED
+  dowolna inna kombinacja stanu, obcy plik, zły HEAD lub mismatch Journalu
+  → MANUAL_RECONCILIATION_REQUIRED, bez cleanupu i bez usuwania dowodów
 ```
+
+Własny temp artifact jest rozpoznawany wyłącznie po ścieżce wynikającej z persisted plan hash. Jego bytes i hash muszą dokładnie odpowiadać `planned_after_content`. Obce temp/untracked pliki nie są usuwane.
+
+## Granice
+
+GHB0-4 nie implementuje jeszcze:
+
+- result outbox ani zdalnej publikacji wyników nowego runtime;
+- daemona, service lifecycle lub instance lock;
+- cleanupu worktree;
+- GUI, LSP, Browser Lab ani Hermesa;
+- integracji z GicleeApp;
+- podłączenia `ExecutionCoordinator` do legacy `PocBridge`;
+- nowych operacji ani ogólnego terminala.
+
+Legacy POC-0 pozostaje dostępny przez `bdb_poc` i `poc_bridge.py`, ale nowy execution runtime nie jest z nim jeszcze połączony.
 
 Repozytorium nie może zawierać tokenów, sekretów, plików `.env` ani prywatnych danych użytkownika.

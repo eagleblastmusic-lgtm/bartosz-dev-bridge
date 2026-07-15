@@ -26,6 +26,8 @@ JOURNAL_TABLES = frozenset(
         "command_ingestion",
         "ingestion_issues",
         "pending_command_documents",
+        "operation_plans",
+        "operation_effects",
     }
 )
 
@@ -193,9 +195,50 @@ ON commands((1))
 WHERE state IN ('claimed', 'executing', 'effect_recorded')""",
 )
 
+MIGRATION_V3_STATEMENTS: tuple[str, ...] = (
+    """CREATE TABLE operation_plans (
+  command_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  target_path TEXT NOT NULL,
+  profile_id TEXT NOT NULL,
+  expected_revision INTEGER NOT NULL CHECK (expected_revision >= 0),
+  expected_state_hash TEXT,
+  workspace_revision_before INTEGER NOT NULL CHECK (workspace_revision_before >= 0),
+  workspace_state_hash_before TEXT NOT NULL,
+  before_content BLOB NOT NULL,
+  before_content_sha256 TEXT NOT NULL,
+  planned_after_content BLOB NOT NULL,
+  planned_after_content_sha256 TEXT NOT NULL,
+  planned_after_state_hash TEXT NOT NULL,
+  plan_sha256 TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (command_id) REFERENCES commands(command_id),
+  FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+)""",
+    """CREATE TABLE operation_effects (
+  command_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  plan_sha256 TEXT NOT NULL,
+  target_path TEXT NOT NULL,
+  workspace_revision_before INTEGER NOT NULL,
+  workspace_revision_after INTEGER NOT NULL,
+  workspace_state_hash_before TEXT NOT NULL,
+  workspace_state_hash_after TEXT NOT NULL,
+  before_content_sha256 TEXT NOT NULL,
+  after_content_sha256 TEXT NOT NULL,
+  effect_sha256 TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  CHECK (workspace_revision_after = workspace_revision_before + 1),
+  FOREIGN KEY (command_id) REFERENCES commands(command_id),
+  FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+)""",
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "journal_v1_initial", MIGRATION_V1_STATEMENTS),
     Migration(2, "journal_v2_ingestion", MIGRATION_V2_STATEMENTS),
+    Migration(3, "journal_v3_execution", MIGRATION_V3_STATEMENTS),
 )
 
 

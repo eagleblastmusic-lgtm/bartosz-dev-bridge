@@ -45,6 +45,8 @@ def test_empty_db_applies_all_migrations(tmp_path: Path) -> None:
             "command_ingestion",
             "ingestion_issues",
             "pending_command_documents",
+            "operation_plans",
+            "operation_effects",
         }
         migrations = journal._connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
@@ -52,6 +54,7 @@ def test_empty_db_applies_all_migrations(tmp_path: Path) -> None:
         assert migrations == [
             (1, "journal_v1_initial"),
             (2, "journal_v2_ingestion"),
+            (3, "journal_v3_execution"),
         ]
     finally:
         journal.close()
@@ -84,7 +87,7 @@ def test_reopen_is_noop(tmp_path: Path) -> None:
     journal = Journal.open(path, now_fn=fixed_now)
     try:
         rows = journal._connection.execute("SELECT version FROM schema_migrations").fetchall()
-        assert rows == [(1,), (2,)]
+        assert rows == [(1,), (2,), (3,)]
     finally:
         journal.close()
 
@@ -154,7 +157,7 @@ def test_name_mismatch_detected(tmp_path: Path) -> None:
 def test_future_schema_version_rejected(tmp_path: Path) -> None:
     journal = open_db(tmp_path)
     journal._connection.execute(
-        "INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (3, 'future', 'abc', ?)",
+        "INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (4, 'future', 'abc', ?)",
         (FIXED_NOW,),
     )
     journal._connection.commit()
@@ -166,7 +169,7 @@ def test_future_schema_version_rejected(tmp_path: Path) -> None:
 
 def test_migration_gap_rejected(tmp_path: Path) -> None:
     journal = open_db(tmp_path)
-    journal._connection.execute("DELETE FROM schema_migrations WHERE version = 2")
+    journal._connection.execute("DELETE FROM schema_migrations WHERE version >= 2")
     journal._connection.execute(
         "INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (3, 'gap', 'abc', ?)",
         (FIXED_NOW,),
@@ -263,7 +266,7 @@ def test_concurrent_open_empty_db_creates_schema_once(tmp_path: Path) -> None:
     conn = sqlite3.connect(path)
     versions = conn.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
     conn.close()
-    assert versions == [(1,), (2,)]
+    assert versions == [(1,), (2,), (3,)]
 
 
 def test_journal_open_closes_connection_on_migration_failure(tmp_path: Path) -> None:
@@ -308,7 +311,11 @@ def test_upgrade_existing_v1_database_to_v2(tmp_path: Path) -> None:
         versions = journal._connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(1, "journal_v1_initial"), (2, "journal_v2_ingestion")]
+        assert versions == [
+            (1, "journal_v1_initial"),
+            (2, "journal_v2_ingestion"),
+            (3, "journal_v3_execution"),
+        ]
         assert journal._connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='ingestion_sources'"
         ).fetchone() is not None
@@ -370,7 +377,11 @@ def test_upgrade_existing_v1_database_to_v2_with_data(tmp_path: Path) -> None:
         versions = journal._connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(1, "journal_v1_initial"), (2, "journal_v2_ingestion")]
+        assert versions == [
+            (1, "journal_v1_initial"),
+            (2, "journal_v2_ingestion"),
+            (3, "journal_v3_execution"),
+        ]
 
         # Verify data preserved byte-for-byte
         v2_sessions = journal._connection.execute("SELECT session_id, repository_id, base_sha, state, created_at, updated_at FROM sessions ORDER BY session_id").fetchall()
