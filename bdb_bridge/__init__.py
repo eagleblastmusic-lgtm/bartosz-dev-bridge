@@ -1,9 +1,13 @@
 from .config import BridgeConfig
 from .ingestion import CommandIngestor
 from .journal import Journal
-from .recovery_gate_hooks import install_command_ingestor_fault_hook
+from .recovery_gate_hooks import (
+    install_command_collision_diagnostics,
+    install_command_ingestor_fault_hook,
+)
 
 install_command_ingestor_fault_hook(CommandIngestor)
+install_command_collision_diagnostics(Journal)
 from .workspace_lifecycle_migration import install_workspace_lifecycle_migration
 
 install_workspace_lifecycle_migration(Journal)
@@ -116,19 +120,19 @@ __all__ = [
     "CommandIngestor", "CommandIngestionRecord", "CommandRecord", "CommandSnapshot",
     "CommandState", "CommandTransport", "ExecutionCoordinator", "ExecutionOutcome",
     "EXECUTOR_VERSION", "GitResultTransport", "IngestionIssue", "IngestionReport",
-    "GitCommandTransport", "InstanceLock", "Journal", "JournalEvent", "MANIFEST_PATH_RE",
-    "MAX_RESULT_BYTES", "MAX_TAIL_CHARS", "Operation", "OperationEffectRecord",
-    "OperationPlanRecord", "OutboxProcessOutcome", "OutboxProcessState", "OutboxProcessor",
-    "OutboxRecord", "OutboxState", "PollReport", "ProfileRunOutcome", "PromotionOutcome",
-    "PublishAttempt", "PublishAttemptState", "RecoveryAssessment", "RecoveryDecision",
-    "RemoteDocument", "RemoteResult", "RemoteResultState", "ResultBuildInput",
-    "ResultCoordinator", "ResultCoordinationOutcome", "ResultRecord", "ResultStager",
-    "ResultStatus", "ResultTransport", "SCHEMA_VERSION", "SESSION_RE",
-    "SessionIngestionRecord", "SessionRecord", "SessionState", "SingleQueueScheduler",
+    "GitCommandTransport", "InstanceLock",
+    "Journal", "JournalEvent", "MANIFEST_PATH_RE", "MAX_RESULT_BYTES", "MAX_TAIL_CHARS",
+    "Operation", "OperationEffectRecord", "OperationPlanRecord", "OutboxProcessOutcome",
+    "OutboxProcessState", "OutboxProcessor", "OutboxRecord", "OutboxState", "PollReport",
+    "ProfileRunOutcome", "PromotionOutcome", "PublishAttempt", "PublishAttemptState",
+    "RecoveryAssessment", "RecoveryDecision", "RemoteDocument", "RemoteResult",
+    "RemoteResultState", "ResultBuildInput", "ResultCoordinator", "ResultCoordinationOutcome",
+    "ResultRecord", "ResultStager", "ResultStatus", "ResultTransport", "SCHEMA_VERSION",
+    "SESSION_RE", "SessionIngestionRecord", "SessionRecord", "SessionState", "SingleQueueScheduler",
     "StagedResult", "TransportRetryRecord", "WorkspaceManager", "WorkspaceRecord",
     "ServiceInstanceState", "ServiceStatus", "ServiceInstanceRecord", "ServiceStatusSnapshot",
-    "ServiceStatusReader", "is_pid_alive", "HeartbeatWorker", "BridgeCycleReport",
-    "ServiceRunOutcome", "StopRequestOutcome", "BackgroundStartOutcome",
+    "ServiceStatusReader", "is_pid_alive", "HeartbeatWorker",
+    "BridgeCycleReport", "ServiceRunOutcome", "StopRequestOutcome", "BackgroundStartOutcome",
     "WorkspaceCleanupOutcome", "WorkspaceDisposition", "WorkspaceEligibility",
     "WorkspaceLifecycleRecord", "WorkspaceLifecycleState", "WorkspaceStatusSnapshot",
     "WorkspaceLifecycleCoordinator", "SessionFinalizationOutcome", "SessionFinalizer",
@@ -137,8 +141,8 @@ __all__ = [
     "install_journal_workspace_lifecycle_api", "install_workspace_lifecycle_migration",
     "manifest_path_for", "parse_command_path", "parse_manifest_path", "path_matches",
     "require_int", "require_string", "result_path_for", "sha256_bytes", "sha256_text", "tail",
-    "validate_base_sha", "validate_path_pattern", "validate_repo_relative_path",
-    "validate_session_id", "parse_git_ref", "sanitize_diagnostics",
+    "validate_base_sha", "validate_path_pattern", "validate_repo_relative_path", "validate_session_id",
+    "parse_git_ref", "sanitize_diagnostics",
 ]
 
 from .ghb07_cli import install_cli
