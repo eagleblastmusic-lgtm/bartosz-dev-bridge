@@ -19,6 +19,7 @@ from .models import (
     TransportRetryRecord,
     validate_command_transition,
     validate_session_transition,
+    PromotionOutcome,
 )
 from .protocol import BridgeError, command_id_for, parse_strict_utc_timestamp
 from .serializers import canonical_json, sha256_text
@@ -31,10 +32,11 @@ DEFAULT_SOURCE_ID = "commands"
 
 
 class CollisionError(BridgeError):
-    def __init__(self, code: BridgeErrorCode, message: str, issue_created: bool, report: Any = None) -> None:
+    def __init__(self, code: BridgeErrorCode, message: str, issue_created: bool, report: Any = None, promotion_outcome: Any = None) -> None:
         super().__init__(code, message)
         self.issue_created = issue_created
         self.report = report
+        self.promotion_outcome = promotion_outcome
 
 
 def is_hex(s: str) -> bool:
@@ -354,46 +356,33 @@ def record_ingestion_issue(
         ).fetchone()
         if existing is not None:
             return _row_to_ingestion_issue(existing), False
-        cursor = journal._connection.execute(
-            """
-            INSERT INTO ingestion_issues (
-                source_id, source_path, snapshot_sha, document_commit_sha, raw_sha256,
-                session_id, command_id, error_code, detail, blocking, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                source_id,
-                source_path,
-                snapshot_sha,
-                document_commit_sha,
-                raw_sha256,
-                session_id,
-                command_id,
-                error_code,
-                detail,
-                1 if blocking else 0,
-                now,
-            ),
+
+        created = record_ingestion_issue_in_transaction(
+            journal,
+            source_id=source_id,
+            source_path=source_path,
+            snapshot_sha=snapshot_sha,
+            raw_sha256=raw_sha256,
+            error_code=error_code,
+            detail=detail,
+            blocking=blocking,
+            created_at=now,
+            document_commit_sha=document_commit_sha,
+            session_id=session_id,
+            command_id=command_id,
         )
-        issue_id = int(cursor.lastrowid)
-        if blocking:
-            journal._append_event_in_transaction(
-                session_id=session_id,
-                command_id=command_id,
-                event_type="ingestion.blocked",
-                payload={"source_path": source_path, "error_code": error_code},
-                created_at=now,
-            )
-    row = journal._connection.execute(
-        """
-        SELECT issue_id, source_id, source_path, snapshot_sha, document_commit_sha,
-               raw_sha256, session_id, command_id, error_code, detail, blocking, created_at
-        FROM ingestion_issues WHERE issue_id = ?
-        """,
-        (issue_id,),
-    ).fetchone()
-    assert row is not None
-    return _row_to_ingestion_issue(row), True
+
+        row = journal._connection.execute(
+            """
+            SELECT issue_id, source_id, source_path, snapshot_sha, document_commit_sha,
+                   raw_sha256, session_id, command_id, error_code, detail, blocking, created_at
+            FROM ingestion_issues
+            WHERE source_id = ? AND source_path = ? AND error_code = ? AND raw_sha256 = ?
+            """,
+            (source_id, source_path, error_code, raw_sha256),
+        ).fetchone()
+        assert row is not None
+        return _row_to_ingestion_issue(row), created
 
 
 def record_ingestion_issue_in_transaction(
@@ -480,7 +469,7 @@ def record_session_manifest(
     base_sha: str,
     created_remote_at: str,
     expires_at: str,
-) -> tuple[SessionIngestionRecord, bool, int]:
+) -> tuple[SessionIngestionRecord, bool, PromotionOutcome]:
     journal._ensure_open()
     validate_sha40("snapshot_sha", snapshot_sha)
     validate_sha40("manifest_commit_sha", manifest_commit_sha)
@@ -505,11 +494,40 @@ def record_session_manifest(
             and existing[4] == manifest_sha256
             and existing[5] == manifest_json
         ):
+            has_pending = journal._connection.execute(
+                "SELECT 1 FROM pending_command_documents WHERE session_id = ? LIMIT 1",
+                (session_id,),
+            ).fetchone() is not None
+
+            if not has_pending:
+                with journal._transaction():
+                    journal._connection.execute(
+                        "UPDATE session_ingestion SET last_seen_at = ? WHERE session_id = ?",
+                        (now, session_id),
+                    )
+                rec = _row_to_session_ingestion(
+                    (
+                        existing[0],
+                        existing[1],
+                        existing[2],
+                        existing[3],
+                        existing[4],
+                        existing[5],
+                        existing[6],
+                        existing[7],
+                        existing[8],
+                        now,
+                    )
+                )
+                return rec, False, PromotionOutcome(0, 0, ())
+
             with journal._transaction():
                 journal._connection.execute(
                     "UPDATE session_ingestion SET last_seen_at = ? WHERE session_id = ?",
                     (now, session_id),
                 )
+                outcome = _promote_pending_commands_in_transaction(journal, session_id, now)
+
             rec = _row_to_session_ingestion(
                 (
                     existing[0],
@@ -524,7 +542,13 @@ def record_session_manifest(
                     now,
                 )
             )
-            return rec, False, 0
+
+            if outcome.blocking_collisions:
+                err = outcome.blocking_collisions[0]
+                err.promotion_outcome = outcome
+                raise err
+
+            return rec, False, outcome
 
         with journal._transaction():
             issue_created = record_ingestion_issue_in_transaction(
@@ -540,13 +564,6 @@ def record_session_manifest(
                 session_id=session_id,
                 created_at=now,
             )
-            if issue_created:
-                journal._append_event_in_transaction(
-                    session_id=session_id,
-                    event_type="ingestion.blocked",
-                    payload={"error_code": BridgeErrorCode.SESSION_ID_COLLISION.value},
-                    created_at=now,
-                )
         raise CollisionError(
             BridgeErrorCode.SESSION_ID_COLLISION,
             f"Manifest collision for session {session_id}",
@@ -579,21 +596,13 @@ def record_session_manifest(
                     session_id=session_id,
                     created_at=now,
                 )
-                if issue_created:
-                    journal._append_event_in_transaction(
-                        session_id=session_id,
-                        event_type="ingestion.blocked",
-                        payload={"error_code": BridgeErrorCode.SESSION_ID_COLLISION.value},
-                        created_at=now,
-                    )
             raise CollisionError(
                 BridgeErrorCode.SESSION_ID_COLLISION,
                 f"Session collision for session {session_id}",
                 issue_created=issue_created,
             )
 
-    promoted_count = 0
-    collisions = []
+    outcome = PromotionOutcome(0, 0, ())
     with journal._transaction():
         if session_row is None:
             journal._connection.execute(
@@ -639,15 +648,17 @@ def record_session_manifest(
         )
 
         # Promote staged commands for this session
-        promoted_count, collisions = _promote_pending_commands_in_transaction(journal, session_id, now)
+        outcome = _promote_pending_commands_in_transaction(journal, session_id, now)
 
     rec = get_session_ingestion(journal, session_id)
     assert rec is not None
 
-    if collisions:
-        raise collisions[0]
+    if outcome.blocking_collisions:
+        err = outcome.blocking_collisions[0]
+        err.promotion_outcome = outcome
+        raise err
 
-    return rec, True, promoted_count
+    return rec, True, outcome
 
 
 def record_ingested_command(
@@ -661,7 +672,7 @@ def record_ingested_command(
     document_commit_sha: str,
     raw_content: bytes,
     raw_sha256_value: str,
-) -> tuple[CommandIngestionRecord | None, bool]:
+) -> tuple[CommandIngestionRecord | None, bool, int]:
     journal._ensure_open()
     command_id = command_id_for(session_id, sequence)
     now = journal._now_fn()
@@ -673,6 +684,7 @@ def record_ingested_command(
     collision_err: CollisionError | None = None
     created = False
     rec: CommandIngestionRecord | None = None
+    issues_created = 0
 
     with journal._transaction():
         # O obecności manifestu decyduje session_ingestion
@@ -720,14 +732,6 @@ def record_ingested_command(
                         session_id=session_id,
                         command_id=command_id,
                     )
-                    if issue_created:
-                        journal._append_event_in_transaction(
-                            session_id=session_id,
-                            command_id=command_id,
-                            event_type="ingestion.blocked",
-                            payload={"error_code": BridgeErrorCode.SEQUENCE_COLLISION.value},
-                            created_at=now,
-                        )
                     collision_err = CollisionError(
                         BridgeErrorCode.SEQUENCE_COLLISION,
                         f"Staged sequence collision for session {session_id} sequence {sequence}",
@@ -807,14 +811,6 @@ def record_ingested_command(
                         command_id=command_id,
                         created_at=now,
                     )
-                    if issue_created:
-                        journal._append_event_in_transaction(
-                            session_id=session_id,
-                            command_id=command_id,
-                            event_type="ingestion.blocked",
-                            payload={"error_code": BridgeErrorCode.COMMAND_ID_COLLISION.value},
-                            created_at=now,
-                        )
                     collision_err = CollisionError(
                         BridgeErrorCode.COMMAND_ID_COLLISION,
                         f"Command document collision for {command_id}",
@@ -860,14 +856,6 @@ def record_ingested_command(
                         command_id=command_id,
                         created_at=now,
                     )
-                    if issue_created:
-                        journal._append_event_in_transaction(
-                            session_id=session_id,
-                            command_id=command_id,
-                            event_type="ingestion.blocked",
-                            payload={"error_code": BridgeErrorCode.SEQUENCE_COLLISION.value},
-                            created_at=now,
-                        )
                     collision_err = CollisionError(
                         BridgeErrorCode.SEQUENCE_COLLISION,
                         f"Sequence collision for session {session_id} sequence {sequence}",
@@ -893,14 +881,6 @@ def record_ingested_command(
                         command_id=command_id,
                         created_at=now,
                     )
-                    if issue_created:
-                        journal._append_event_in_transaction(
-                            session_id=session_id,
-                            command_id=command_id,
-                            event_type="ingestion.blocked",
-                            payload={"error_code": BridgeErrorCode.SEQUENCE_COLLISION.value},
-                            created_at=now,
-                        )
                     collision_err = CollisionError(
                         BridgeErrorCode.SEQUENCE_COLLISION,
                         f"Sequence collision for session {session_id} sequence {sequence}",
@@ -909,57 +889,69 @@ def record_ingested_command(
                 else:
                     try:
                         decoded_content = raw_content.decode("utf-8", errors="strict")
-                    except UnicodeDecodeError as decode_exc:
-                        raise BridgeError(
-                            BridgeErrorCode.INVALID_PAYLOAD,
-                            f"Command content must be valid UTF-8: {decode_exc}",
+                        journal._connection.execute(
+                            """
+                            INSERT INTO commands (
+                                command_id, session_id, sequence, command_sha256, command_json,
+                                command_commit_sha, state, expected_revision, expected_state_hash,
+                                created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                            """,
+                            (
+                                command_id,
+                                session_id,
+                                sequence,
+                                raw_sha256_value,
+                                decoded_content,
+                                document_commit_sha,
+                                CommandState.DISCOVERED.value,
+                                now,
+                                now,
+                            ),
                         )
 
-                    journal._connection.execute(
-                        """
-                        INSERT INTO commands (
-                            command_id, session_id, sequence, command_sha256, command_json,
-                            command_commit_sha, state, expected_revision, expected_state_hash,
-                            created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
-                        """,
-                        (
-                            command_id,
-                            session_id,
-                            sequence,
-                            raw_sha256_value,
-                            decoded_content,
-                            document_commit_sha,
-                            CommandState.DISCOVERED.value,
-                            now,
-                            now,
-                        ),
-                    )
+                        journal._connection.execute(
+                            """
+                            INSERT INTO command_ingestion (
+                                command_id, source_id, snapshot_sha, source_path, document_commit_sha, raw_sha256,
+                                created_remote_at, expires_at, first_seen_at, last_seen_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                            """,
+                            (command_id, source_id, snapshot_sha, source_path, document_commit_sha, raw_sha256_value, now, now),
+                        )
 
-                    journal._connection.execute(
-                        """
-                        INSERT INTO command_ingestion (
-                            command_id, source_id, snapshot_sha, source_path, document_commit_sha, raw_sha256,
-                            created_remote_at, expires_at, first_seen_at, last_seen_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
-                        """,
-                        (command_id, source_id, snapshot_sha, source_path, document_commit_sha, raw_sha256_value, now, now),
-                    )
-
-                    journal._append_event_in_transaction(
-                        session_id=session_id,
-                        command_id=command_id,
-                        event_type="command.discovered",
-                        payload={"sequence": sequence, "source_path": source_path},
-                        created_at=now,
-                    )
-                    rec = get_command_ingestion(journal, command_id)
-                    created = True
+                        journal._append_event_in_transaction(
+                            session_id=session_id,
+                            command_id=command_id,
+                            event_type="command.discovered",
+                            payload={"sequence": sequence, "source_path": source_path},
+                            created_at=now,
+                        )
+                        rec = get_command_ingestion(journal, command_id)
+                        created = True
+                    except UnicodeDecodeError as decode_exc:
+                        issue_created = record_ingestion_issue_in_transaction(
+                            journal,
+                            source_id=source_id,
+                            source_path=source_path,
+                            snapshot_sha=snapshot_sha,
+                            raw_sha256=raw_sha256_value,
+                            error_code=BridgeErrorCode.INVALID_PAYLOAD.value,
+                            detail=f"UTF-8 decode failed for command: {decode_exc}",
+                            blocking=False,
+                            created_at=now,
+                            document_commit_sha=document_commit_sha,
+                            session_id=session_id,
+                            command_id=command_id,
+                        )
+                        rec = None
+                        created = False
+                        issues_created = 1 if issue_created else 0
 
     if collision_err is not None:
         raise collision_err
 
-    return rec, created
+    return rec, created, issues_created
 
 
 def list_discovered_commands(journal: Journal) -> list[CommandRecord]:
@@ -1315,7 +1307,7 @@ def expire_stale_sessions(journal: Journal, *, now_dt: datetime) -> None:
         journal.expire_session_and_pending_commands(record.session_id, record.expires_at)
 
 
-def _promote_pending_commands_in_transaction(journal: Journal, session_id: str, now: str) -> tuple[int, list[CollisionError]]:
+def _promote_pending_commands_in_transaction(journal: Journal, session_id: str, now: str) -> PromotionOutcome:
     pending_rows = journal._connection.execute(
         """
         SELECT sequence, source_id, snapshot_sha, source_path, document_commit_sha, raw_sha256, content, first_seen_at, last_seen_at
@@ -1326,7 +1318,8 @@ def _promote_pending_commands_in_transaction(journal: Journal, session_id: str, 
     ).fetchall()
 
     promoted_count = 0
-    collisions = []
+    issues_created = 0
+    blocking_collisions = []
     for seq, src_id, snap_sha, src_path, doc_commit_sha, r_sha256, content, first_seen, last_seen in pending_rows:
         command_id = command_id_for(session_id, seq)
         existing_row = journal._connection.execute(
@@ -1349,14 +1342,8 @@ def _promote_pending_commands_in_transaction(journal: Journal, session_id: str, 
                 command_id=command_id,
             )
             if issue_created:
-                journal._append_event_in_transaction(
-                    session_id=session_id,
-                    command_id=command_id,
-                    event_type="ingestion.blocked",
-                    payload={"error_code": BridgeErrorCode.SEQUENCE_COLLISION.value},
-                    created_at=now,
-                )
-            collisions.append(
+                issues_created += 1
+            blocking_collisions.append(
                 CollisionError(
                     BridgeErrorCode.SEQUENCE_COLLISION,
                     f"Sequence collision during staged promotion for session {session_id} sequence {seq}",
@@ -1379,27 +1366,14 @@ def _promote_pending_commands_in_transaction(journal: Journal, session_id: str, 
                     raw_sha256=r_sha256,
                     error_code=BridgeErrorCode.INVALID_PAYLOAD.value,
                     detail=f"UTF-8 decode failed for staged command: {decode_exc}",
-                    blocking=True,
+                    blocking=False,
                     created_at=now,
                     document_commit_sha=doc_commit_sha,
                     session_id=session_id,
                     command_id=command_id,
                 )
                 if issue_created:
-                    journal._append_event_in_transaction(
-                        session_id=session_id,
-                        command_id=command_id,
-                        event_type="ingestion.blocked",
-                        payload={"error_code": BridgeErrorCode.INVALID_PAYLOAD.value},
-                        created_at=now,
-                    )
-                collisions.append(
-                    CollisionError(
-                        BridgeErrorCode.INVALID_PAYLOAD,
-                        f"UTF-8 decode failed for staged command: {decode_exc}",
-                        issue_created=issue_created,
-                    )
-                )
+                    issues_created += 1
                 continue
 
         journal._connection.execute(
@@ -1447,7 +1421,11 @@ def _promote_pending_commands_in_transaction(journal: Journal, session_id: str, 
         )
         promoted_count += 1
 
-    return promoted_count, collisions
+    return PromotionOutcome(
+        promoted_count=promoted_count,
+        issues_created=issues_created,
+        blocking_collisions=tuple(blocking_collisions),
+    )
 
 
 def _add_seconds_iso(iso_timestamp: str, seconds: float) -> str:

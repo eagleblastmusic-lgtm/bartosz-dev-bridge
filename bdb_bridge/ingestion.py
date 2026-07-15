@@ -194,14 +194,19 @@ class CommandIngestor:
                     created_remote_at=require_string(parsed, "created_at"),
                     expires_at=require_string(parsed, "expires_at"),
                 )
-                record, created, promoted = outcome
+                record, created, promotion_outcome = outcome
                 if created:
                     manifests_recorded += 1
-                commands_discovered += promoted
+                commands_discovered += promotion_outcome.promoted_count
+                issues_recorded += promotion_outcome.issues_created
             except CollisionError as exc:
                 collisions.append(exc)
-                if exc.issue_created:
-                    issues_recorded += 1
+                if exc.promotion_outcome is not None:
+                    commands_discovered += exc.promotion_outcome.promoted_count
+                    issues_recorded += exc.promotion_outcome.issues_created
+                else:
+                    if exc.issue_created:
+                        issues_recorded += 1
             except Exception as exc:
                 err_code = getattr(exc, "code", BridgeErrorCode.INVALID_PAYLOAD.value)
                 raw_hash = calculate_raw_sha256(document.content)
@@ -237,9 +242,10 @@ class CommandIngestor:
                     raw_sha256_value=raw_hash,
                 )
                 if outcome is not None:
-                    record, created = outcome
+                    record, created, issues_created = outcome
                     if record is not None and created:
                         commands_discovered += 1
+                    issues_recorded += issues_created
             except CollisionError as exc:
                 collisions.append(exc)
                 if exc.issue_created:

@@ -355,3 +355,15 @@ class PollReport:
     ingestion: IngestionReport | None
     error_code: str | None
     error_message: str | None
+
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .journal_ingestion import CollisionError
+
+
+@dataclass(frozen=True)
+class PromotionOutcome:
+    promoted_count: int
+    issues_created: int
+    blocking_collisions: tuple[CollisionError, ...]

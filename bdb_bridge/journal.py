@@ -26,6 +26,7 @@ from .models import (
     WorkspaceRecord,
     validate_command_transition,
     validate_session_transition,
+    PromotionOutcome,
 )
 from .protocol import BridgeError, result_path_for, validate_session_id
 from .serializers import MAX_RESULT_BYTES, canonical_json, sha256_text
@@ -861,7 +862,7 @@ class Journal:
         base_sha: str,
         created_remote_at: str,
         expires_at: str,
-    ) -> tuple[SessionIngestionRecord, bool, int]:
+    ) -> tuple[SessionIngestionRecord, bool, PromotionOutcome]:
         from . import journal_ingestion as _ji
 
         return _ji.record_session_manifest(
@@ -890,9 +891,9 @@ class Journal:
         session_id: str,
         sequence: int,
         document_commit_sha: str,
-        raw_content: str,
+        raw_content: bytes,
         raw_sha256_value: str,
-    ) -> tuple[CommandIngestionRecord | None, bool]:
+    ) -> tuple[CommandIngestionRecord | None, bool, int]:
         from . import journal_ingestion as _ji
 
         return _ji.record_ingested_command(
