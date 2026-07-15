@@ -44,6 +44,7 @@ def test_empty_db_applies_all_migrations(tmp_path: Path) -> None:
             "session_ingestion",
             "command_ingestion",
             "ingestion_issues",
+            "pending_command_documents",
         }
         migrations = journal._connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
@@ -292,8 +293,8 @@ def test_migration_checksum_matches_statements() -> None:
     assert len(migration.checksum()) == 64
 
 
-def test_v1_checksum_unchanged() -> None:
-    assert MIGRATIONS[0].statements == MIGRATION_V1_STATEMENTS
+def test_v1_checksum_matches_golden() -> None:
+    assert MIGRATIONS[0].checksum() == "1d293179f582464fa10eecd37fb381c0a5913d85ed629c9ec244c8bfdb2fe31a"
 
 
 def test_upgrade_existing_v1_database_to_v2(tmp_path: Path) -> None:
@@ -313,6 +314,145 @@ def test_upgrade_existing_v1_database_to_v2(tmp_path: Path) -> None:
         ).fetchone() is not None
     finally:
         journal.close()
+
+
+def test_upgrade_existing_v1_database_to_v2_with_data(tmp_path: Path) -> None:
+    path = tmp_path / "v1_data.db"
+    conn = sqlite3.connect(path, timeout=5.0, isolation_level=None)
+
+    # 1. Apply v1
+    apply_migrations(conn, (MIGRATIONS[0],), now_fn=fixed_now)
+
+    # 2. Insert real v1 data: sessions, commands, workspaces, results, events
+    now = FIXED_NOW
+    conn.execute(
+        "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)",
+        ("s1", "repo1", "a" * 40, "created", now, now)
+    )
+    conn.execute(
+        "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)",
+        ("s2", "repo1", "b" * 40, "active", now, now)
+    )
+    conn.execute(
+        "INSERT INTO commands VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("c1", "s2", 1, "sha256:" + "a" * 64, '{"op":"test"}', "c" * 40, "claimed", 0, "hash1", now, now)
+    )
+    conn.execute(
+        "INSERT INTO commands VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("c2", "s2", 2, "sha256:" + "b" * 64, '{"op":"test2"}', "d" * 40, "discovered", 0, "hash2", now, now)
+    )
+    conn.execute(
+        "INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("s2", "/path/to/ws", "b" * 40, 1, "hashws", now, now)
+    )
+    conn.execute(
+        "INSERT INTO results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("c1", "s2", 1, "success", None, "sha256:" + "r" * 64, "{}", "remote/path", now)
+    )
+    conn.execute(
+        "INSERT INTO events (session_id, command_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+        ("s2", "c1", "test_event", '{"foo":"bar"}', now)
+    )
+
+    # Check current state in v1
+    v1_sessions = conn.execute("SELECT * FROM sessions ORDER BY session_id").fetchall()
+    v1_commands = conn.execute("SELECT * FROM commands ORDER BY command_id").fetchall()
+    v1_workspaces = conn.execute("SELECT * FROM workspaces").fetchall()
+    v1_results = conn.execute("SELECT * FROM results").fetchall()
+    v1_events = conn.execute("SELECT session_id, command_id, event_type, payload_json, created_at FROM events").fetchall()
+
+    conn.close()
+
+    # 3. Apply v2 migration
+    journal = Journal.open(path, now_fn=fixed_now)
+    try:
+        # Check all versions
+        versions = journal._connection.execute(
+            "SELECT version, name FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert versions == [(1, "journal_v1_initial"), (2, "journal_v2_ingestion")]
+
+        # Verify data preserved byte-for-byte
+        v2_sessions = journal._connection.execute("SELECT session_id, repository_id, base_sha, state, created_at, updated_at FROM sessions ORDER BY session_id").fetchall()
+        assert v2_sessions == v1_sessions
+
+        v2_commands = journal._connection.execute("SELECT command_id, session_id, sequence, command_sha256, command_json, command_commit_sha, state, expected_revision, expected_state_hash, created_at, updated_at FROM commands ORDER BY command_id").fetchall()
+        assert v2_commands == v1_commands
+
+        v2_workspaces = journal._connection.execute("SELECT session_id, workspace_path, base_sha, revision, state_hash, created_at, updated_at FROM workspaces").fetchall()
+        assert v2_workspaces == v1_workspaces
+
+        v2_results = journal._connection.execute("SELECT command_id, session_id, sequence, status, error_code, result_sha256, result_json, remote_path, created_at FROM results").fetchall()
+        assert v2_results == v1_results
+
+        v2_events = journal._connection.execute("SELECT session_id, command_id, event_type, payload_json, created_at FROM events").fetchall()
+        assert v2_events == v1_events
+    finally:
+        journal.close()
+
+
+def test_upgrade_rejects_two_active_sessions_and_rolls_back(tmp_path: Path) -> None:
+    path = tmp_path / "v1_conflict_sessions.db"
+    conn = sqlite3.connect(path, timeout=5.0, isolation_level=None)
+    apply_migrations(conn, (MIGRATIONS[0],), now_fn=fixed_now)
+
+    now = FIXED_NOW
+    conn.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)", ("s1", "repo1", "a" * 40, "active", now, now))
+    conn.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)", ("s2", "repo1", "b" * 40, "completing", now, now))
+
+    # Save original v1 sessions
+    v1_sessions = conn.execute("SELECT * FROM sessions").fetchall()
+
+    with pytest.raises(BridgeError) as exc:
+        apply_migrations(conn, MIGRATIONS, now_fn=fixed_now)
+    assert exc.value.code == BridgeErrorCode.JOURNAL_MIGRATION_MISMATCH
+    assert not conn.in_transaction
+
+    # Ensure v2 tables/indexes are absent
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "ingestion_sources" not in tables
+    assert "pending_command_documents" not in tables
+
+    # Ensure version is still 1
+    versions = conn.execute("SELECT version FROM schema_migrations").fetchall()
+    assert versions == [(1,)]
+
+    # Check sessions data is preserved
+    v1_sessions_after = conn.execute("SELECT * FROM sessions").fetchall()
+    assert v1_sessions_after == v1_sessions
+    conn.close()
+
+
+def test_upgrade_rejects_two_active_workers_and_rolls_back(tmp_path: Path) -> None:
+    path = tmp_path / "v1_conflict_workers.db"
+    conn = sqlite3.connect(path, timeout=5.0, isolation_level=None)
+    apply_migrations(conn, (MIGRATIONS[0],), now_fn=fixed_now)
+
+    now = FIXED_NOW
+    conn.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)", ("s1", "repo1", "a" * 40, "active", now, now))
+    conn.execute("INSERT INTO commands VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("c1", "s1", 1, "sha256:" + "a" * 64, '{}', "c" * 40, "executing", 0, "hash1", now, now))
+    conn.execute("INSERT INTO commands VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("c2", "s1", 2, "sha256:" + "b" * 64, '{}', "d" * 40, "claimed", 0, "hash2", now, now))
+
+    # Save original v1 data
+    v1_commands = conn.execute("SELECT * FROM commands").fetchall()
+
+    with pytest.raises(BridgeError) as exc:
+        apply_migrations(conn, MIGRATIONS, now_fn=fixed_now)
+    assert exc.value.code == BridgeErrorCode.JOURNAL_MIGRATION_MISMATCH
+    assert not conn.in_transaction
+
+    # Ensure v2 tables/indexes are absent
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "ingestion_sources" not in tables
+
+    # Ensure version is still 1
+    versions = conn.execute("SELECT version FROM schema_migrations").fetchall()
+    assert versions == [(1,)]
+
+    # Check commands data is preserved
+    v1_commands_after = conn.execute("SELECT * FROM commands").fetchall()
+    assert v1_commands_after == v1_commands
+    conn.close()
 
 
 def test_v2_partial_unique_indexes_exist(tmp_path: Path) -> None:

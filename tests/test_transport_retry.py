@@ -42,7 +42,7 @@ def open_journal(tmp_path: Path) -> Journal:
 
 def snapshot_from_docs(
     *,
-    snapshot_sha: str = "c" * 40,
+    snapshot_sha: str = "e" * 40,
     manifests: list[RemoteDocument] | None = None,
     commands: list[RemoteDocument] | None = None,
 ) -> CommandSnapshot:
@@ -53,22 +53,32 @@ def snapshot_from_docs(
     )
 
 
-def manifest_doc(session_id: str = SESSION_ID, content: str | None = None) -> RemoteDocument:
+def manifest_doc(session_id: str = SESSION_ID, content: str | bytes | None = None) -> RemoteDocument:
     payload = manifest_payload(session_id=session_id)
-    text = content if content is not None else __import__("json").dumps(payload)
+    if content is None:
+        b_content = __import__("json").dumps(payload).encode("utf-8")
+    elif isinstance(content, str):
+        b_content = content.encode("utf-8")
+    else:
+        b_content = content
     return RemoteDocument(
         path=f"sessions/{session_id}/manifest.json",
-        content=text,
-        document_commit_sha="m" * 40,
+        content=b_content,
+        document_commit_sha="f" * 40,
     )
 
 
-def command_doc(sequence: int = 1, session_id: str = SESSION_ID, content: str | None = None) -> RemoteDocument:
+def command_doc(sequence: int = 1, session_id: str = SESSION_ID, content: str | bytes | None = None) -> RemoteDocument:
     payload = command_payload(session_id=session_id, sequence=sequence)
-    text = content if content is not None else __import__("json").dumps(payload)
+    if content is None:
+        b_content = __import__("json").dumps(payload).encode("utf-8")
+    elif isinstance(content, str):
+        b_content = content.encode("utf-8")
+    else:
+        b_content = content
     return RemoteDocument(
         path=f"sessions/{session_id}/commands/{sequence:06d}.json",
-        content=text,
+        content=b_content,
         document_commit_sha=f"{sequence:040d}",
     )
 

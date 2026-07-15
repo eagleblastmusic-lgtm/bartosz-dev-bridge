@@ -49,7 +49,7 @@ def test_does_not_claim_sequence_two_before_one(tmp_path: Path) -> None:
 def test_sequence_gap_blocks_queue(tmp_path: Path) -> None:
     journal = open_journal(tmp_path)
     prepare_validated_session(journal, sequences=(1,))
-    ingest(journal, make_snapshot(sequences=(1, 3), snapshot_sha="g" * 40))
+    ingest(journal, make_snapshot(sequences=(1, 3), snapshot_sha="f" * 40))
     scheduler = SingleQueueScheduler(journal)
     first = scheduler.claim_next()
     complete_command(journal, first.command_id)
@@ -73,7 +73,7 @@ def test_sequence_two_claimed_after_one_done(tmp_path: Path) -> None:
 def test_one_active_session_blocks_other(tmp_path: Path) -> None:
     journal = open_journal(tmp_path)
     combined = CommandSnapshot(
-        snapshot_sha="h" * 40,
+        snapshot_sha="e" * 40,
         manifests=make_snapshot(session_id=SESSION_ID).manifests
         + make_snapshot(session_id=SESSION_ID_B).manifests,
         commands=make_snapshot(session_id=SESSION_ID, sequences=(1,)).commands
@@ -99,7 +99,7 @@ def test_blocking_ingestion_issue_stops_claim(tmp_path: Path) -> None:
     journal.record_ingestion_issue(
         source_id="commands",
         source_path=f"sessions/{SESSION_ID}/manifest.json",
-        snapshot_sha="i" * 40,
+        snapshot_sha="d" * 40,
         raw_sha256="sha256:" + "a" * 64,
         error_code="session_id_collision",
         detail="blocked",
@@ -203,7 +203,7 @@ def test_fault_injection_before_commit_leaves_old_state(tmp_path: Path) -> None:
 def test_deterministic_session_ordering(tmp_path: Path) -> None:
     journal = open_journal(tmp_path)
     combined = CommandSnapshot(
-        snapshot_sha="j" * 40,
+        snapshot_sha="c" * 40,
         manifests=make_snapshot(session_id=SESSION_ID_B).manifests
         + make_snapshot(session_id=SESSION_ID).manifests,
         commands=make_snapshot(session_id=SESSION_ID_B, sequences=(1,)).commands

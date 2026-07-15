@@ -18,6 +18,7 @@ from tests.helpers.git_control_repo import (
     manifest_payload,
     write_command,
     write_manifest,
+    run_git,
 )
 
 
@@ -35,7 +36,26 @@ def test_snapshot_uses_single_sha(tmp_path: Path) -> None:
     assert len(snapshot.commands) == 1
 
 
-def test_branch_move_without_fetch_keeps_snapshot_sha(tmp_path: Path) -> None:
+def test_branch_moves_between_fetches(tmp_path: Path) -> None:
+    fixture = init_control_remote(tmp_path)
+    write_manifest(fixture.writer, SESSION_ID, manifest_payload())
+    write_command(fixture.writer, SESSION_ID, 1, command_payload(sequence=1))
+    original_sha = commit_and_push_commands(fixture.writer)
+    fetch_clone(fixture.clone)
+
+    transport = GitCommandTransport(fixture.clone)
+    original = transport.fetch_snapshot()
+    assert original.snapshot_sha == original_sha
+
+    write_command(fixture.writer, SESSION_ID, 2, command_payload(sequence=2))
+    new_sha = commit_and_push_commands(fixture.writer, "add command 2")
+
+    reread = transport.fetch_snapshot()
+    assert reread.snapshot_sha == new_sha
+    assert len(reread.commands) == 2
+
+
+def test_snapshot_remains_consistent_if_remote_moves_mid_fetch(tmp_path: Path) -> None:
     fixture = init_control_remote(tmp_path)
     write_manifest(fixture.writer, SESSION_ID, manifest_payload())
     write_command(fixture.writer, SESSION_ID, 1, command_payload(sequence=1))
@@ -43,14 +63,93 @@ def test_branch_move_without_fetch_keeps_snapshot_sha(tmp_path: Path) -> None:
     fetch_clone(fixture.clone)
 
     transport = GitCommandTransport(fixture.clone)
-    original = transport.fetch_snapshot()
 
-    write_command(fixture.writer, SESSION_ID, 2, command_payload(sequence=2))
-    commit_and_push_commands(fixture.writer, "add command 2")
+    committed = False
+    original_read = transport._read_document
+    def mock_read(snapshot_sha, path):
+        nonlocal committed
+        if not committed:
+            write_command(fixture.writer, SESSION_ID, 2, command_payload(sequence=2))
+            commit_and_push_commands(fixture.writer, "add command 2")
+            committed = True
+        return original_read(snapshot_sha, path)
 
-    reread = transport.fetch_snapshot()
-    assert reread.snapshot_sha == original.snapshot_sha
-    assert len(reread.commands) == 1
+    with patch.object(transport, "_read_document", side_effect=mock_read):
+        snapshot = transport.fetch_snapshot()
+        assert len(snapshot.commands) == 1
+
+    next_snap = transport.fetch_snapshot()
+    assert len(next_snap.commands) == 2
+
+
+def test_custom_remote_and_branch(tmp_path: Path) -> None:
+    fixture = init_control_remote(tmp_path)
+
+    run_git(fixture.clone, "remote", "rename", "origin", "custom-remote")
+
+    run_git(fixture.writer, "checkout", "-B", "custom-branch", "commands")
+    run_git(fixture.writer, "push", "-u", "origin", "custom-branch")
+
+    write_manifest(fixture.writer, SESSION_ID, manifest_payload())
+    write_command(fixture.writer, SESSION_ID, 1, command_payload(sequence=1))
+    run_git(fixture.writer, "add", "--", "sessions")
+    run_git(fixture.writer, "commit", "-m", "update custom commands")
+    run_git(fixture.writer, "push", "origin", "custom-branch")
+
+    run_git(
+        fixture.clone,
+        "fetch",
+        "custom-remote",
+        "+refs/heads/custom-branch:refs/remotes/custom-remote/custom-branch"
+    )
+
+    transport = GitCommandTransport(
+        fixture.clone,
+        remote="custom-remote",
+        commands_branch="custom-branch",
+    )
+    snapshot = transport.fetch_snapshot()
+    assert len(snapshot.commands) == 1
+
+
+def test_transport_no_mutating_actions_on_fetch(tmp_path: Path) -> None:
+    fixture = init_control_remote(tmp_path)
+    write_manifest(fixture.writer, SESSION_ID, manifest_payload())
+    write_command(fixture.writer, SESSION_ID, 1, command_payload(sequence=1))
+    commit_and_push_commands(fixture.writer)
+    fetch_clone(fixture.clone)
+
+    transport = GitCommandTransport(fixture.clone)
+
+    branch_before = run_git(fixture.clone, "branch", "--show-current").stdout.strip()
+    status_before = run_git(fixture.clone, "status", "--porcelain").stdout.strip()
+
+    snapshot = transport.fetch_snapshot()
+
+    branch_after = run_git(fixture.clone, "branch", "--show-current").stdout.strip()
+    status_after = run_git(fixture.clone, "status", "--porcelain").stdout.strip()
+
+    assert branch_before == branch_after
+    assert status_before == status_after
+
+
+def test_malformed_utf8_in_document_not_failing_transport(tmp_path: Path) -> None:
+    fixture = init_control_remote(tmp_path)
+    write_manifest(fixture.writer, SESSION_ID, manifest_payload())
+
+    cmd_dir = fixture.writer / "sessions" / SESSION_ID / "commands"
+    cmd_dir.mkdir(parents=True, exist_ok=True)
+    with open(cmd_dir / "000001.json", "wb") as f:
+        f.write(b'{"operation": "open_read", "malformed": \xff\xfe}')
+
+    commit_and_push_commands(fixture.writer)
+    fetch_clone(fixture.clone)
+
+    transport = GitCommandTransport(fixture.clone)
+    snapshot = transport.fetch_snapshot()
+
+    assert len(snapshot.commands) == 1
+    assert snapshot.commands[0].content == b'{"operation": "open_read", "malformed": \xff\xfe}'
 
 
 def test_document_commit_sha_is_per_document(tmp_path: Path) -> None:
@@ -130,6 +229,6 @@ class FakeTransport:
 
 
 def test_immutable_snapshot_class(tmp_path: Path) -> None:
-    doc = RemoteDocument(path="sessions/x/manifest.json", content="{}", document_commit_sha="b" * 40)
+    doc = RemoteDocument(path="sessions/x/manifest.json", content=b"{}", document_commit_sha="b" * 40)
     snap = CommandSnapshot(snapshot_sha="a" * 40, manifests=(doc,), commands=())
     assert snap.snapshot_sha == "a" * 40

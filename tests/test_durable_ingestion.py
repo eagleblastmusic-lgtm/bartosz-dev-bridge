@@ -54,15 +54,15 @@ def make_snapshot(
     sequences: tuple[int, ...] = (1,),
     manifest: dict | None = None,
     command_overrides: dict[int, dict] | None = None,
-    snapshot_sha: str = "s" * 40,
+    snapshot_sha: str = "e" * 40,
 ) -> CommandSnapshot:
     manifest_body = manifest or manifest_payload(session_id=session_id)
-    manifest_text = json.dumps(manifest_body)
+    manifest_bytes = json.dumps(manifest_body).encode("utf-8")
     manifests = [
         RemoteDocument(
             path=f"sessions/{session_id}/manifest.json",
-            content=manifest_text,
-            document_commit_sha="m" * 40,
+            content=manifest_bytes,
+            document_commit_sha="f" * 40,
         )
     ]
     commands = []
@@ -73,7 +73,7 @@ def make_snapshot(
         commands.append(
             RemoteDocument(
                 path=f"sessions/{session_id}/commands/{sequence:06d}.json",
-                content=json.dumps(payload),
+                content=json.dumps(payload).encode("utf-8"),
                 document_commit_sha=f"{sequence:040x}",
             )
         )
@@ -125,7 +125,7 @@ def test_manifest_collision_is_blocking(tmp_path: Path) -> None:
             **manifest_payload(),
             "repository_id": "other-repo",
         },
-        snapshot_sha="t" * 40,
+        snapshot_sha="d" * 40,
     )
     ingestor = CommandIngestor(journal, FakeTransport(mutated))
     with pytest.raises(BridgeError) as exc:
@@ -140,15 +140,15 @@ def test_command_collision_whitespace_mutation(tmp_path: Path) -> None:
     first = make_snapshot()
     ingest(journal, first)
     payload = command_payload(sequence=1)
-    whitespace_variant = json.dumps(payload) + " "
+    whitespace_bytes = (json.dumps(payload) + " ").encode("utf-8")
     mutated = CommandSnapshot(
-        snapshot_sha="u" * 40,
+        snapshot_sha="c" * 40,
         manifests=first.manifests,
         commands=(
             RemoteDocument(
                 path=f"sessions/{SESSION_ID}/commands/000001.json",
-                content=whitespace_variant,
-                document_commit_sha="n" * 40,
+                content=whitespace_bytes,
+                document_commit_sha="b" * 40,
             ),
         ),
     )
@@ -209,7 +209,7 @@ def test_sequence_gap_then_later_sequence_one(tmp_path: Path) -> None:
     assert command_two is not None
     assert command_two.state == CommandState.DISCOVERED
 
-    with_seq1 = make_snapshot(sequences=(1, 2), snapshot_sha="v" * 40)
+    with_seq1 = make_snapshot(sequences=(1, 2), snapshot_sha="a" * 40)
     ingestor.ingest_snapshot(with_seq1)
     ingestor.validate_pending()
     assert journal.get_command(f"{SESSION_ID}:000001").state == CommandState.VALIDATED
@@ -220,7 +220,7 @@ def test_sequence_gap_then_later_sequence_one(tmp_path: Path) -> None:
 def test_command_without_manifest_not_claimed(tmp_path: Path) -> None:
     journal = open_journal(tmp_path)
     command_only = CommandSnapshot(
-        snapshot_sha="w" * 40,
+        snapshot_sha="9" * 40,
         manifests=(),
         commands=(make_snapshot(sequences=(1,)).commands[0],),
     )
@@ -245,12 +245,12 @@ def test_ingestor_does_not_execute_commands(tmp_path: Path) -> None:
 def test_malformed_json_records_issue(tmp_path: Path) -> None:
     journal = open_journal(tmp_path)
     snapshot = CommandSnapshot(
-        snapshot_sha="x" * 40,
+        snapshot_sha="8" * 40,
         manifests=(
             RemoteDocument(
                 path=f"sessions/{SESSION_ID}/manifest.json",
-                content="{bad",
-                document_commit_sha="y" * 40,
+                content=b"{bad",
+                document_commit_sha="7" * 40,
             ),
         ),
         commands=(),
@@ -266,11 +266,419 @@ def test_two_sessions_ingested(tmp_path: Path) -> None:
     snap_a = make_snapshot(session_id=SESSION_ID, snapshot_sha="a" * 40)
     snap_b = make_snapshot(session_id=SESSION_ID_B, snapshot_sha="b" * 40)
     combined = CommandSnapshot(
-        snapshot_sha="z" * 40,
+        snapshot_sha="0" * 40,
         manifests=snap_a.manifests + snap_b.manifests,
         commands=snap_a.commands + snap_b.commands,
     )
     ingest(journal, combined)
     assert journal.get_session(SESSION_ID) is not None
     assert journal.get_session(SESSION_ID_B) is not None
+    journal.close()
+
+
+def test_durable_staging_lifecycle(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+
+    # 1. Ingest command document without manifest
+    payload = command_payload(sequence=1)
+    raw_content = json.dumps(payload)
+    cmd_doc = RemoteDocument(
+        path=f"sessions/{SESSION_ID}/commands/000001.json",
+        content=raw_content.encode("utf-8"),
+        document_commit_sha="a" * 40,
+    )
+
+    snap = CommandSnapshot(snapshot_sha="d" * 40, manifests=(), commands=(cmd_doc,))
+    ingestor = CommandIngestor(journal, FakeTransport(snap))
+    report = ingestor.ingest_snapshot(snap)
+
+    assert report.commands_discovered == 0
+    assert report.issues_recorded == 0
+
+    # Check that it is staged in pending_command_documents
+    row = journal._connection.execute(
+        "SELECT session_id, sequence, content, raw_sha256 FROM pending_command_documents"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == SESSION_ID
+    assert row[1] == 1
+    assert row[2] == raw_content
+
+    # Check commands table is empty
+    cmd = journal.get_command(f"{SESSION_ID}:000001")
+    assert cmd is None
+
+    # Reopen journal
+    journal.close()
+    journal = open_journal(tmp_path)
+
+    # Verify staged row survived reopen
+    row = journal._connection.execute(
+        "SELECT session_id, sequence, content, raw_sha256 FROM pending_command_documents"
+    ).fetchone()
+    assert row is not None
+    assert row[2] == raw_content
+
+    # Verify scheduler does not see staging row
+    scheduler = SingleQueueScheduler(journal)
+    assert scheduler.claim_next() is None
+
+    # Ingest the manifest to trigger promotion
+    manifest_doc = RemoteDocument(
+        path=f"sessions/{SESSION_ID}/manifest.json",
+        content=json.dumps(manifest_payload(session_id=SESSION_ID)).encode("utf-8"),
+        document_commit_sha="b" * 40,
+    )
+    snap2 = CommandSnapshot(snapshot_sha="d" * 40, manifests=(manifest_doc,), commands=())
+    ingestor2 = CommandIngestor(journal, FakeTransport(snap2))
+    report2 = ingestor2.ingest_snapshot(snap2)
+
+    # Verify promotion occurred
+    assert report2.manifests_recorded == 1
+    assert report2.commands_discovered == 1
+    mutated = CommandSnapshot(
+        snapshot_sha="c" * 40,
+        manifests=first.manifests,
+        commands=(
+            RemoteDocument(
+                path=f"sessions/{SESSION_ID}/commands/000001.json",
+                content=whitespace_bytes,
+                document_commit_sha="b" * 40,
+            ),
+        ),
+    )
+    ingestor = CommandIngestor(journal, FakeTransport(mutated))
+    with pytest.raises(BridgeError) as exc:
+        ingestor.ingest_snapshot(mutated)
+    assert exc.value.code == BridgeErrorCode.COMMAND_ID_COLLISION.value
+    journal.close()
+
+
+def test_unsupported_schema_rejected(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    snapshot = make_snapshot(
+        command_overrides={1: {"schema_version": "9.9"}},
+    )
+    ingestor = CommandIngestor(journal, FakeTransport(snapshot))
+    ingestor.ingest_snapshot(snapshot)
+    ingestor.validate_pending()
+    command = journal.get_command(f"{SESSION_ID}:000001")
+    assert command.state == CommandState.REJECTED
+    journal.close()
+
+
+def test_expired_command_at_boundary(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    snapshot = make_snapshot(
+        command_overrides={
+            1: {
+                "created_at": "2026-07-15T05:00:00Z",
+                "expires_at": FIXED_NOW,
+            }
+        },
+    )
+    ingest(journal, snapshot)
+    command = journal.get_command(f"{SESSION_ID}:000001")
+    assert command.state == CommandState.EXPIRED
+    journal.close()
+
+
+def test_expired_manifest_aborts_session(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    snapshot = make_snapshot(
+        manifest=manifest_payload(expires_at=EXPIRED_AT, created_at="2026-07-13T08:00:00Z"),
+    )
+    ingest(journal, snapshot)
+    session = journal.get_session(SESSION_ID)
+    assert session.state == SessionState.ABORTED
+    journal.close()
+
+
+def test_sequence_gap_then_later_sequence_one(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    only_two = make_snapshot(sequences=(2,))
+    ingestor = CommandIngestor(journal, FakeTransport(only_two))
+    ingestor.ingest_snapshot(only_two)
+    ingestor.validate_pending()
+    command_two = journal.get_command(f"{SESSION_ID}:000002")
+    assert command_two is not None
+    assert command_two.state == CommandState.DISCOVERED
+
+    with_seq1 = make_snapshot(sequences=(1, 2), snapshot_sha="a" * 40)
+    ingestor.ingest_snapshot(with_seq1)
+    ingestor.validate_pending()
+    assert journal.get_command(f"{SESSION_ID}:000001").state == CommandState.VALIDATED
+    assert journal.get_command(f"{SESSION_ID}:000002").state == CommandState.VALIDATED
+    journal.close()
+
+
+def test_command_without_manifest_not_claimed(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    command_only = CommandSnapshot(
+        snapshot_sha="9" * 40,
+        manifests=(),
+        commands=(make_snapshot(sequences=(1,)).commands[0],),
+    )
+    ingestor = CommandIngestor(journal, FakeTransport(command_only))
+    ingestor.ingest_snapshot(command_only)
+    assert journal.get_command(f"{SESSION_ID}:000001") is None
+    scheduler = SingleQueueScheduler(journal)
+    assert scheduler.claim_next() is None
+    journal.close()
+
+
+def test_ingestor_does_not_execute_commands(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    ingest(journal, make_snapshot())
+    scheduler = SingleQueueScheduler(journal)
+    claimed = scheduler.claim_next()
+    assert claimed is not None
+    assert claimed.state == CommandState.CLAIMED
+    journal.close()
+
+
+def test_malformed_json_records_issue(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    snapshot = CommandSnapshot(
+        snapshot_sha="8" * 40,
+        manifests=(
+            RemoteDocument(
+                path=f"sessions/{SESSION_ID}/manifest.json",
+                content=b"{bad",
+                document_commit_sha="7" * 40,
+            ),
+        ),
+        commands=(),
+    )
+    ingestor = CommandIngestor(journal, FakeTransport(snapshot))
+    report = ingestor.ingest_snapshot(snapshot)
+    assert report.issues_recorded == 1
+    journal.close()
+
+
+def test_two_sessions_ingested(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    snap_a = make_snapshot(session_id=SESSION_ID, snapshot_sha="a" * 40)
+    snap_b = make_snapshot(session_id=SESSION_ID_B, snapshot_sha="b" * 40)
+    combined = CommandSnapshot(
+        snapshot_sha="0" * 40,
+        manifests=snap_a.manifests + snap_b.manifests,
+        commands=snap_a.commands + snap_b.commands,
+    )
+    ingest(journal, combined)
+    assert journal.get_session(SESSION_ID) is not None
+    assert journal.get_session(SESSION_ID_B) is not None
+    journal.close()
+
+
+def test_durable_staging_lifecycle(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+
+    # 1. Ingest command document without manifest
+    payload = command_payload(sequence=1)
+    raw_content = json.dumps(payload)
+    cmd_doc = RemoteDocument(
+        path=f"sessions/{SESSION_ID}/commands/000001.json",
+        content=raw_content.encode("utf-8"),
+        document_commit_sha="a" * 40,
+    )
+
+    snap = CommandSnapshot(snapshot_sha="d" * 40, manifests=(), commands=(cmd_doc,))
+    ingestor = CommandIngestor(journal, FakeTransport(snap))
+    report = ingestor.ingest_snapshot(snap)
+
+    assert report.commands_discovered == 0
+    assert report.issues_recorded == 0
+
+    # Check that it is staged in pending_command_documents
+    row = journal._connection.execute(
+        "SELECT session_id, sequence, content, raw_sha256 FROM pending_command_documents"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == SESSION_ID
+    assert row[1] == 1
+    assert row[2] == raw_content
+
+    # Check commands table is empty
+    cmd = journal.get_command(f"{SESSION_ID}:000001")
+    assert cmd is None
+
+    # Reopen journal
+    journal.close()
+    journal = open_journal(tmp_path)
+
+    # Verify staged row survived reopen
+    row = journal._connection.execute(
+        "SELECT session_id, sequence, content, raw_sha256 FROM pending_command_documents"
+    ).fetchone()
+    assert row is not None
+    assert row[2] == raw_content
+
+    # Verify scheduler does not see staging row
+    scheduler = SingleQueueScheduler(journal)
+    assert scheduler.claim_next() is None
+
+    # Ingest the manifest to trigger promotion
+    manifest_doc = RemoteDocument(
+        path=f"sessions/{SESSION_ID}/manifest.json",
+        content=json.dumps(manifest_payload(session_id=SESSION_ID)).encode("utf-8"),
+        document_commit_sha="b" * 40,
+    )
+    snap2 = CommandSnapshot(snapshot_sha="d" * 40, manifests=(manifest_doc,), commands=())
+    ingestor2 = CommandIngestor(journal, FakeTransport(snap2))
+    report2 = ingestor2.ingest_snapshot(snap2)
+
+    # Verify promotion occurred
+    assert report2.manifests_recorded == 1
+    assert report2.commands_discovered == 1
+
+    # Verify staged row is deleted
+    assert journal._connection.execute("SELECT COUNT(*) FROM pending_command_documents").fetchone()[0] == 0
+
+    # Verify promoted to commands / DISCOVERED
+    cmd = journal.get_command(f"{SESSION_ID}:000001")
+    assert cmd is not None
+    assert cmd.state == CommandState.DISCOVERED
+
+    # Verify command_ingestion is created
+    ing = journal.get_command_ingestion(f"{SESSION_ID}:000001")
+    assert ing is not None
+    assert ing.document_commit_sha == "a" * 40
+
+    # Test collision on staged command is blocking
+    journal.close()
+
+    (tmp_path / "coll").mkdir(parents=True, exist_ok=True)
+    journal = open_journal(tmp_path / "coll")
+    ingestor_c = CommandIngestor(journal, FakeTransport(snap))
+    ingestor_c.ingest_snapshot(snap)
+
+    payload_mut = command_payload(sequence=1, operation="mutated")
+    cmd_mut = RemoteDocument(
+        path=f"sessions/{SESSION_ID}/commands/000001.json",
+        content=json.dumps(payload_mut).encode("utf-8"),
+        document_commit_sha="c" * 40,
+    )
+    snap_mut = CommandSnapshot(snapshot_sha="d" * 40, manifests=(), commands=(cmd_mut,))
+    ingestor_c2 = CommandIngestor(journal, FakeTransport(snap_mut))
+
+    with pytest.raises(BridgeError) as exc:
+        ingestor_c2.ingest_snapshot(snap_mut)
+    assert exc.value.code == BridgeErrorCode.SEQUENCE_COLLISION.value
+    assert journal.has_blocking_ingestion_issues()
+    journal.close()
+
+
+class ConnectionWrapper:
+    def __init__(self, conn, inject_at):
+        self.conn = conn
+        self.inject_at = inject_at
+    def execute(self, sql, *args):
+        if "INSERT INTO commands" in sql and self.inject_at == "insert_commands":
+            raise sqlite3.Error("injected commands insert error")
+        if "INSERT INTO command_ingestion" in sql and self.inject_at == "insert_ingestion":
+            raise sqlite3.Error("injected ingestion insert error")
+        return self.conn.execute(sql, *args)
+    def __getattr__(self, name):
+        return getattr(self.conn, name)
+
+
+def test_promotion_fault_injection(tmp_path: Path) -> None:
+    payload = command_payload(sequence=1)
+    cmd_doc = RemoteDocument(
+        path=f"sessions/{SESSION_ID}/commands/000001.json",
+        content=json.dumps(payload).encode("utf-8"),
+        document_commit_sha="a" * 40,
+    )
+    manifest_doc = RemoteDocument(
+        path=f"sessions/{SESSION_ID}/manifest.json",
+        content=json.dumps(manifest_payload(session_id=SESSION_ID)).encode("utf-8"),
+        document_commit_sha="b" * 40,
+    )
+
+    for inject_at in ("insert_commands", "insert_ingestion", "event_append"):
+        (tmp_path / f"inject_{inject_at}").mkdir(parents=True, exist_ok=True)
+        journal = open_journal(tmp_path / f"inject_{inject_at}")
+
+        snap = CommandSnapshot(snapshot_sha="d" * 40, manifests=(), commands=(cmd_doc,))
+        CommandIngestor(journal, FakeTransport(snap)).ingest_snapshot(snap)
+
+        assert journal._connection.execute("SELECT COUNT(*) FROM pending_command_documents").fetchone()[0] == 1
+
+        orig_conn = journal._conn
+        journal._conn = ConnectionWrapper(orig_conn, inject_at)
+
+        orig_event = journal._append_event_in_transaction
+        def mock_event(*args, **kwargs):
+            if inject_at == "event_append":
+                raise RuntimeError("injected event error")
+            return orig_event(*args, **kwargs)
+
+        journal._append_event_in_transaction = mock_event
+
+        snap2 = CommandSnapshot(snapshot_sha="d" * 40, manifests=(manifest_doc,), commands=())
+        ingestor = CommandIngestor(journal, FakeTransport(snap2))
+
+        report = ingestor.ingest_snapshot(snap2)
+        assert report.issues_recorded > 0
+
+        journal._conn = orig_conn
+        journal._append_event_in_transaction = orig_event
+
+        assert journal.get_session_ingestion(SESSION_ID) is None
+        assert journal.get_command(f"{SESSION_ID}:000001") is None
+        assert journal._connection.execute("SELECT COUNT(*) FROM pending_command_documents").fetchone()[0] == 1
+
+        ingestor.ingest_snapshot(snap2)
+        assert journal.get_command(f"{SESSION_ID}:000001") is not None
+        assert journal._connection.execute("SELECT COUNT(*) FROM pending_command_documents").fetchone()[0] == 0
+
+        journal.close()
+
+
+def test_atomic_validation_fault_injection(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+
+    payload = command_payload(sequence=1)
+    cmd_doc = RemoteDocument(
+        path=f"sessions/{SESSION_ID}/commands/000001.json",
+        content=json.dumps(payload).encode("utf-8"),
+        document_commit_sha="a" * 40,
+    )
+    manifest_doc = RemoteDocument(
+        path=f"sessions/{SESSION_ID}/manifest.json",
+        content=json.dumps(manifest_payload(session_id=SESSION_ID)).encode("utf-8"),
+        document_commit_sha="b" * 40,
+    )
+    snap = CommandSnapshot(snapshot_sha="d" * 40, manifests=(manifest_doc,), commands=(cmd_doc,))
+    ingestor = CommandIngestor(journal, FakeTransport(snap))
+    ingestor.ingest_snapshot(snap)
+
+    cmd = journal.get_command(f"{SESSION_ID}:000001")
+    assert cmd.state == CommandState.DISCOVERED
+
+    orig_event = journal._append_event_in_transaction
+    def mock_event(event_type=None, *args, **kwargs):
+        if event_type == "command.state_changed":
+            raise RuntimeError("injected validation event error")
+        return orig_event(event_type=event_type, *args, **kwargs)
+
+    journal._append_event_in_transaction = mock_event
+
+    with pytest.raises(Exception):
+        ingestor.validate_pending(snapshot_sha="d" * 40)
+
+    journal._append_event_in_transaction = orig_event
+
+    cmd = journal.get_command(f"{SESSION_ID}:000001")
+    assert cmd.state == CommandState.DISCOVERED
+    assert cmd.command_sha256 == sha256_text(json.dumps(payload))
+    assert cmd.expected_revision is None
+    assert cmd.expected_state_hash is None
+
+    ingestor.validate_pending(snapshot_sha="d" * 40)
+    cmd = journal.get_command(f"{SESSION_ID}:000001")
+    assert cmd.state == CommandState.VALIDATED
+    assert cmd.expected_revision == 0
+
     journal.close()
