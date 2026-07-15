@@ -629,3 +629,169 @@ def test_command_json_identity_mismatch_rejected(tmp_path: Path) -> None:
         assert exc.value.code == BridgeErrorCode.INVALID_PAYLOAD
     finally:
         journal.close()
+
+
+def test_command_json_sequence_true_rejected(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    try:
+        setup_session(journal)
+        command = sample_command()
+        command["sequence"] = True
+        with pytest.raises(BridgeError) as exc:
+            journal.record_command(SESSION_ID, COMMAND_ID, 1, command)
+        assert exc.value.code == BridgeErrorCode.INVALID_PAYLOAD
+    finally:
+        journal.close()
+
+
+def test_result_json_sequence_true_rejected(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    try:
+        setup_command(journal)
+        parsed = json.loads(sample_result_json())
+        parsed["sequence"] = True
+        with pytest.raises(BridgeError) as exc:
+            journal.store_result(
+                COMMAND_ID,
+                json.dumps(parsed, ensure_ascii=False, sort_keys=True, indent=2),
+                result_path_for(SESSION_ID, 1),
+            )
+        assert exc.value.code == BridgeErrorCode.INVALID_PAYLOAD
+    finally:
+        journal.close()
+
+
+def test_expected_revision_derived_from_command_json(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    try:
+        setup_session(journal)
+        record = journal.record_command(SESSION_ID, COMMAND_ID, 1, sample_command())
+        assert record.expected_revision == 0
+    finally:
+        journal.close()
+
+
+def test_expected_revision_matching_argument_accepted(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    try:
+        setup_session(journal)
+        record = journal.record_command(
+            SESSION_ID,
+            COMMAND_ID,
+            1,
+            sample_command(),
+            expected_revision=0,
+        )
+        assert record.expected_revision == 0
+    finally:
+        journal.close()
+
+
+def test_expected_revision_mismatched_argument_rejected(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    try:
+        setup_session(journal)
+        with pytest.raises(BridgeError) as exc:
+            journal.record_command(
+                SESSION_ID,
+                COMMAND_ID,
+                1,
+                sample_command(),
+                expected_revision=1,
+            )
+        assert exc.value.code == BridgeErrorCode.INVALID_PAYLOAD
+    finally:
+        journal.close()
+
+
+def test_expected_state_hash_mismatched_argument_rejected(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    try:
+        setup_session(journal)
+        command = sample_command()
+        command["expected_state_hash"] = "sha256:" + "a" * 64
+        with pytest.raises(BridgeError) as exc:
+            journal.record_command(
+                SESSION_ID,
+                COMMAND_ID,
+                1,
+                command,
+                expected_state_hash="sha256:" + "b" * 64,
+            )
+        assert exc.value.code == BridgeErrorCode.INVALID_PAYLOAD
+    finally:
+        journal.close()
+
+
+def test_expected_revision_replay_after_transition_is_noop(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    try:
+        setup_command(journal)
+        journal.transition_command(COMMAND_ID, CommandState.DISCOVERED, CommandState.VALIDATED)
+        replay = journal.record_command(SESSION_ID, COMMAND_ID, 1, sample_command())
+        assert replay.state == CommandState.VALIDATED
+        assert replay.expected_revision == 0
+    finally:
+        journal.close()
+
+
+def test_invalid_utf8_command_json_rejected(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    try:
+        setup_session(journal)
+        command = sample_command()
+        command["payload"] = {"path": "\ud800"}
+        with pytest.raises(BridgeError) as exc:
+            journal.record_command(SESSION_ID, COMMAND_ID, 1, command)
+        assert exc.value.code == BridgeErrorCode.INVALID_PAYLOAD
+    finally:
+        journal.close()
+
+
+def test_invalid_utf8_result_json_rejected(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    try:
+        setup_command(journal)
+        with pytest.raises(BridgeError) as exc:
+            journal.store_result(
+                COMMAND_ID,
+                '{"status":"success","summary":"\ud800"}',
+                result_path_for(SESSION_ID, 1),
+            )
+        assert exc.value.code == BridgeErrorCode.INVALID_PAYLOAD
+    finally:
+        journal.close()
+
+
+def test_invalid_utf8_event_payload_rejected(tmp_path: Path) -> None:
+    journal = open_journal(tmp_path)
+    try:
+        setup_session(journal)
+        with pytest.raises(BridgeError) as exc:
+            journal.append_event(
+                session_id=SESSION_ID,
+                event_type="note",
+                payload={"text": "\ud800"},
+            )
+        assert exc.value.code == BridgeErrorCode.INVALID_PAYLOAD
+        assert journal._connection.in_transaction is False
+    finally:
+        journal.close()
+
+
+def test_write_lock_timeout_returns_controlled_error(tmp_path: Path) -> None:
+    path = tmp_path / "locked.db"
+    holder = Journal.open(path, now_fn=fixed_now)
+    writer = Journal.open(path, now_fn=fixed_now)
+    try:
+        holder._connection.execute("BEGIN IMMEDIATE")
+        writer._connection.execute("PRAGMA busy_timeout = 100")
+        with pytest.raises(BridgeError) as exc:
+            writer.create_session("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "repo", BASE_SHA)
+        assert exc.value.code == BridgeErrorCode.JOURNAL_CONFLICT
+        assert holder._connection.in_transaction is True
+        assert writer._connection.in_transaction is False
+        holder._connection.rollback()
+    finally:
+        holder.close()
+        writer.close()

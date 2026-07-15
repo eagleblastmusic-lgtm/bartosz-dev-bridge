@@ -146,6 +146,26 @@ def _read_applied_migrations(conn: sqlite3.Connection) -> list[tuple[int, str, s
     return [(int(row[0]), str(row[1]), str(row[2])) for row in rows]
 
 
+def map_sqlite_error(exc: sqlite3.Error, *, context: str) -> BridgeError:
+    message = str(exc).lower()
+    if "database is locked" in message or "database is busy" in message:
+        return BridgeError(
+            BridgeErrorCode.JOURNAL_CONFLICT,
+            f"SQLite database is locked during {context}",
+        )
+    return BridgeError(
+        BridgeErrorCode.JOURNAL_CORRUPT,
+        f"SQLite error during {context}: {exc}",
+    )
+
+
+def _safe_rollback(conn: sqlite3.Connection) -> None:
+    try:
+        conn.rollback()
+    except sqlite3.Error:
+        pass
+
+
 def apply_migrations(
     conn: sqlite3.Connection,
     migrations: tuple[Migration, ...] = MIGRATIONS,
@@ -156,7 +176,11 @@ def apply_migrations(
     migration_map = _migration_by_version(migrations)
     now = (now_fn or utc_now_iso)()
 
-    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.Error as exc:
+        raise map_sqlite_error(exc, context="migration begin") from exc
+
     try:
         user_tables = _list_user_tables(conn)
         has_schema_migrations = "schema_migrations" in user_tables
@@ -218,14 +242,14 @@ def apply_migrations(
 
         conn.commit()
     except BridgeError:
-        conn.rollback()
+        _safe_rollback(conn)
         raise
-    except sqlite3.DatabaseError as exc:
-        conn.rollback()
-        raise BridgeError(
-            BridgeErrorCode.JOURNAL_CORRUPT,
-            f"Database migration failed: {exc}",
-        ) from exc
+    except sqlite3.Error as exc:
+        _safe_rollback(conn)
+        raise map_sqlite_error(exc, context="migration") from exc
     except Exception:
-        conn.rollback()
+        _safe_rollback(conn)
         raise
+    finally:
+        if conn.in_transaction:
+            _safe_rollback(conn)

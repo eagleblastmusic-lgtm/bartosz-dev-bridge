@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from .migrations import apply_migrations, utc_now_iso
+from .migrations import apply_migrations, map_sqlite_error, utc_now_iso, _safe_rollback
 from .models import (
     BridgeErrorCode,
     CommandRecord,
@@ -71,10 +71,7 @@ class Journal:
                     conn.close()
                 except sqlite3.Error:
                     pass
-            raise BridgeError(
-                BridgeErrorCode.JOURNAL_CORRUPT,
-                f"Failed to open journal database: {exc}",
-            ) from exc
+            raise map_sqlite_error(exc, context="journal open") from exc
         except Exception:
             if conn is not None:
                 try:
@@ -243,14 +240,13 @@ class Journal:
         _require_non_empty_str(command_id, "command_id")
         sequence = _require_positive_int(sequence, "sequence")
         command_json = _canonical_command_json(command)
+        _require_valid_utf8(command_json, "command_json")
         command_sha256 = sha256_text(command_json)
         _validate_command_identity(command, session_id=session_id, command_id=command_id, sequence=sequence)
+        stored_expected_revision = _derive_expected_revision(command, expected_revision)
+        stored_expected_state_hash = _derive_expected_state_hash(command, expected_state_hash)
         if command_commit_sha is not None:
             _require_non_empty_str(command_commit_sha, "command_commit_sha")
-        if expected_state_hash is not None:
-            _require_non_empty_str(expected_state_hash, "expected_state_hash")
-        if expected_revision is not None:
-            expected_revision = _require_non_negative_int(expected_revision, "expected_revision")
 
         now = self._now_fn()
         with self._transaction():
@@ -263,8 +259,8 @@ class Journal:
                     command_json=command_json,
                     command_sha256=command_sha256,
                     command_commit_sha=command_commit_sha,
-                    expected_revision=expected_revision,
-                    expected_state_hash=expected_state_hash,
+                    expected_revision=stored_expected_revision,
+                    expected_state_hash=stored_expected_state_hash,
                 ):
                     raise BridgeError(
                         BridgeErrorCode.COMMAND_ID_COLLISION,
@@ -305,8 +301,8 @@ class Journal:
                         command_json,
                         command_commit_sha,
                         CommandState.DISCOVERED.value,
-                        expected_revision,
-                        expected_state_hash,
+                        stored_expected_revision,
+                        stored_expected_state_hash,
                         now,
                         now,
                     ),
@@ -551,8 +547,9 @@ class Journal:
         _require_non_empty_str(command_id, "command_id")
         _require_non_empty_str(result_json, "result_json")
         _require_non_empty_str(remote_path, "remote_path")
+        result_bytes = _require_valid_utf8(result_json, "result_json")
 
-        if len(result_json.encode("utf-8")) > MAX_RESULT_BYTES:
+        if len(result_bytes) > MAX_RESULT_BYTES:
             raise BridgeError(
                 BridgeErrorCode.RESULT_TOO_LARGE,
                 f"Result exceeds {MAX_RESULT_BYTES} bytes",
@@ -732,6 +729,7 @@ class Journal:
         else:
             try:
                 payload_json = canonical_json(payload)
+                _require_valid_utf8(payload_json, "event payload")
             except (TypeError, ValueError) as exc:
                 raise BridgeError(
                     BridgeErrorCode.INVALID_PAYLOAD,
@@ -802,18 +800,31 @@ class Journal:
                 BridgeErrorCode.JOURNAL_CONFLICT,
                 "Nested transactions are not supported",
             )
-        self._conn.execute("BEGIN IMMEDIATE")
         try:
-            yield
-        except Exception:
-            if self._conn.in_transaction:
-                self._conn.rollback()
-            raise
-        else:
-            self._conn.commit()
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.Error as exc:
+                raise map_sqlite_error(exc, context="transaction begin") from exc
+            try:
+                yield
+            except BridgeError:
+                _safe_rollback(self._conn)
+                raise
+            except sqlite3.Error as exc:
+                _safe_rollback(self._conn)
+                raise map_sqlite_error(exc, context="transaction") from exc
+            except Exception:
+                _safe_rollback(self._conn)
+                raise
+            else:
+                try:
+                    self._conn.commit()
+                except sqlite3.Error as exc:
+                    _safe_rollback(self._conn)
+                    raise map_sqlite_error(exc, context="transaction commit") from exc
         finally:
             if self._conn.in_transaction:
-                self._conn.rollback()
+                _safe_rollback(self._conn)
 
 
 def _configure_connection(conn: sqlite3.Connection) -> None:
@@ -875,6 +886,16 @@ def _require_non_negative_int(value: int, field: str) -> int:
     return value
 
 
+def _require_valid_utf8(value: str, field: str) -> bytes:
+    try:
+        return value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise BridgeError(
+            BridgeErrorCode.INVALID_PAYLOAD,
+            f"{field} must contain valid UTF-8 text",
+        ) from exc
+
+
 def _canonical_command_json(command: dict[str, Any]) -> str:
     if not isinstance(command, dict):
         raise BridgeError(
@@ -900,7 +921,6 @@ def _validate_command_identity(
     for field, expected in (
         ("session_id", session_id),
         ("command_id", command_id),
-        ("sequence", sequence),
     ):
         actual = command.get(field)
         if actual != expected:
@@ -908,6 +928,63 @@ def _validate_command_identity(
                 BridgeErrorCode.INVALID_PAYLOAD,
                 f"command {field} does not match argument value",
             )
+    actual_sequence = command.get("sequence")
+    if type(actual_sequence) is not int or actual_sequence <= 0 or actual_sequence != sequence:
+        raise BridgeError(
+            BridgeErrorCode.INVALID_PAYLOAD,
+            "command sequence must be a positive integer matching argument value",
+        )
+
+
+def _derive_expected_revision(
+    command: dict[str, Any],
+    argument: int | None,
+) -> int | None:
+    if "expected_revision" not in command:
+        derived: int | None = None
+    else:
+        value = command["expected_revision"]
+        if type(value) is not int or value < 0:
+            raise BridgeError(
+                BridgeErrorCode.INVALID_PAYLOAD,
+                "command expected_revision must be a non-negative integer",
+            )
+        derived = value
+    if argument is not None:
+        arg_value = _require_non_negative_int(argument, "expected_revision")
+        if derived is None or arg_value != derived:
+            raise BridgeError(
+                BridgeErrorCode.INVALID_PAYLOAD,
+                "expected_revision argument does not match command JSON",
+            )
+    return derived
+
+
+def _derive_expected_state_hash(
+    command: dict[str, Any],
+    argument: str | None,
+) -> str | None:
+    if "expected_state_hash" not in command:
+        derived: str | None = None
+    else:
+        value = command["expected_state_hash"]
+        if value is None:
+            derived = None
+        elif not isinstance(value, str) or not value:
+            raise BridgeError(
+                BridgeErrorCode.INVALID_PAYLOAD,
+                "command expected_state_hash must be null or a non-empty string",
+            )
+        else:
+            derived = value
+    if argument is not None:
+        arg_value = _require_non_empty_str(argument, "expected_state_hash")
+        if derived is None or arg_value != derived:
+            raise BridgeError(
+                BridgeErrorCode.INVALID_PAYLOAD,
+                "expected_state_hash argument does not match command JSON",
+            )
+    return derived
 
 
 def _command_metadata_matches(
@@ -981,7 +1058,6 @@ def _validate_result_metadata(
     for field, expected in (
         ("command_id", command_id),
         ("session_id", session_id),
-        ("sequence", sequence),
     ):
         actual = parsed.get(field)
         if actual != expected:
@@ -989,6 +1065,12 @@ def _validate_result_metadata(
                 BridgeErrorCode.INVALID_PAYLOAD,
                 f"result {field} does not match command record",
             )
+    actual_sequence = parsed.get("sequence")
+    if type(actual_sequence) is not int or actual_sequence <= 0 or actual_sequence != sequence:
+        raise BridgeError(
+            BridgeErrorCode.INVALID_PAYLOAD,
+            "result sequence must be a positive integer matching command record",
+        )
 
 
 def _result_record_matches(
