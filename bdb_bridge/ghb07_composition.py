@@ -22,6 +22,7 @@ from .service import BridgeService
 
 def run_foreground(config: BridgeConfig) -> int:
     from . import cli as legacy
+
     runtime = Path(config.runtime_dir)
     try:
         runtime.mkdir(parents=True, exist_ok=True)
@@ -55,7 +56,9 @@ def run_foreground(config: BridgeConfig) -> int:
         cmd_remote, cmd_branch = parse_git_ref(config.commands_ref)
         res_remote, _ = parse_git_ref(config.results_ref)
         transport = GitCommandTransport(
-            config.control_repo_path, remote=cmd_remote or "origin", commands_branch=cmd_branch
+            config.control_repo_path,
+            remote=cmd_remote or "origin",
+            commands_branch=cmd_branch,
         )
         ingestor = CommandIngestor(journal, transport, fault_hook=hook)
         scheduler = SingleQueueScheduler(journal)
@@ -63,25 +66,38 @@ def run_foreground(config: BridgeConfig) -> int:
         outbox = OutboxProcessor(journal, result_transport, fault_hook=hook)
         coordinator = ResultCoordinator(config, journal, outbox, fault_hook=hook)
         service = BridgeService(
-            config=config, journal=journal, ingestor=ingestor, scheduler=scheduler,
-            result_coordinator=coordinator, outbox_processor=outbox,
-            instance_lock=lock, fault_hook=hook,
+            config=config,
+            journal=journal,
+            ingestor=ingestor,
+            scheduler=scheduler,
+            result_coordinator=coordinator,
+            outbox_processor=outbox,
+            instance_lock=lock,
+            fault_hook=hook,
         )
     except Exception as exc:
-        journal.close(); lock.release()
+        journal.close()
+        lock.release()
         legacy._write_controlled_error("Failed to initialize service dependencies", exc)
         return 1
+
     instance_id = f"inst-{uuid.uuid4()}"
+
     def stop(signum: int, frame: Any) -> None:
         sys.stderr.write(f"Received signal {signum}, initiating graceful shutdown...\n")
         service.request_stop()
+
     signal.signal(signal.SIGINT, stop)
     for name in ("SIGBREAK", "SIGTERM"):
         sig = getattr(signal, name, None)
         if sig is not None:
             signal.signal(sig, stop)
     try:
-        outcome = service.run(instance_id)
+        try:
+            outcome = service.run(instance_id)
+        except SystemCrash as exc:
+            legacy._write_controlled_error("Controlled recovery fault", exc)
+            return 2
         if outcome.exit_code:
             sys.stderr.write(f"Service stopped with error: {outcome.error}\n")
         return outcome.exit_code
