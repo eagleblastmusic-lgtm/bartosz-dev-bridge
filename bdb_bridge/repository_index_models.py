@@ -33,6 +33,7 @@ class SymbolKind(str, Enum):
     METHOD = "method"
     ASYNC_METHOD = "async_method"
     NESTED_FUNCTION = "nested_function"
+    NESTED_ASYNC_FUNCTION = "nested_async_function"
     NESTED_CLASS = "nested_class"
 
 
