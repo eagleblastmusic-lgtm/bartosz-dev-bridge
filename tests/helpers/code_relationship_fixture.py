@@ -46,6 +46,10 @@ def recursive():
     return recursive()
 
 
+def local():
+    return 3
+
+
 def shadow(helper):
     return helper()
 
@@ -57,6 +61,13 @@ class Child(Base):
 
     def run(self):
         return self.local()
+
+    @classmethod
+    def run_via_cls(cls):
+        return cls.local()
+
+    def run_unqualified(self):
+        return local()
 
 
 def unknown(obj):

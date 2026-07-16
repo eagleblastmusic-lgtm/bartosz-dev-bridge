@@ -33,7 +33,28 @@ def test_analysis_resolves_core_shapes_without_source_execution(tmp_path: Path) 
         by_expression.setdefault(item.expression, []).append(item)
     assert any(item.resolution_status is ResolutionStatus.RESOLVED for item in by_expression["h"])
     assert any(item.resolution_status is ResolutionStatus.RESOLVED for item in by_expression["tools.helper"])
-    assert any(item.resolution_status is ResolutionStatus.RESOLVED for item in by_expression["self.local"])
+    _, module_local = service.select_symbol(
+        ref=commits["commit1"], path="pkg/service.py", qualified_name="local"
+    )
+    _, class_local = service.select_symbol(
+        ref=commits["commit1"], path="pkg/service.py", qualified_name="Child.local"
+    )
+    assert any(
+        item.resolution_status is ResolutionStatus.RESOLVED
+        and item.target_symbol_id == class_local.symbol_id
+        for item in by_expression["self.local"]
+    )
+    assert any(
+        item.resolution_status is ResolutionStatus.RESOLVED
+        and item.target_symbol_id == class_local.symbol_id
+        for item in by_expression["cls.local"]
+    )
+    assert any(
+        item.resolution_status is ResolutionStatus.RESOLVED
+        and item.target_symbol_id == module_local.symbol_id
+        for item in by_expression["local"]
+    )
+    assert all(item.target_symbol_id != class_local.symbol_id for item in by_expression["local"])
     assert any(item.resolution_status is ResolutionStatus.DYNAMIC for item in by_expression["helper"])
     assert any(item.resolution_status is ResolutionStatus.DYNAMIC for item in by_expression["obj.missing"])
     assert any(item.expression == "recursive" and item.resolution_status is ResolutionStatus.RESOLVED for item in calls)

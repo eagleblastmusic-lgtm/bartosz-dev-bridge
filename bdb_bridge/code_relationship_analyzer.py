@@ -218,13 +218,11 @@ class _FileAnalyzer:
 
     def resolve(self, node: ast.AST, scope: _Scope) -> _Resolution:
         if isinstance(node, ast.Name):
-            current: _Scope | None = scope
-            while current:
+            for current in _lexical_scopes(scope):
                 if node.id in current.bindings:
                     return current.bindings[node.id].resolution
                 if node.id in current.shadowed:
                     return _Resolution(None, None, ResolutionStatus.DYNAMIC, Confidence.NONE, "name is locally bound")
-                current = current.parent
             return _Resolution(None, None, ResolutionStatus.UNRESOLVED, Confidence.NONE, "name not found")
         if isinstance(node, ast.Attribute):
             chain = attribute_chain(node)
@@ -358,11 +356,21 @@ def nearest_class(scope: _Scope) -> _Scope | None:
     return None
 
 
+def _lexical_scopes(scope: _Scope):
+    current: _Scope | None = scope
+    skip_class_scopes = scope.kind == "function"
+    while current:
+        yield current
+        current = current.parent
+        if skip_class_scopes:
+            while current is not None and current.kind == "class":
+                current = current.parent
+
+
 def _lookup(name: str, scope: _Scope) -> _Binding | None:
-    while scope:
-        if name in scope.bindings: return scope.bindings[name]
-        if name in scope.shadowed: return None
-        scope = scope.parent
+    for current in _lexical_scopes(scope):
+        if name in current.bindings: return current.bindings[name]
+        if name in current.shadowed: return None
     return None
 
 
