@@ -72,6 +72,16 @@ Trwały checkpoint, fizyczny batch apply, rollback, commit CAS i recovery są op
 
 Finalna aktywacja `multi_file_patch`, durable profile outcome, wynik batchu i operator status są opisane w [docs/GHB2D_FINAL_EDITING_GATE.md](docs/GHB2D_FINAL_EDITING_GATE.md).
 
+## Lokalny end-to-end POC
+
+Na Windows pełny syntetyczny POC można uruchomić jedną komendą:
+
+```powershell
+.\scripts\Invoke-BDBLocalE2E.ps1
+```
+
+Bramka automatycznie używa `.venv\Scripts\python.exe`, tworzy wyłącznie tymczasowe repozytoria i sprawdza lokalny transport Git, finalny `multi_file_patch`, rollback, durable recovery oraz foreground lifecycle. Szczegóły: [docs/LOCAL_E2E_POC.md](docs/LOCAL_E2E_POC.md).
+
 Tryb background nie tworzy Windows Service, Scheduled Task ani procesu administracyjnego. Child sam zdobywa platformowy lock i prowadzi graceful lifecycle.
 
 ## Kolejność service loop
@@ -172,4 +182,5 @@ Dokumentacja operatorska:
 - `docs/GHB0_WINDOWS_RUNBOOK.md`;
 - `docs/GHB0_RECOVERY_GATE.md`;
 - `docs/GHB2C_DURABLE_BATCH_RECOVERY.md`;
-- `docs/GHB2D_FINAL_EDITING_GATE.md`.
+- `docs/GHB2D_FINAL_EDITING_GATE.md`;
+- `docs/LOCAL_E2E_POC.md`.

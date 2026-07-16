@@ -44,7 +44,8 @@ jobs:
             "scripts/bootstrap_windows.ps1",
             "scripts/bootstrap_poc0b_windows.ps1",
             "scripts/run_poc_bridge.ps1",
-            "scripts/Invoke-GHB0RecoveryGate.ps1"
+            "scripts/Invoke-GHB0RecoveryGate.ps1",
+            "scripts/Invoke-BDBLocalE2E.ps1"
           )
           foreach ($script in $scripts) {
             $tokens = $null
@@ -66,3 +67,7 @@ jobs:
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
       - name: Run tests
         run: python -m pytest -q
+      - name: Run local E2E POC gate
+        if: runner.os == 'Windows' && matrix.python-version == '3.14'
+        shell: powershell
+        run: .\scripts\Invoke-BDBLocalE2E.ps1 -Python python
