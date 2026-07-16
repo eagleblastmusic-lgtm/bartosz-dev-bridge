@@ -171,14 +171,16 @@ class SessionFinalizer:
             raise map_sqlite_error(exc, context="session finalization") from exc
         return SessionFinalizationOutcome(session_id, SessionState.COMPLETED, True, False)
 
-    def handoff_ready_session(self) -> tuple[str, str] | None:
+    def handoff_ready_session(self, service_instance_id: str) -> tuple[str, str] | None:
         """Complete an idle active session only when another valid session is waiting.
 
-        The transition is allowed solely while exactly one Bridge service instance is
-        RUNNING. It never closes an active session merely because it is temporarily
-        idle, preserving the ability to append more commands to that same session.
+        The caller must supply the current service instance identifier from the active
+        Bridge loop. A stale database row or an offline scheduler invocation cannot
+        authorize the handoff.
         """
 
+        if not isinstance(service_instance_id, str) or not service_instance_id:
+            raise BridgeError("invalid_payload", "service_instance_id must be a non-empty string")
         self.journal._ensure_open()
         now = self.journal._now_fn()
         now_dt = parse_strict_utc_timestamp(now, field="now")
@@ -188,7 +190,11 @@ class SessionFinalizer:
                     """SELECT instance_id,state FROM service_instances
                     WHERE state IN ('running','stopping') ORDER BY started_at,instance_id"""
                 ).fetchall()
-                if len(service_rows) != 1 or str(service_rows[0][1]) != "running":
+                if (
+                    len(service_rows) != 1
+                    or str(service_rows[0][0]) != service_instance_id
+                    or str(service_rows[0][1]) != "running"
+                ):
                     return None
 
                 if self.journal._connection.execute(
