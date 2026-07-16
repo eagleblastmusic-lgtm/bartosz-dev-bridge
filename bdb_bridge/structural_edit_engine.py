@@ -11,7 +11,7 @@ from .edit_operation_models import (
     StructuralEditPlan,
     StructuralEditSpec,
 )
-from .edit_operation_parser import sha256_bytes
+from .edit_operation_parser import sha256_bytes, validate_structural_edit_spec
 from .models import BridgeErrorCode
 from .protocol import BridgeError
 from .serializers import canonical_json
@@ -30,6 +30,7 @@ class StructuralEditEngine:
         self.workspace = workspace
 
     def plan(self, operation: StructuralEditSpec) -> StructuralEditPlan:
+        validate_structural_edit_spec(operation)
         source_before: bytes | None = None
         destination_before: bytes | None = None
         destination_after: bytes | None = None
@@ -87,7 +88,7 @@ class StructuralEditEngine:
         destination = self._destination(operation.destination_path)
         self._require_absent(destination, operation.destination_path)
         temp = self._temp_path(destination, plan)
-        if temp.exists():
+        if temp.exists() or temp.is_symlink():
             raise BridgeError(
                 BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
                 "Expected structural edit temp path already exists",
@@ -97,10 +98,22 @@ class StructuralEditEngine:
                 stream.write(plan.destination_after)
                 stream.flush()
                 os.fsync(stream.fileno())
+        except FileExistsError as exc:
+            raise BridgeError(
+                BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
+                "Expected structural edit temp path appeared during create",
+            ) from exc
+        except OSError as exc:
+            raise BridgeError(
+                BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
+                f"Controlled structural temp write failure: {type(exc).__name__}",
+            ) from exc
+        try:
             if temp.read_bytes() != plan.destination_after:
                 raise OSError("temp reread mismatch")
             self._require_absent(destination, operation.destination_path)
-            os.replace(temp, destination)
+            os.link(temp, destination)
+            temp.unlink()
             self._fsync_parent(destination.parent)
         except FileExistsError as exc:
             raise BridgeError(
@@ -110,7 +123,7 @@ class StructuralEditEngine:
         except OSError as exc:
             raise BridgeError(
                 BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
-                f"Controlled structural create failure: {type(exc).__name__}",
+                f"Controlled structural create promotion failure: {type(exc).__name__}",
             ) from exc
         self._verify_regular_exact(destination, plan.destination_after, operation.destination_path)
 
@@ -132,7 +145,7 @@ class StructuralEditEngine:
                 BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
                 f"Controlled structural delete failure: {type(exc).__name__}",
             ) from exc
-        if source.exists():
+        if source.exists() or source.is_symlink():
             raise BridgeError(
                 BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
                 "Structural delete source still exists after unlink",
@@ -156,7 +169,8 @@ class StructuralEditEngine:
             )
         self._require_absent(destination, operation.destination_path)
         try:
-            os.rename(source, destination)
+            os.link(source, destination)
+            source.unlink()
             self._fsync_parent(source.parent)
             if destination.parent != source.parent:
                 self._fsync_parent(destination.parent)
@@ -170,10 +184,10 @@ class StructuralEditEngine:
                 BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
                 f"Controlled structural relocation failure: {type(exc).__name__}",
             ) from exc
-        if source.exists():
+        if source.exists() or source.is_symlink():
             raise BridgeError(
                 BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
-                "Structural relocation source still exists after rename",
+                "Structural relocation source still exists after promotion",
             )
         self._verify_regular_exact(
             destination, plan.destination_after, operation.destination_path
@@ -192,11 +206,6 @@ class StructuralEditEngine:
             raise BridgeError(
                 BridgeErrorCode.MISSING_FILE,
                 f"Destination parent directory does not exist: {parent.name}",
-            )
-        if self.workspace._is_reparse(parent):
-            raise BridgeError(
-                BridgeErrorCode.UNSAFE_PATH,
-                "Destination parent may not be a symlink or reparse point",
             )
         return path
 
@@ -286,22 +295,52 @@ class StructuralEditEngine:
         return sha256_bytes(canonical_json(self._plan_payload(plan)).encode("utf-8"))
 
     def _validate_plan(self, plan: StructuralEditPlan) -> None:
+        validate_structural_edit_spec(plan.operation)
         if plan.plan_sha256 != self._plan_sha256(plan):
             raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Structural edit plan hash mismatch")
         if (
-            plan.source_before is None
-            and plan.source_before_sha256 is not None
-            or plan.source_before is not None
-            and sha256_bytes(plan.source_before) != plan.source_before_sha256
+            (plan.source_before is None and plan.source_before_sha256 is not None)
+            or (
+                plan.source_before is not None
+                and sha256_bytes(plan.source_before) != plan.source_before_sha256
+            )
         ):
             raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Structural source plan bytes mismatch")
         if (
-            plan.destination_after is None
-            and plan.destination_after_sha256 is not None
-            or plan.destination_after is not None
-            and sha256_bytes(plan.destination_after) != plan.destination_after_sha256
+            (plan.destination_after is None and plan.destination_after_sha256 is not None)
+            or (
+                plan.destination_after is not None
+                and sha256_bytes(plan.destination_after) != plan.destination_after_sha256
+            )
         ):
             raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Structural destination plan bytes mismatch")
+        if plan.destination_before is not None or plan.destination_before_sha256 is not None:
+            raise BridgeError(
+                BridgeErrorCode.INVALID_PAYLOAD,
+                "GHB2-A structural destination must be absent before apply",
+            )
+        operation = plan.operation
+        if operation.kind is StructuralEditKind.CREATE_FILE:
+            if (
+                plan.source_before is not None
+                or plan.source_before_sha256 is not None
+                or plan.destination_after != operation.content
+            ):
+                raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Invalid create_file plan shape")
+        elif operation.kind is StructuralEditKind.DELETE_FILE:
+            if (
+                plan.source_before is None
+                or plan.source_before_sha256 != operation.expected_source_sha256
+                or plan.destination_after is not None
+                or plan.destination_after_sha256 is not None
+            ):
+                raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Invalid delete_file plan shape")
+        elif (
+            plan.source_before is None
+            or plan.source_before_sha256 != operation.expected_source_sha256
+            or plan.destination_after != plan.source_before
+        ):
+            raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Invalid relocation plan shape")
 
     def _outcome(self, plan: StructuralEditPlan) -> StructuralEditOutcome:
         operation = plan.operation
@@ -317,8 +356,9 @@ class StructuralEditEngine:
         )
         destination_sha = None
         if operation.destination_path is not None and destination_exists:
+            destination_path = self.workspace.resolve_allowed_path(operation.destination_path)
             destination_sha = sha256_bytes(
-                self.workspace.resolve_allowed_path(operation.destination_path).read_bytes()
+                self._read_bounded(destination_path, operation.destination_path)
             )
         changed = tuple(
             sorted(
