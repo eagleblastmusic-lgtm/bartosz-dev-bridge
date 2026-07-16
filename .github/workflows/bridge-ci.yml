@@ -45,7 +45,8 @@ jobs:
             "scripts/bootstrap_poc0b_windows.ps1",
             "scripts/run_poc_bridge.ps1",
             "scripts/Invoke-GHB0RecoveryGate.ps1",
-            "scripts/Invoke-BDBLocalE2E.ps1"
+            "scripts/Invoke-BDBLocalE2E.ps1",
+            "scripts/Invoke-BDBPersistentPilot.ps1"
           )
           foreach ($script in $scripts) {
             $tokens = $null
@@ -63,6 +64,7 @@ jobs:
       - name: Compile Bridge
         run: |
           python -m py_compile poc_bridge.py
+          python -m py_compile scripts/run_persistent_pilot.py
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
       - name: Run tests
@@ -70,4 +72,10 @@ jobs:
       - name: Run local E2E POC gate
         if: runner.os == 'Windows' && matrix.python-version == '3.14'
         shell: powershell
-        run: .\scripts\Invoke-BDBLocalE2E.ps1 -Python python
+        run: .\scripts\Invoke-BDBLocalE2E.ps1 -Python (Get-Command python).Source
+      - name: Run persistent operator pilot
+        if: runner.os == 'Windows' && matrix.python-version == '3.14'
+        shell: powershell
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "bdb-persistent-pilot"
+          .\scripts\Invoke-BDBPersistentPilot.ps1 -Python (Get-Command python).Source -Root $root
