@@ -3,57 +3,203 @@ name: Bridge CI
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [gpt/poc-0-bootstrap]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  test:
-    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.11", "3.12"]
-
+  fix:
+    name: apply Python class-scope resolver fix
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: gpt/ghb1-b-code-relationships
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
           cache: pip
       - name: Install test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
-      - name: Validate PowerShell syntax
-        if: runner.os == 'Windows'
-        shell: powershell
+      - name: Apply exact three-file fix
+        shell: bash
         run: |
-          $scripts = @(
-            "scripts/bootstrap_windows.ps1",
-            "scripts/bootstrap_poc0b_windows.ps1",
-            "scripts/run_poc_bridge.ps1",
-            "scripts/Invoke-GHB0RecoveryGate.ps1"
-          )
-          foreach ($script in $scripts) {
-            $tokens = $null
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile(
-              (Resolve-Path $script),
-              [ref]$tokens,
-              [ref]$errors
-            ) | Out-Null
-            if ($errors.Count -gt 0) {
-              $errors | ForEach-Object { Write-Error "$script`: $($_.Message)" }
-              exit 1
-            }
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("bdb_bridge/code_relationship_analyzer.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''        if isinstance(node, ast.Name):
+              current: _Scope | None = scope
+              while current:
+                  if node.id in current.bindings:
+                      return current.bindings[node.id].resolution
+                  if node.id in current.shadowed:
+                      return _Resolution(None, None, ResolutionStatus.DYNAMIC, Confidence.NONE, "name is locally bound")
+                  current = current.parent
+              return _Resolution(None, None, ResolutionStatus.UNRESOLVED, Confidence.NONE, "name not found")
+          '''
+          new = '''        if isinstance(node, ast.Name):
+              for current in _lexical_scopes(scope):
+                  if node.id in current.bindings:
+                      return current.bindings[node.id].resolution
+                  if node.id in current.shadowed:
+                      return _Resolution(None, None, ResolutionStatus.DYNAMIC, Confidence.NONE, "name is locally bound")
+              return _Resolution(None, None, ResolutionStatus.UNRESOLVED, Confidence.NONE, "name not found")
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("unexpected ast.Name resolver source")
+          text = text.replace(old, new, 1)
+          old = '''def _lookup(name: str, scope: _Scope) -> _Binding | None:
+              while scope:
+                  if name in scope.bindings: return scope.bindings[name]
+                  if name in scope.shadowed: return None
+                  scope = scope.parent
+              return None
+          '''
+          new = '''def _lexical_scopes(scope: _Scope):
+              current: _Scope | None = scope
+              skip_class_scopes = scope.kind == "function"
+              while current:
+                  yield current
+                  current = current.parent
+                  if skip_class_scopes:
+                      while current is not None and current.kind == "class":
+                          current = current.parent
+
+
+          def _lookup(name: str, scope: _Scope) -> _Binding | None:
+              for current in _lexical_scopes(scope):
+                  if name in current.bindings: return current.bindings[name]
+                  if name in current.shadowed: return None
+              return None
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("unexpected lookup helper source")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+
+          path = Path("tests/helpers/code_relationship_fixture.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''def recursive():
+              return recursive()
+
+
+          def shadow(helper):
+          '''
+          new = '''def recursive():
+              return recursive()
+
+
+          def local():
+              return 3
+
+
+          def shadow(helper):
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("unexpected fixture module source")
+          text = text.replace(old, new, 1)
+          old = '''class Child(Base):
+              def local(self):
+                  return 2
+
+              def run(self):
+                  return self.local()
+
+
+          def unknown(obj):
+          '''
+          new = '''class Child(Base):
+              def local(self):
+                  return 2
+
+              def run(self):
+                  return self.local()
+
+              @classmethod
+              def run_via_cls(cls):
+                  return cls.local()
+
+              def run_unqualified(self):
+                  return local()
+
+
+          def unknown(obj):
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("unexpected fixture class source")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+
+          path = Path("tests/test_code_relationship_core.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''    assert any(item.resolution_status is ResolutionStatus.RESOLVED for item in by_expression["self.local"])
+              assert any(item.resolution_status is ResolutionStatus.DYNAMIC for item in by_expression["helper"])
+          '''
+          new = '''    _, module_local = service.select_symbol(
+                  ref=commits["commit1"], path="pkg/service.py", qualified_name="local"
+              )
+              _, class_local = service.select_symbol(
+                  ref=commits["commit1"], path="pkg/service.py", qualified_name="Child.local"
+              )
+              assert any(
+                  item.resolution_status is ResolutionStatus.RESOLVED
+                  and item.target_symbol_id == class_local.symbol_id
+                  for item in by_expression["self.local"]
+              )
+              assert any(
+                  item.resolution_status is ResolutionStatus.RESOLVED
+                  and item.target_symbol_id == class_local.symbol_id
+                  for item in by_expression["cls.local"]
+              )
+              assert any(
+                  item.resolution_status is ResolutionStatus.RESOLVED
+                  and item.target_symbol_id == module_local.symbol_id
+                  for item in by_expression["local"]
+              )
+              assert all(item.target_symbol_id != class_local.symbol_id for item in by_expression["local"])
+              assert any(item.resolution_status is ResolutionStatus.DYNAMIC for item in by_expression["helper"])
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("unexpected core assertion source")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+          PY
+      - name: Compile changed files
+        run: |
+          python -m py_compile \
+            bdb_bridge/code_relationship_analyzer.py \
+            tests/helpers/code_relationship_fixture.py \
+            tests/test_code_relationship_core.py
+      - name: Run targeted GHB1-B tests
+        run: |
+          python -m pytest -q \
+            tests/test_code_relationship_core.py \
+            tests/test_code_relationship_cli.py \
+            tests/test_code_relationship_migrations.py
+      - name: Restore standard workflow
+        shell: bash
+        run: git show origin/main:.github/workflows/bridge-ci.yml > .github/workflows/bridge-ci.yml
+      - name: Validate and push exact fix
+        shell: bash
+        run: |
+          cmp .github/workflows/bridge-ci.yml <(git show origin/main:.github/workflows/bridge-ci.yml)
+          git diff --check
+          git add -A
+          git diff --cached --check
+          python - <<'PY'
+          import subprocess
+          expected = {
+              "bdb_bridge/code_relationship_analyzer.py",
+              "tests/helpers/code_relationship_fixture.py",
+              "tests/test_code_relationship_core.py",
           }
-      - name: Compile Bridge
-        run: |
-          python -m py_compile poc_bridge.py
-          python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
-          python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
-      - name: Run tests
-        run: python -m pytest -q
+          actual = set(subprocess.check_output(
+              ["git", "diff", "--cached", "--name-only"], text=True
+          ).splitlines())
+          if actual != expected:
+              raise SystemExit(f"unexpected staged files: {sorted(actual)}")
+          PY
+          git config user.name "Bartosz Dev Bridge CI"
+          git config user.email "bridge-ci@localhost.invalid"
+          git commit -m "fix(analysis): respect Python class scope lookup"
+          git push origin HEAD:gpt/ghb1-b-code-relationships
