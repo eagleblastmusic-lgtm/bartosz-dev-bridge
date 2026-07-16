@@ -56,4 +56,11 @@ jobs:
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
       - name: Run tests
-        run: python -m pytest -q
+        run: python -c "import pathlib,subprocess,sys; p=subprocess.run([sys.executable,'-m','pytest','-q'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True); pathlib.Path('pytest-output.txt').write_text(p.stdout,encoding='utf-8'); print(p.stdout,end=''); raise SystemExit(p.returncode)"
+      - name: Upload pytest diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: pytest-output.txt
+          retention-days: 1
