@@ -18,12 +18,18 @@ from tests.helpers.workspace_lifecycle_fixture import NOW, SESSION, make_fixture
 
 WAITING_SESSION = "028f3f66-6cb3-4f66-9f2e-3d7647d1b709"
 WAITING_COMMAND = f"{WAITING_SESSION}:000001"
+SERVICE_INSTANCE_ID = "inst-handoff"
 
 
-def add_running_service(journal: object, state: str = "running") -> None:
+def add_running_service(
+    journal: object,
+    *,
+    instance_id: str = SERVICE_INSTANCE_ID,
+    state: str = "running",
+) -> None:
     journal._connection.execute(
         "INSERT INTO service_instances VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        ("inst-handoff", 999999, state, NOW, NOW, None, None, None, None, NOW, NOW),
+        (instance_id, 999999, state, NOW, NOW, None, None, None, None, NOW, NOW),
     )
 
 
@@ -245,7 +251,9 @@ def test_scheduler_does_not_close_idle_session_without_waiting_work(tmp_path: Pa
     )
     add_running_service(journal)
 
-    assert SingleQueueScheduler(journal).claim_next() is None
+    assert SingleQueueScheduler(journal).claim_next(
+        service_instance_id=SERVICE_INSTANCE_ID
+    ) is None
     assert journal.get_session(SESSION).state is SessionState.ACTIVE
     assert journal.get_workspace_lifecycle(SESSION) is None
     journal.close()
@@ -258,9 +266,28 @@ def test_scheduler_does_not_handoff_while_service_is_offline(tmp_path: Path) -> 
     )
     add_waiting_session(journal)
 
-    assert SingleQueueScheduler(journal).claim_next() is None
+    assert SingleQueueScheduler(journal).claim_next(
+        service_instance_id=SERVICE_INSTANCE_ID
+    ) is None
     assert journal.get_session(SESSION).state is SessionState.ACTIVE
     assert journal.get_session(WAITING_SESSION).state is SessionState.CREATED
+    journal.close()
+
+
+def test_scheduler_rejects_stale_or_foreign_service_identity(tmp_path: Path) -> None:
+    cfg, journal, wm, workspace, command_id = make_fixture(
+        tmp_path,
+        session_state=SessionState.ACTIVE,
+    )
+    add_waiting_session(journal)
+    add_running_service(journal, instance_id="inst-old")
+
+    assert SingleQueueScheduler(journal).claim_next(
+        service_instance_id=SERVICE_INSTANCE_ID
+    ) is None
+    assert journal.get_session(SESSION).state is SessionState.ACTIVE
+    assert journal.get_session(WAITING_SESSION).state is SessionState.CREATED
+    assert journal.get_workspace_lifecycle(SESSION) is None
     journal.close()
 
 
@@ -273,7 +300,9 @@ def test_scheduler_does_not_handoff_unresolved_active_session(tmp_path: Path) ->
     add_waiting_session(journal)
     add_running_service(journal)
 
-    assert SingleQueueScheduler(journal).claim_next() is None
+    assert SingleQueueScheduler(journal).claim_next(
+        service_instance_id=SERVICE_INSTANCE_ID
+    ) is None
     assert journal.get_session(SESSION).state is SessionState.ACTIVE
     assert journal.get_session(WAITING_SESSION).state is SessionState.CREATED
     assert journal.get_workspace_lifecycle(SESSION) is None
@@ -288,7 +317,9 @@ def test_scheduler_handoffs_completed_active_session_to_waiting_session(tmp_path
     add_waiting_session(journal)
     add_running_service(journal)
 
-    claimed = SingleQueueScheduler(journal).claim_next()
+    claimed = SingleQueueScheduler(journal).claim_next(
+        service_instance_id=SERVICE_INSTANCE_ID
+    )
 
     assert claimed is not None
     assert claimed.command_id == WAITING_COMMAND
@@ -305,4 +336,9 @@ def test_scheduler_handoffs_completed_active_session_to_waiting_session(tmp_path
         WHERE session_id=? AND event_type='session.auto_completed_for_handoff'""",
         (SESSION,),
     ).fetchone()[0] == 1
+    service = journal._connection.execute(
+        "SELECT instance_id,state FROM service_instances WHERE instance_id=?",
+        (SERVICE_INSTANCE_ID,),
+    ).fetchone()
+    assert service == (SERVICE_INSTANCE_ID, "running")
     journal.close()
