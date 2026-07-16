@@ -5,7 +5,7 @@ Lokalny Bridge dla ChatGPT Plus i GitHuba, rozwinięty od POC-0 do trwałego, po
 Aktualna faza:
 
 ```text
-GHB2-C — durable batch recovery implemented; runtime activation pending GHB2-D
+GHB2-D — final multi-file editing gate implemented
 ```
 
 ## Działający zakres
@@ -28,7 +28,10 @@ GHB2-C — durable batch recovery implemented; runtime activation pending GHB2-D
 - statyczne importy, references, callers, dependency graph i deterministyczne search;
 - bounded context pack oraz large-repository gate;
 - canonical multi-file patch planning z exact before/after bytes;
-- trwały Journal v9, crash-recoverable batch apply/rollback i session-scoped recovery.
+- trwały Journal v9, crash-recoverable batch apply/rollback i session-scoped recovery;
+- finalna bramka `multi_file_patch` z bounded profilem, commitem przy sukcesie i pełnym rollbackiem przy failure;
+- trwały Journal v10 dla immutable profile outcome;
+- osobny, walidowany wynik batchu publikowany przez wspólny durable outbox.
 
 ## CLI
 
@@ -43,6 +46,8 @@ bdb bridge session finalize --config <path> --session-id <uuid>
 bdb bridge workspace status --config <path> --session-id <uuid> [--json]
 bdb bridge workspace preserve --config <path> --session-id <uuid>
 bdb bridge workspace cleanup --config <path> --session-id <uuid> --confirm-session-id <uuid>
+
+bdb bridge edit status --config <path> --command-id <session-uuid:sequence> [--json]
 
 bdb bridge repo index --config <path> [--ref HEAD] [--json]
 bdb bridge repo status --config <path> [--ref HEAD] [--json]
@@ -63,7 +68,9 @@ Relacje kodu (GHB1-B) są budowane wyłącznie na immutable snapshotach GHB1-A. 
 
 Context pack i końcowa bramka większego repozytorium (GHB1-C) są opisane w [docs/GHB1C_CONTEXT_PACK.md](docs/GHB1C_CONTEXT_PACK.md).
 
-Trwały checkpoint, fizyczny batch apply, rollback, commit CAS i recovery GHB2-C są opisane w [docs/GHB2C_DURABLE_BATCH_RECOVERY.md](docs/GHB2C_DURABLE_BATCH_RECOVERY.md). Funkcja nie jest jeszcze podłączona do zdalnego command/runtime; aktywacja należy wyłącznie do GHB2-D.
+Trwały checkpoint, fizyczny batch apply, rollback, commit CAS i recovery są opisane w [docs/GHB2C_DURABLE_BATCH_RECOVERY.md](docs/GHB2C_DURABLE_BATCH_RECOVERY.md).
+
+Finalna aktywacja `multi_file_patch`, durable profile outcome, wynik batchu i operator status są opisane w [docs/GHB2D_FINAL_EDITING_GATE.md](docs/GHB2D_FINAL_EDITING_GATE.md).
 
 Tryb background nie tworzy Windows Service, Scheduled Task ani procesu administracyjnego. Child sam zdobywa platformowy lock i prowadzi graceful lifecycle.
 
@@ -90,6 +97,8 @@ G  remote push przed local publication ACK
 ```
 
 Każdy case korzysta z nowego syntetycznego fixture repo, bare/control repo, Journalu, worktree, session ID i procesu foreground. Po fault exit uruchamiany jest nowy proces, a po sukcesie kolejny restart sprawdza no-op. Bramka potwierdza pojedynczy patch, revision, plan, effect, result, outbox i publish oraz exact remote bytes/hash/path.
+
+GHB2-D rozszerza recovery o trwały batch checkpoint, profile outcome, rollback i staging wyniku. Profile nie jest wykonywany ponownie po zapisaniu Journal v10, a committed batch nie zwiększa revision drugi raz.
 
 Dodatkowe scenariusze obejmują persisted transport retry, command collision, result collision, divergent workspace i drugi proces blokowany przez OS lock.
 
@@ -142,17 +151,17 @@ Bridge nie używa `shutil.rmtree`, `Remove-Item -Recurse`, `rmdir /s`, `git rese
 
 ## Granice bezpieczeństwa
 
-GHB-0/GHB-1/GHB2-C nadal nie dodają:
+GHB-0/GHB-1/GHB2-D nadal nie dodają:
 
 - protocol ACK ani automatycznego `ACKNOWLEDGED`;
 - automatic cleanup lub retention;
 - cleanupu aktywnych/manual sessions;
 - Windows Service, Scheduled Task, GUI, tray, installer lub autostart;
-- zdalnej aktywacji `multi_file_patch` przed GHB2-D;
 - arbitrary shell lub `shell=True`;
+- arbitralnego wyboru profilu testowego;
 - wielu workerów i równoległych sesji;
 - HTTP/WebSocket remote control;
-- wykonywania lub importowania kodu analizowanego repozytorium;
+- wykonywania lub importowania kodu analizowanego repozytorium poza bounded profilem `poc_pytest`;
 - Hermesa, GicleeApp, Browser Lab, Playwright, LSP ani embeddings;
 - zależności runtime `bdb_bridge → bdb_poc`.
 
@@ -162,4 +171,5 @@ Dokumentacja operatorska:
 
 - `docs/GHB0_WINDOWS_RUNBOOK.md`;
 - `docs/GHB0_RECOVERY_GATE.md`;
-- `docs/GHB2C_DURABLE_BATCH_RECOVERY.md`.
+- `docs/GHB2C_DURABLE_BATCH_RECOVERY.md`;
+- `docs/GHB2D_FINAL_EDITING_GATE.md`.
