@@ -5,7 +5,7 @@ Lokalny Bridge dla ChatGPT Plus i GitHuba, rozwinięty od POC-0 do trwałego, po
 Aktualna faza:
 
 ```text
-GHB-1 — repository intelligence
+GHB-1 — repository intelligence gate closed
 ```
 
 ## Działający zakres
@@ -25,7 +25,8 @@ GHB-1 — repository intelligence
 - persisted `preserve` jako polityka domyślna;
 - bezpieczny, opt-in i crash-recoverable cleanup wyłącznie sesji `COMPLETED`;
 - immutable repository snapshots, tracked files, Python symbols i outline;
-- statyczne importy, references, callers, dependency graph i deterministyczne search.
+- statyczne importy, references, callers, dependency graph i deterministyczne search;
+- bounded context pack oraz large-repository gate.
 
 ## CLI
 
@@ -50,11 +51,15 @@ bdb bridge repo search --config <path> [--ref HEAD] --query <text> [--kind all|f
 bdb bridge repo references --config <path> [--ref HEAD] (--symbol-id <id> | --path <path> --qualified-name <name>) [--direction incoming|outgoing] [--kind <kind>] [--limit 100] [--json]
 bdb bridge repo callers --config <path> [--ref HEAD] (--symbol-id <id> | --path <path> --qualified-name <name>) [--limit 100] [--json]
 bdb bridge repo dependencies --config <path> [--ref HEAD] --path <path> [--direction incoming|outgoing] [--depth 1] [--edge-kind all|import|call|reference] [--max-nodes 200] [--json]
+bdb bridge repo context --config <path> [--ref HEAD] (--query <text> | --symbol-id <id> | --path <path> [--qualified-name <name>]) [--direction incoming|outgoing|both] [--depth 2] [--max-files 20] [--max-bytes 65536] [--max-excerpt-lines 80] [--json]
+bdb bridge repo gate --config <path> [--ref HEAD] [--max-files 200000] [--max-symbols 2000000] [--max-relationships 5000000] [--json]
 ```
 
 Indeks repozytorium (GHB1-A) opisuje dokładny commit Git wskazany przez `--ref` w `fixture_repo_path`. Szczegóły: [docs/GHB1A_REPOSITORY_INDEX.md](docs/GHB1A_REPOSITORY_INDEX.md).
 
 Relacje kodu (GHB1-B) są budowane wyłącznie na immutable snapshotach GHB1-A. Szczegóły: [docs/GHB1B_CODE_RELATIONSHIPS.md](docs/GHB1B_CODE_RELATIONSHIPS.md).
+
+Context pack i końcowa bramka większego repozytorium (GHB1-C) są opisane w [docs/GHB1C_CONTEXT_PACK.md](docs/GHB1C_CONTEXT_PACK.md).
 
 Tryb background nie tworzy Windows Service, Scheduled Task ani procesu administracyjnego. Child sam zdobywa platformowy lock i prowadzi graceful lifecycle.
 
