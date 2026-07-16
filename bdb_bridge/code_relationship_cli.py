@@ -2,7 +2,19 @@ from __future__ import annotations
 
 import argparse
 
-from .code_relationship_service import RepositoryRelationshipService, analysis_summary_dict, reference_dict, search_result_dict, symbol_dict
+from .code_relationship_service import (
+    RepositoryRelationshipService,
+    analysis_summary_dict,
+    reference_dict,
+    search_result_dict,
+    symbol_dict,
+)
+from .context_pack_service import (
+    ContextPackService,
+    context_pack_dict,
+    gate_result_dict,
+    render_context_markdown,
+)
 
 
 def _add_selector(parser: argparse.ArgumentParser) -> None:
@@ -46,6 +58,26 @@ def add_relationship_parsers(repo_commands) -> None:
     dependencies.add_argument("--edge-kind", choices=("all", "import", "call", "reference"), default="all")
     dependencies.add_argument("--max-nodes", type=int, default=200)
     dependencies.add_argument("--json", action="store_true")
+    context = repo_commands.add_parser("context")
+    context.add_argument("--config", required=True)
+    context.add_argument("--ref", default="HEAD")
+    context.add_argument("--query")
+    _add_selector(context)
+    context.add_argument("--direction", choices=("incoming", "outgoing", "both"), default="both")
+    context.add_argument("--depth", type=int, default=2)
+    context.add_argument("--max-files", type=int, default=20)
+    context.add_argument("--max-bytes", type=int, default=64 * 1024)
+    context.add_argument("--max-excerpt-lines", type=int, default=80)
+    context.add_argument("--json", action="store_true")
+    gate = repo_commands.add_parser("gate")
+    gate.add_argument("--config", required=True)
+    gate.add_argument("--ref", default="HEAD")
+    gate.add_argument("--max-files", type=int, default=200_000)
+    gate.add_argument("--max-symbols", type=int, default=2_000_000)
+    gate.add_argument("--max-relationships", type=int, default=5_000_000)
+    gate.add_argument("--sample-max-files", type=int, default=20)
+    gate.add_argument("--sample-max-bytes", type=int, default=32 * 1024)
+    gate.add_argument("--json", action="store_true")
 
 
 def _selector(args: argparse.Namespace) -> dict[str, str | None]:
@@ -57,6 +89,42 @@ def handle_relationship_command(config, args: argparse.Namespace, offline, print
     lock = None
     try:
         journal, lock = offline(config)
+        if args.repo_command in {"context", "gate"}:
+            context_service = ContextPackService(config, journal)
+            if args.repo_command == "context":
+                pack = context_service.build(
+                    ref=args.ref,
+                    query=args.query,
+                    **_selector(args),
+                    direction=args.direction,
+                    depth=args.depth,
+                    max_files=args.max_files,
+                    max_bytes=args.max_bytes,
+                    max_excerpt_lines=args.max_excerpt_lines,
+                )
+                if args.json:
+                    print_json(context_pack_dict(pack))
+                else:
+                    print(render_context_markdown(pack), end="")
+            else:
+                result = context_service.gate(
+                    ref=args.ref,
+                    max_files=args.max_files,
+                    max_symbols=args.max_symbols,
+                    max_relationships=args.max_relationships,
+                    sample_max_files=args.sample_max_files,
+                    sample_max_bytes=args.sample_max_bytes,
+                )
+                payload = gate_result_dict(result)
+                if args.json:
+                    print_json(payload)
+                else:
+                    print(f"Repository gate passed={str(result.passed).lower()} checks={len(result.checks)}")
+                    for item in result.checks:
+                        print(f"- {item.name}: {'PASS' if item.passed else 'FAIL'} ({item.detail})")
+                return 0 if result.passed else 1
+            return 0
+
         service = RepositoryRelationshipService(config, journal)
         if args.repo_command == "analyze":
             outcome = service.analyze(args.ref)
