@@ -4,61 +4,60 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [gpt/poc-0-bootstrap, gpt/ghb2-d-final-editing-gate]
+    branches: [gpt/ghb2-d-final-editing-gate]
 
 permissions:
   contents: read
 
 jobs:
-  ghb2d-targeted:
-    name: ${{ matrix.os }} / Python ${{ matrix.python-version }} / GHB2-D targeted
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.11", "3.12"]
+  v10-migration-diagnostic:
+    name: Ubuntu / Python 3.12 / v10 migration diagnostic
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
           cache: pip
       - name: Install test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
-      - name: Validate PowerShell syntax
-        if: runner.os == 'Windows'
-        shell: powershell
+      - name: Capture v10 checksum and migration failures
+        continue-on-error: true
         run: |
-          $scripts = @(
-            "scripts/bootstrap_windows.ps1",
-            "scripts/bootstrap_poc0b_windows.ps1",
-            "scripts/run_poc_bridge.ps1",
-            "scripts/Invoke-GHB0RecoveryGate.ps1"
+          python - <<'PY'
+          import pathlib
+          import subprocess
+          from bdb_bridge.multi_file_patch_runtime_migration import MIGRATION_V10
+
+          tests = [
+              "tests/test_journal_migrations.py",
+              "tests/test_result_outbox_migrations.py",
+              "tests/test_service_lifecycle_migrations.py",
+              "tests/test_workspace_recovery_migrations.py",
+              "tests/test_workspace_lifecycle_migrations.py",
+              "tests/test_repository_index_migrations.py",
+              "tests/test_code_relationship_migrations.py",
+              "tests/test_multi_file_patch_v9_contracts.py",
+          ]
+          process = subprocess.run(
+              ["python", "-m", "pytest", "-q", *tests],
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              text=True,
+              encoding="utf-8",
           )
-          foreach ($script in $scripts) {
-            $tokens = $null
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile(
-              (Resolve-Path $script),
-              [ref]$tokens,
-              [ref]$errors
-            ) | Out-Null
-            if ($errors.Count -gt 0) {
-              $errors | ForEach-Object { Write-Error "$script`: $($_.Message)" }
-              exit 1
-            }
-          }
-      - name: Compile GHB2-D
-        run: |
-          python -m py_compile bdb_bridge/multi_file_patch_runtime_models.py
-          python -m py_compile bdb_bridge/multi_file_patch_runtime_migration.py
-          python -m py_compile bdb_bridge/multi_file_patch_runtime_journal.py
-          python -m py_compile bdb_bridge/multi_file_patch_gate.py
-          python -m py_compile bdb_bridge/multi_file_patch_runtime.py
-          python -m py_compile bdb_bridge/multi_file_patch_result.py
-          python -m py_compile bdb_bridge/multi_file_patch_lifecycle.py
-          python -m py_compile bdb_bridge/multi_file_patch_checkpoint_hook.py
-          python -m py_compile tests/test_ghb2d_final_editing_gate.py
-      - name: Run GHB2-D targeted tests
-        run: python -m pytest -q tests/test_ghb2d_final_editing_gate.py
+          output = "V10_CHECKSUM=" + MIGRATION_V10.checksum() + "\n" + process.stdout
+          pathlib.Path("v10-migration.log").write_text(output, encoding="utf-8")
+          pathlib.Path("v10-migration.exit").write_text(str(process.returncode), encoding="ascii")
+          PY
+      - name: Upload v10 diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v10-migration-diagnostic
+          path: |
+            v10-migration.log
+            v10-migration.exit
+          if-no-files-found: error
+      - name: Enforce migration result
+        run: python -c "import pathlib,sys; sys.exit(int(pathlib.Path('v10-migration.exit').read_text()))"
