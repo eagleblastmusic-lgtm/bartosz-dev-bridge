@@ -208,3 +208,53 @@ def parse_structural_edit(document: dict[str, Any]) -> StructuralEditSpec:
         content_sha256=content_sha256,
         operation_sha256=_operation_sha256(normalized),
     )
+
+
+def structural_edit_document(operation: StructuralEditSpec) -> dict[str, str]:
+    if not isinstance(operation, StructuralEditSpec):
+        raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "operation must be StructuralEditSpec")
+    if operation.kind is StructuralEditKind.CREATE_FILE:
+        if (
+            operation.destination_path is None
+            or operation.content is None
+            or operation.content_sha256 is None
+        ):
+            raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "create_file spec is incomplete")
+        return {
+            "schema": operation.schema,
+            "kind": operation.kind.value,
+            "path": operation.destination_path,
+            "content_base64": base64.b64encode(operation.content).decode("ascii"),
+            "content_sha256": operation.content_sha256,
+        }
+    if operation.kind is StructuralEditKind.DELETE_FILE:
+        if operation.source_path is None or operation.expected_source_sha256 is None:
+            raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "delete_file spec is incomplete")
+        return {
+            "schema": operation.schema,
+            "kind": operation.kind.value,
+            "path": operation.source_path,
+            "expected_sha256": operation.expected_source_sha256,
+        }
+    if (
+        operation.source_path is None
+        or operation.destination_path is None
+        or operation.expected_source_sha256 is None
+    ):
+        raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "relocation spec is incomplete")
+    return {
+        "schema": operation.schema,
+        "kind": operation.kind.value,
+        "source_path": operation.source_path,
+        "destination_path": operation.destination_path,
+        "expected_source_sha256": operation.expected_source_sha256,
+    }
+
+
+def validate_structural_edit_spec(operation: StructuralEditSpec) -> None:
+    reparsed = parse_structural_edit(structural_edit_document(operation))
+    if reparsed != operation:
+        raise BridgeError(
+            BridgeErrorCode.INVALID_PAYLOAD,
+            "Structural edit spec does not match its canonical representation",
+        )
