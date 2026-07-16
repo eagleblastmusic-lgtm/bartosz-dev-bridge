@@ -42,6 +42,10 @@ from .multi_file_patch_journal import (
     compute_multi_file_checkpoint_sha256,
     install_journal_multi_file_patch_api,
 )
+from .multi_file_patch_hardening import (
+    install_journal_multi_file_patch_hardening,
+    install_multi_file_patch_executor_hardening,
+)
 
 install_journal_recovery_api(Journal)
 install_journal_outbox_api(Journal)
@@ -50,6 +54,7 @@ install_journal_workspace_lifecycle_api(Journal)
 install_journal_repository_index_api(Journal)
 install_journal_code_relationship_api(Journal)
 install_journal_multi_file_patch_api(Journal)
+install_journal_multi_file_patch_hardening(Journal)
 
 from .workspace_manager import WorkspaceManager
 from .instance_lock import InstanceLock
@@ -90,6 +95,7 @@ from .multi_file_patch_recovery_models import (
     MultiFileCheckpointState, MultiFileRecoveryOutcome,
 )
 
+install_multi_file_patch_executor_hardening(MultiFilePatchExecutor)
 install_workspace_lifecycle_error_mapping(WorkspaceLifecycleCoordinator)
 
 __all__ = [
@@ -121,6 +127,7 @@ __all__ = [
     "compute_multi_file_checkpoint_sha256", "compute_operation_effect_sha256",
     "compute_operation_plan_sha256", "finalize_result", "install_journal_outbox_api",
     "install_journal_workspace_lifecycle_api", "install_multi_file_patch_migration",
+    "install_journal_multi_file_patch_hardening", "install_multi_file_patch_executor_hardening",
     "install_workspace_lifecycle_migration", "manifest_path_for", "parse_command_path",
     "parse_manifest_path", "path_matches", "require_int", "require_string", "result_path_for",
     "sha256_bytes", "sha256_text", "tail", "validate_base_sha", "validate_path_pattern",
