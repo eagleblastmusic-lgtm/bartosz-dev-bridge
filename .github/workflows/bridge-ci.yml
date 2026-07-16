@@ -4,53 +4,56 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [gpt/ghb2-c-durable-batch-recovery]
+    branches: [gpt/poc-0-bootstrap]
 
 permissions:
   contents: read
 
 jobs:
-  ghb2c-integration:
-    name: Ubuntu / Python 3.12 / GHB2-C integration
-    runs-on: ubuntu-latest
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12"]
+
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
-      - name: Compile changed and adjacent surfaces
+      - name: Validate PowerShell syntax
+        if: runner.os == 'Windows'
+        shell: powershell
         run: |
-          python -m py_compile bdb_bridge/multi_file_patch_executor.py
-          python -m py_compile bdb_bridge/multi_file_patch_hardening.py
-          python -m py_compile bdb_bridge/multi_file_patch_temp_identity.py
-          python -m py_compile bdb_bridge/multi_file_patch_migration.py
-          python -m py_compile bdb_bridge/workspace_manager.py
-          python -m py_compile tests/test_multi_file_patch_recovery.py
-          python -m py_compile tests/test_multi_file_patch_v9_contracts.py
-      - name: Run GHB2-C and adjacent integrations
+          $scripts = @(
+            "scripts/bootstrap_windows.ps1",
+            "scripts/bootstrap_poc0b_windows.ps1",
+            "scripts/run_poc_bridge.ps1",
+            "scripts/Invoke-GHB0RecoveryGate.ps1"
+          )
+          foreach ($script in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "$script`: $($_.Message)" }
+              exit 1
+            }
+          }
+      - name: Compile Bridge
         run: |
-          python -m pytest -q \
-            tests/test_multi_file_patch_recovery.py \
-            tests/test_multi_file_patch_v9_contracts.py \
-            tests/test_multi_file_patch_planner.py \
-            tests/test_multi_file_patch_aliases.py \
-            tests/test_structural_edit_engine.py \
-            tests/test_workspace_manager.py \
-            tests/test_workspace_lifecycle.py \
-            tests/test_workspace_lifecycle_recovery.py \
-            tests/test_workspace_cleanup_safety.py \
-            tests/test_workspace_recovery_faults.py \
-            tests/test_journal_migrations.py \
-            tests/test_result_outbox_migrations.py \
-            tests/test_service_lifecycle_migrations.py \
-            tests/test_workspace_recovery_migrations.py \
-            tests/test_workspace_lifecycle_migrations.py \
-            tests/test_repository_index_migrations.py \
-            tests/test_code_relationship_migrations.py
-      - name: Check exact-base whitespace
-        run: git diff --check 478d246ed3b80487826872b285d5ee14420564cf...HEAD
+          python -m py_compile poc_bridge.py
+          python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
+          python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
+      - name: Run tests
+        run: python -m pytest -q
