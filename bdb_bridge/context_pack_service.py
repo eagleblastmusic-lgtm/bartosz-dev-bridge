@@ -260,7 +260,7 @@ class ContextPackService:
             ),
         ]
         sample_pack = self._sample_pack(
-            ref=ref,
+            ref=commit_sha,
             snapshot=snapshot,
             max_files=sample_max_files,
             max_bytes=sample_max_bytes,
@@ -634,7 +634,11 @@ def _normalize_hints(
     ranges.sort(key=lambda item: (item[0], item[1], item[3], sorted(item[2])))
     merged: list[tuple[int, int, set[str], int]] = []
     for start, end, reasons, priority in ranges:
-        if merged and start <= merged[-1][1] + 1:
+        if (
+            merged
+            and start <= merged[-1][1] + 1
+            and max(merged[-1][1], end) - merged[-1][0] + 1 <= max_lines
+        ):
             previous_start, previous_end, previous_reasons, previous_priority = merged[-1]
             merged[-1] = (
                 previous_start,

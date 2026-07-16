@@ -97,6 +97,8 @@ Komenda:
 bdb bridge repo gate --config <path> --ref <commit> --json
 ```
 
+Gate rozwiązuje wejściowy ref dokładnie raz, a sample pack buduje już dla uzyskanego immutable commit SHA.
+
 Gate sprawdza:
 
 - spójność deklarowanych i rzeczywistych liczników snapshotu;

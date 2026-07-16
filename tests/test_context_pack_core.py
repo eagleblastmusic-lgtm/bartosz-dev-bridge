@@ -10,6 +10,7 @@ from bdb_bridge import BridgeError
 from bdb_bridge.code_relationship_service import RepositoryRelationshipService
 from bdb_bridge.context_pack_service import (
     ContextPackService,
+    _normalize_hints,
     context_pack_dict,
     render_context_markdown,
 )
@@ -120,6 +121,34 @@ def test_context_hash_matches_cli_unicode_and_sensitive_paths_are_metadata_only(
     assert sensitive.files[0].omitted_reason == "sensitive_path"
     assert sensitive.files[0].excerpts == ()
     assert "must-not-be-exported" not in json.dumps(context_pack_dict(sensitive), sort_keys=True)
+    journal.close()
+
+def test_gate_pins_exact_commit_and_excerpt_ranges_respect_line_cap(tmp_path: Path) -> None:
+    cfg, journal, fixture, commits = make_relationship_fixture(tmp_path)
+    index = RepositoryIndexService(cfg, journal)
+    relationships = RepositoryRelationshipService(cfg, journal)
+    index.index(commits["commit1"])
+    relationships.analyze(commits["commit1"])
+    index.index(commits["commit2"])
+    relationships.analyze(commits["commit2"])
+    service = ContextPackService(cfg, journal)
+    original = service.reader.resolve_commit
+    moving_calls = 0
+
+    def moving_ref(ref: str) -> str:
+        nonlocal moving_calls
+        if ref == "moving":
+            moving_calls += 1
+            return commits["commit1"] if moving_calls == 1 else commits["commit2"]
+        return original(ref)
+
+    service.reader.resolve_commit = moving_ref  # type: ignore[method-assign]
+    result = service.gate(ref="moving", sample_max_files=5, sample_max_bytes=4096)
+    assert result.commit_sha == commits["commit1"]
+    assert moving_calls == 1
+    ranges = _normalize_hints([(1, 10, "left", 1), (11, 20, "right", 2)], line_count=30, max_lines=10)
+    assert [(start, end) for start, end, _reason, _priority in ranges] == [(1, 10), (11, 20)]
+    assert all(end - start + 1 <= 10 for start, end, _reason, _priority in ranges)
     journal.close()
 
 def test_large_repository_gate_reports_limits_and_bounded_sample(tmp_path: Path) -> None:

@@ -3,141 +3,57 @@ name: Bridge CI
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [gpt/poc-0-bootstrap]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  audit-fix:
-    name: pin GHB1-C commit and enforce excerpt line caps
-    runs-on: ubuntu-latest
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12"]
+
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: gpt/ghb1-c-context-pack-gate
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
-      - name: Apply exact determinism fixes
-        shell: bash
+      - name: Validate PowerShell syntax
+        if: runner.os == 'Windows'
+        shell: powershell
         run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          service_path = Path("bdb_bridge/context_pack_service.py")
-          text = service_path.read_text(encoding="utf-8")
-          old = "        sample_pack = self._sample_pack(\n            ref=ref,\n"
-          new = "        sample_pack = self._sample_pack(\n            ref=commit_sha,\n"
-          if text.count(old) != 1:
-              raise SystemExit("unexpected sample pack ref source")
-          text = text.replace(old, new, 1)
-          old = "        if merged and start <= merged[-1][1] + 1:\n"
-          new = (
-              "        if (\n"
-              "            merged\n"
-              "            and start <= merged[-1][1] + 1\n"
-              "            and max(merged[-1][1], end) - merged[-1][0] + 1 <= max_lines\n"
-              "        ):\n"
+          $scripts = @(
+            "scripts/bootstrap_windows.ps1",
+            "scripts/bootstrap_poc0b_windows.ps1",
+            "scripts/run_poc_bridge.ps1",
+            "scripts/Invoke-GHB0RecoveryGate.ps1"
           )
-          if text.count(old) != 1:
-              raise SystemExit("unexpected excerpt merge source")
-          service_path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
-
-          test_path = Path("tests/test_context_pack_core.py")
-          text = test_path.read_text(encoding="utf-8")
-          old = (
-              "from bdb_bridge.context_pack_service import (\n"
-              "    ContextPackService,\n"
-              "    context_pack_dict,\n"
-              "    render_context_markdown,\n"
-              ")\n"
-          )
-          new = (
-              "from bdb_bridge.context_pack_service import (\n"
-              "    ContextPackService,\n"
-              "    _normalize_hints,\n"
-              "    context_pack_dict,\n"
-              "    render_context_markdown,\n"
-              ")\n"
-          )
-          if text.count(old) != 1:
-              raise SystemExit("unexpected context test imports")
-          text = text.replace(old, new, 1)
-          marker = "\ndef test_large_repository_gate_reports_limits_and_bounded_sample(tmp_path: Path) -> None:\n"
-          regression = "\n".join([
-              "",
-              "def test_gate_pins_exact_commit_and_excerpt_ranges_respect_line_cap(tmp_path: Path) -> None:",
-              "    cfg, journal, fixture, commits = make_relationship_fixture(tmp_path)",
-              "    index = RepositoryIndexService(cfg, journal)",
-              "    relationships = RepositoryRelationshipService(cfg, journal)",
-              '    index.index(commits["commit1"])',
-              '    relationships.analyze(commits["commit1"])',
-              '    index.index(commits["commit2"])',
-              '    relationships.analyze(commits["commit2"])',
-              "    service = ContextPackService(cfg, journal)",
-              "    original = service.reader.resolve_commit",
-              "    moving_calls = 0",
-              "",
-              "    def moving_ref(ref: str) -> str:",
-              "        nonlocal moving_calls",
-              '        if ref == "moving":',
-              "            moving_calls += 1",
-              '            return commits["commit1"] if moving_calls == 1 else commits["commit2"]',
-              "        return original(ref)",
-              "",
-              "    service.reader.resolve_commit = moving_ref  # type: ignore[method-assign]",
-              '    result = service.gate(ref="moving", sample_max_files=5, sample_max_bytes=4096)',
-              '    assert result.commit_sha == commits["commit1"]',
-              "    assert moving_calls == 1",
-              '    ranges = _normalize_hints([(1, 10, "left", 1), (11, 20, "right", 2)], line_count=30, max_lines=10)',
-              "    assert [(start, end) for start, end, _reason, _priority in ranges] == [(1, 10), (11, 20)]",
-              "    assert all(end - start + 1 <= 10 for start, end, _reason, _priority in ranges)",
-              "    journal.close()",
-              "",
-          ])
-          if text.count(marker) != 1:
-              raise SystemExit("unexpected gate test marker")
-          test_path.write_text(text.replace(marker, regression + marker, 1), encoding="utf-8", newline="\n")
-
-          docs_path = Path("docs/GHB1C_CONTEXT_PACK.md")
-          text = docs_path.read_text(encoding="utf-8")
-          old = "Gate sprawdza:\n"
-          new = "Gate rozwiązuje wejściowy ref dokładnie raz, a sample pack buduje już dla uzyskanego immutable commit SHA.\n\nGate sprawdza:\n"
-          if text.count(old) != 1:
-              raise SystemExit("unexpected gate docs marker")
-          docs_path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
-          PY
-      - name: Compile changed files
-        run: python -m py_compile bdb_bridge/context_pack_service.py tests/test_context_pack_core.py
-      - name: Run targeted GHB1-C tests
-        run: python -m pytest -q tests/test_context_pack_core.py tests/test_context_pack_cli.py
-      - name: Restore standard workflow
-        shell: bash
-        run: git show origin/main:.github/workflows/bridge-ci.yml > .github/workflows/bridge-ci.yml
-      - name: Validate and push exact fixes
-        shell: bash
-        run: |
-          cmp .github/workflows/bridge-ci.yml <(git show origin/main:.github/workflows/bridge-ci.yml)
-          git diff --check
-          git add -A
-          git diff --cached --check
-          python - <<'PY'
-          import subprocess
-          expected = {
-              ".github/workflows/bridge-ci.yml",
-              "bdb_bridge/context_pack_service.py",
-              "docs/GHB1C_CONTEXT_PACK.md",
-              "tests/test_context_pack_core.py",
+          foreach ($script in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "$script`: $($_.Message)" }
+              exit 1
+            }
           }
-          actual = set(subprocess.check_output(["git", "diff", "--cached", "--name-only"], text=True).splitlines())
-          if actual != expected:
-              raise SystemExit(f"unexpected staged files: {sorted(actual)}")
-          PY
-          git config user.name "Bartosz Dev Bridge CI"
-          git config user.email "bridge-ci@localhost.invalid"
-          git commit -m "fix(context): pin commit and enforce excerpt line caps"
-          git push origin HEAD:gpt/ghb1-c-context-pack-gate
+      - name: Compile Bridge
+        run: |
+          python -m py_compile poc_bridge.py
+          python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
+          python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
+      - name: Run tests
+        run: python -m pytest -q
