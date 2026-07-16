@@ -30,136 +30,127 @@ jobs:
 
           path = Path("bdb_bridge/code_relationship_analyzer.py")
           text = path.read_text(encoding="utf-8")
-          old = '''        if isinstance(node, ast.Name):
-              current: _Scope | None = scope
-              while current:
-                  if node.id in current.bindings:
-                      return current.bindings[node.id].resolution
-                  if node.id in current.shadowed:
-                      return _Resolution(None, None, ResolutionStatus.DYNAMIC, Confidence.NONE, "name is locally bound")
-                  current = current.parent
-              return _Resolution(None, None, ResolutionStatus.UNRESOLVED, Confidence.NONE, "name not found")
-          '''
-          new = '''        if isinstance(node, ast.Name):
-              for current in _lexical_scopes(scope):
-                  if node.id in current.bindings:
-                      return current.bindings[node.id].resolution
-                  if node.id in current.shadowed:
-                      return _Resolution(None, None, ResolutionStatus.DYNAMIC, Confidence.NONE, "name is locally bound")
-              return _Resolution(None, None, ResolutionStatus.UNRESOLVED, Confidence.NONE, "name not found")
-          '''
+          old = (
+              "        if isinstance(node, ast.Name):\n"
+              "            current: _Scope | None = scope\n"
+              "            while current:\n"
+              "                if node.id in current.bindings:\n"
+              "                    return current.bindings[node.id].resolution\n"
+              "                if node.id in current.shadowed:\n"
+              "                    return _Resolution(None, None, ResolutionStatus.DYNAMIC, Confidence.NONE, \"name is locally bound\")\n"
+              "                current = current.parent\n"
+              "            return _Resolution(None, None, ResolutionStatus.UNRESOLVED, Confidence.NONE, \"name not found\")\n"
+          )
+          new = (
+              "        if isinstance(node, ast.Name):\n"
+              "            for current in _lexical_scopes(scope):\n"
+              "                if node.id in current.bindings:\n"
+              "                    return current.bindings[node.id].resolution\n"
+              "                if node.id in current.shadowed:\n"
+              "                    return _Resolution(None, None, ResolutionStatus.DYNAMIC, Confidence.NONE, \"name is locally bound\")\n"
+              "            return _Resolution(None, None, ResolutionStatus.UNRESOLVED, Confidence.NONE, \"name not found\")\n"
+          )
           if text.count(old) != 1:
               raise SystemExit("unexpected ast.Name resolver source")
           text = text.replace(old, new, 1)
-          old = '''def _lookup(name: str, scope: _Scope) -> _Binding | None:
-              while scope:
-                  if name in scope.bindings: return scope.bindings[name]
-                  if name in scope.shadowed: return None
-                  scope = scope.parent
-              return None
-          '''
-          new = '''def _lexical_scopes(scope: _Scope):
-              current: _Scope | None = scope
-              skip_class_scopes = scope.kind == "function"
-              while current:
-                  yield current
-                  current = current.parent
-                  if skip_class_scopes:
-                      while current is not None and current.kind == "class":
-                          current = current.parent
-
-
-          def _lookup(name: str, scope: _Scope) -> _Binding | None:
-              for current in _lexical_scopes(scope):
-                  if name in current.bindings: return current.bindings[name]
-                  if name in current.shadowed: return None
-              return None
-          '''
+          old = (
+              "def _lookup(name: str, scope: _Scope) -> _Binding | None:\n"
+              "    while scope:\n"
+              "        if name in scope.bindings: return scope.bindings[name]\n"
+              "        if name in scope.shadowed: return None\n"
+              "        scope = scope.parent\n"
+              "    return None\n"
+          )
+          new = (
+              "def _lexical_scopes(scope: _Scope):\n"
+              "    current: _Scope | None = scope\n"
+              "    skip_class_scopes = scope.kind == \"function\"\n"
+              "    while current:\n"
+              "        yield current\n"
+              "        current = current.parent\n"
+              "        if skip_class_scopes:\n"
+              "            while current is not None and current.kind == \"class\":\n"
+              "                current = current.parent\n"
+              "\n\n"
+              "def _lookup(name: str, scope: _Scope) -> _Binding | None:\n"
+              "    for current in _lexical_scopes(scope):\n"
+              "        if name in current.bindings: return current.bindings[name]\n"
+              "        if name in current.shadowed: return None\n"
+              "    return None\n"
+          )
           if text.count(old) != 1:
               raise SystemExit("unexpected lookup helper source")
           path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
 
           path = Path("tests/helpers/code_relationship_fixture.py")
           text = path.read_text(encoding="utf-8")
-          old = '''def recursive():
-              return recursive()
-
-
-          def shadow(helper):
-          '''
-          new = '''def recursive():
-              return recursive()
-
-
-          def local():
-              return 3
-
-
-          def shadow(helper):
-          '''
+          old = "def recursive():\n    return recursive()\n\n\ndef shadow(helper):\n"
+          new = "def recursive():\n    return recursive()\n\n\ndef local():\n    return 3\n\n\ndef shadow(helper):\n"
           if text.count(old) != 1:
               raise SystemExit("unexpected fixture module source")
           text = text.replace(old, new, 1)
-          old = '''class Child(Base):
-              def local(self):
-                  return 2
-
-              def run(self):
-                  return self.local()
-
-
-          def unknown(obj):
-          '''
-          new = '''class Child(Base):
-              def local(self):
-                  return 2
-
-              def run(self):
-                  return self.local()
-
-              @classmethod
-              def run_via_cls(cls):
-                  return cls.local()
-
-              def run_unqualified(self):
-                  return local()
-
-
-          def unknown(obj):
-          '''
+          old = (
+              "class Child(Base):\n"
+              "    def local(self):\n"
+              "        return 2\n"
+              "\n"
+              "    def run(self):\n"
+              "        return self.local()\n"
+              "\n\n"
+              "def unknown(obj):\n"
+          )
+          new = (
+              "class Child(Base):\n"
+              "    def local(self):\n"
+              "        return 2\n"
+              "\n"
+              "    def run(self):\n"
+              "        return self.local()\n"
+              "\n"
+              "    @classmethod\n"
+              "    def run_via_cls(cls):\n"
+              "        return cls.local()\n"
+              "\n"
+              "    def run_unqualified(self):\n"
+              "        return local()\n"
+              "\n\n"
+              "def unknown(obj):\n"
+          )
           if text.count(old) != 1:
               raise SystemExit("unexpected fixture class source")
           path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
 
           path = Path("tests/test_code_relationship_core.py")
           text = path.read_text(encoding="utf-8")
-          old = '''    assert any(item.resolution_status is ResolutionStatus.RESOLVED for item in by_expression["self.local"])
-              assert any(item.resolution_status is ResolutionStatus.DYNAMIC for item in by_expression["helper"])
-          '''
-          new = '''    _, module_local = service.select_symbol(
-                  ref=commits["commit1"], path="pkg/service.py", qualified_name="local"
-              )
-              _, class_local = service.select_symbol(
-                  ref=commits["commit1"], path="pkg/service.py", qualified_name="Child.local"
-              )
-              assert any(
-                  item.resolution_status is ResolutionStatus.RESOLVED
-                  and item.target_symbol_id == class_local.symbol_id
-                  for item in by_expression["self.local"]
-              )
-              assert any(
-                  item.resolution_status is ResolutionStatus.RESOLVED
-                  and item.target_symbol_id == class_local.symbol_id
-                  for item in by_expression["cls.local"]
-              )
-              assert any(
-                  item.resolution_status is ResolutionStatus.RESOLVED
-                  and item.target_symbol_id == module_local.symbol_id
-                  for item in by_expression["local"]
-              )
-              assert all(item.target_symbol_id != class_local.symbol_id for item in by_expression["local"])
-              assert any(item.resolution_status is ResolutionStatus.DYNAMIC for item in by_expression["helper"])
-          '''
+          old = (
+              "    assert any(item.resolution_status is ResolutionStatus.RESOLVED for item in by_expression[\"self.local\"])\n"
+              "    assert any(item.resolution_status is ResolutionStatus.DYNAMIC for item in by_expression[\"helper\"])\n"
+          )
+          new = (
+              "    _, module_local = service.select_symbol(\n"
+              "        ref=commits[\"commit1\"], path=\"pkg/service.py\", qualified_name=\"local\"\n"
+              "    )\n"
+              "    _, class_local = service.select_symbol(\n"
+              "        ref=commits[\"commit1\"], path=\"pkg/service.py\", qualified_name=\"Child.local\"\n"
+              "    )\n"
+              "    assert any(\n"
+              "        item.resolution_status is ResolutionStatus.RESOLVED\n"
+              "        and item.target_symbol_id == class_local.symbol_id\n"
+              "        for item in by_expression[\"self.local\"]\n"
+              "    )\n"
+              "    assert any(\n"
+              "        item.resolution_status is ResolutionStatus.RESOLVED\n"
+              "        and item.target_symbol_id == class_local.symbol_id\n"
+              "        for item in by_expression[\"cls.local\"]\n"
+              "    )\n"
+              "    assert any(\n"
+              "        item.resolution_status is ResolutionStatus.RESOLVED\n"
+              "        and item.target_symbol_id == module_local.symbol_id\n"
+              "        for item in by_expression[\"local\"]\n"
+              "    )\n"
+              "    assert all(item.target_symbol_id != class_local.symbol_id for item in by_expression[\"local\"])\n"
+              "    assert any(item.resolution_status is ResolutionStatus.DYNAMIC for item in by_expression[\"helper\"])\n"
+          )
           if text.count(old) != 1:
               raise SystemExit("unexpected core assertion source")
           path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
