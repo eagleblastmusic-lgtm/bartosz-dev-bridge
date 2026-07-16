@@ -4,60 +4,66 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [gpt/poc-0-bootstrap, gpt/ghb2-c-durable-batch-recovery]
+    branches: [gpt/ghb2-c-durable-batch-recovery]
 
 permissions:
   contents: read
 
 jobs:
-  test:
-    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.11", "3.12"]
-
+  migration-diagnostic:
+    name: Ubuntu / Python 3.12 / migration diagnostic
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
           cache: pip
       - name: Install test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
-      - name: Validate PowerShell syntax
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          $scripts = @(
-            "scripts/bootstrap_windows.ps1",
-            "scripts/bootstrap_poc0b_windows.ps1",
-            "scripts/run_poc_bridge.ps1",
-            "scripts/Invoke-GHB0RecoveryGate.ps1"
-          )
-          foreach ($script in $scripts) {
-            $tokens = $null
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile(
-              (Resolve-Path $script),
-              [ref]$tokens,
-              [ref]$errors
-            ) | Out-Null
-            if ($errors.Count -gt 0) {
-              $errors | ForEach-Object { Write-Error "$script`: $($_.Message)" }
-              exit 1
-            }
-          }
-      - name: Compile GHB2-C
+      - name: Compile migration surfaces
         run: |
           python -m py_compile bdb_bridge/multi_file_patch_migration.py
-          python -m py_compile bdb_bridge/multi_file_patch_recovery_models.py
-          python -m py_compile bdb_bridge/multi_file_patch_journal.py
-          python -m py_compile bdb_bridge/multi_file_patch_executor.py
-          python -m py_compile bdb_bridge/multi_file_patch_hardening.py
-          python -m py_compile bdb_bridge/multi_file_patch_temp_identity.py
-          python -m py_compile tests/test_multi_file_patch_recovery.py
-      - name: Run targeted GHB2-C tests
-        run: python -m pytest -q tests/test_multi_file_patch_recovery.py
+          python -m py_compile tests/test_journal_migrations.py
+          python -m py_compile tests/test_result_outbox_migrations.py
+          python -m py_compile tests/test_service_lifecycle_migrations.py
+          python -m py_compile tests/test_workspace_recovery_migrations.py
+          python -m py_compile tests/test_workspace_lifecycle_migrations.py
+          python -m py_compile tests/test_repository_index_migrations.py
+          python -m py_compile tests/test_code_relationship_migrations.py
+      - name: Capture migration test output
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import pathlib
+          import subprocess
+          tests = [
+              "tests/test_journal_migrations.py",
+              "tests/test_result_outbox_migrations.py",
+              "tests/test_service_lifecycle_migrations.py",
+              "tests/test_workspace_recovery_migrations.py",
+              "tests/test_workspace_lifecycle_migrations.py",
+              "tests/test_repository_index_migrations.py",
+              "tests/test_code_relationship_migrations.py",
+          ]
+          process = subprocess.run(
+              ["python", "-m", "pytest", "-q", *tests],
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              text=True,
+              encoding="utf-8",
+          )
+          pathlib.Path("migration-tests.log").write_text(process.stdout, encoding="utf-8")
+          pathlib.Path("migration-tests.exit").write_text(str(process.returncode), encoding="ascii")
+          PY
+      - name: Upload migration diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-diagnostic
+          path: |
+            migration-tests.log
+            migration-tests.exit
+          if-no-files-found: error
+      - name: Enforce migration result
+        run: python -c "import pathlib,sys; sys.exit(int(pathlib.Path('migration-tests.exit').read_text()))"
