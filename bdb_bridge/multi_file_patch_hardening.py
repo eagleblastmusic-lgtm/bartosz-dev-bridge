@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Type
 
+from . import multi_file_patch_journal as _journal
 from .edit_operation_models import MAX_STRUCTURAL_CONTENT_BYTES
 from .edit_operation_parser import sha256_bytes
 from .instance_lock import InstanceLock
@@ -24,31 +25,63 @@ from .protocol import BridgeError, validate_repo_relative_path, validate_session
 from .workspace_types import WorkspaceDisposition, WorkspaceLifecycleState
 
 
-def _corrupt(message: str, exc: Exception | None = None) -> BridgeError:
-    error = BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, message)
-    if exc is not None:
-        error.__cause__ = exc
-    return error
+def _code(corrupt: bool) -> BridgeErrorCode:
+    return BridgeErrorCode.JOURNAL_CORRUPT if corrupt else BridgeErrorCode.INVALID_PAYLOAD
 
 
 def _canonical_digest(value: object, field: str, *, corrupt: bool) -> str:
-    valid = (
-        isinstance(value, str)
-        and len(value) == 71
-        and value.startswith("sha256:")
-        and not any(character not in "0123456789abcdef" for character in value[7:])
-    )
-    if not valid:
-        code = BridgeErrorCode.JOURNAL_CORRUPT if corrupt else BridgeErrorCode.INVALID_PAYLOAD
-        raise BridgeError(code, f"Invalid canonical digest in {field}")
+    if (
+        not isinstance(value, str)
+        or len(value) != 71
+        or not value.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in value[7:])
+    ):
+        raise BridgeError(_code(corrupt), f"Invalid canonical digest in {field}")
     return value
 
 
 def _require_int(value: object, field: str, *, minimum: int = 0, corrupt: bool) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        code = BridgeErrorCode.JOURNAL_CORRUPT if corrupt else BridgeErrorCode.INVALID_PAYLOAD
-        raise BridgeError(code, f"Invalid integer in {field}")
+        raise BridgeError(_code(corrupt), f"Invalid integer in {field}")
     return value
+
+
+def _validate_checkpoint_path(
+    command_id: str,
+    item: MultiFileCheckpointPath,
+    *,
+    corrupt: bool,
+) -> int:
+    code = _code(corrupt)
+    try:
+        normalized = validate_repo_relative_path(item.path)
+    except BridgeError as exc:
+        raise BridgeError(code, "Checkpoint contains an invalid repository path") from exc
+    if normalized != item.path:
+        raise BridgeError(code, "Checkpoint path is not canonical")
+    if item.command_id != command_id:
+        raise BridgeError(code, "Checkpoint path command mismatch")
+    if item.before_exists != (item.before is not None):
+        raise BridgeError(code, "Checkpoint before existence mismatch")
+    if item.after_exists != (item.after is not None):
+        raise BridgeError(code, "Checkpoint after existence mismatch")
+    before_size = len(item.before or b"")
+    after_size = len(item.after or b"")
+    if before_size > MAX_STRUCTURAL_CONTENT_BYTES or after_size > MAX_STRUCTURAL_CONTENT_BYTES:
+        raise BridgeError(code, "Checkpoint path exceeds the per-file snapshot cap")
+    before_hash = sha256_bytes(item.before) if item.before is not None else None
+    after_hash = sha256_bytes(item.after) if item.after is not None else None
+    if item.before_sha256 != before_hash or item.after_sha256 != after_hash:
+        raise BridgeError(code, "Checkpoint path bytes/hash mismatch")
+    if item.before_exists == item.after_exists and item.before == item.after:
+        raise BridgeError(code, "Checkpoint path has no net change")
+    if item.roles != tuple(sorted(set(item.roles))) or not item.roles:
+        raise BridgeError(code, "Checkpoint path roles are not canonical")
+    if item.operation_indices != tuple(sorted(set(item.operation_indices))) or not item.operation_indices:
+        raise BridgeError(code, "Checkpoint operation indices are not canonical")
+    if any(isinstance(index, bool) or not isinstance(index, int) or index < 0 for index in item.operation_indices):
+        raise BridgeError(code, "Checkpoint operation index is invalid")
+    return before_size + after_size
 
 
 def _validate_checkpoint_paths(
@@ -57,7 +90,7 @@ def _validate_checkpoint_paths(
     *,
     corrupt: bool = False,
 ) -> None:
-    code = BridgeErrorCode.JOURNAL_CORRUPT if corrupt else BridgeErrorCode.INVALID_PAYLOAD
+    code = _code(corrupt)
     if not paths or len(paths) > MAX_BATCH_PATHS:
         raise BridgeError(code, f"Checkpoint path count must be in 1..{MAX_BATCH_PATHS}")
     if tuple(item.ordinal for item in paths) != tuple(range(len(paths))):
@@ -66,38 +99,7 @@ def _validate_checkpoint_paths(
         raise BridgeError(code, "Checkpoint paths are not sorted")
     if len({item.path for item in paths}) != len(paths):
         raise BridgeError(code, "Checkpoint paths are not unique")
-
-    total = 0
-    for item in paths:
-        try:
-            normalized = validate_repo_relative_path(item.path)
-        except BridgeError as exc:
-            raise BridgeError(code, "Checkpoint contains an invalid repository path") from exc
-        if normalized != item.path:
-            raise BridgeError(code, "Checkpoint path is not canonical")
-        if item.command_id != command_id:
-            raise BridgeError(code, "Checkpoint path command mismatch")
-        if item.before_exists != (item.before is not None):
-            raise BridgeError(code, "Checkpoint before existence mismatch")
-        if item.after_exists != (item.after is not None):
-            raise BridgeError(code, "Checkpoint after existence mismatch")
-        before_size = len(item.before or b"")
-        after_size = len(item.after or b"")
-        if before_size > MAX_STRUCTURAL_CONTENT_BYTES or after_size > MAX_STRUCTURAL_CONTENT_BYTES:
-            raise BridgeError(code, "Checkpoint path exceeds the per-file snapshot cap")
-        total += before_size + after_size
-        before_hash = sha256_bytes(item.before) if item.before is not None else None
-        after_hash = sha256_bytes(item.after) if item.after is not None else None
-        if item.before_sha256 != before_hash or item.after_sha256 != after_hash:
-            raise BridgeError(code, "Checkpoint path bytes/hash mismatch")
-        if item.before_exists == item.after_exists and item.before == item.after:
-            raise BridgeError(code, "Checkpoint path has no net change")
-        if item.roles != tuple(sorted(set(item.roles))) or not item.roles:
-            raise BridgeError(code, "Checkpoint path roles are not canonical")
-        if item.operation_indices != tuple(sorted(set(item.operation_indices))) or not item.operation_indices:
-            raise BridgeError(code, "Checkpoint operation indices are not canonical")
-        if any(isinstance(index, bool) or not isinstance(index, int) or index < 0 for index in item.operation_indices):
-            raise BridgeError(code, "Checkpoint operation index is invalid")
+    total = sum(_validate_checkpoint_path(command_id, item, corrupt=corrupt) for item in paths)
     if total > MAX_BATCH_SNAPSHOT_BYTES:
         raise BridgeError(code, "Checkpoint before/after snapshot exceeds the batch cap")
 
@@ -106,12 +108,11 @@ def _row_to_checkpoint_record(row: sqlite3.Row | tuple[Any, ...]) -> MultiFileCh
     try:
         state = MultiFileCheckpointState(str(row[5]))
         revision_before = _require_int(row[6], "workspace_revision_before", corrupt=True)
-        revision_after = None if row[8] is None else _require_int(
-            row[8], "workspace_revision_after", corrupt=True
+        revision_after = (
+            None
+            if row[8] is None
+            else _require_int(row[8], "workspace_revision_after", corrupt=True)
         )
-        path_count = _require_int(row[10], "path_count", minimum=1, corrupt=True)
-        total_before = _require_int(row[11], "total_before_bytes", corrupt=True)
-        total_after = _require_int(row[12], "total_after_bytes", corrupt=True)
         record = MultiFileCheckpointRecord(
             command_id=str(row[0]),
             session_id=str(row[1]),
@@ -127,9 +128,9 @@ def _row_to_checkpoint_record(row: sqlite3.Row | tuple[Any, ...]) -> MultiFileCh
             workspace_state_hash_after=_canonical_digest(
                 row[9], "workspace_state_hash_after", corrupt=True
             ),
-            path_count=path_count,
-            total_before_bytes=total_before,
-            total_after_bytes=total_after,
+            path_count=_require_int(row[10], "path_count", minimum=1, corrupt=True),
+            total_before_bytes=_require_int(row[11], "total_before_bytes", corrupt=True),
+            total_after_bytes=_require_int(row[12], "total_after_bytes", corrupt=True),
             last_error=None if row[13] is None else str(row[13]),
             created_at=str(row[14]),
             updated_at=str(row[15]),
@@ -137,7 +138,7 @@ def _row_to_checkpoint_record(row: sqlite3.Row | tuple[Any, ...]) -> MultiFileCh
         validate_session_id(record.session_id)
         if not record.command_id or record.path_count > MAX_BATCH_PATHS:
             raise ValueError("invalid checkpoint identity")
-        if total_before + total_after > MAX_BATCH_SNAPSHOT_BYTES:
+        if record.total_before_bytes + record.total_after_bytes > MAX_BATCH_SNAPSHOT_BYTES:
             raise ValueError("oversized checkpoint snapshot")
         if record.last_error is not None and len(record.last_error) > 500:
             raise ValueError("oversized checkpoint diagnostic")
@@ -150,9 +151,15 @@ def _row_to_checkpoint_record(row: sqlite3.Row | tuple[Any, ...]) -> MultiFileCh
     except BridgeError as exc:
         if exc.code == BridgeErrorCode.JOURNAL_CORRUPT.value:
             raise
-        raise _corrupt("Invalid multi-file checkpoint header", exc) from exc
+        raise BridgeError(
+            BridgeErrorCode.JOURNAL_CORRUPT,
+            "Invalid multi-file checkpoint header",
+        ) from exc
     except (IndexError, TypeError, ValueError) as exc:
-        raise _corrupt("Invalid multi-file checkpoint header", exc) from exc
+        raise BridgeError(
+            BridgeErrorCode.JOURNAL_CORRUPT,
+            "Invalid multi-file checkpoint header",
+        ) from exc
 
 
 def _row_to_checkpoint_path(row: sqlite3.Row | tuple[Any, ...]) -> MultiFileCheckpointPath:
@@ -169,51 +176,64 @@ def _row_to_checkpoint_path(row: sqlite3.Row | tuple[Any, ...]) -> MultiFileChec
             isinstance(value, int) and not isinstance(value, bool) for value in indices_raw
         ):
             raise ValueError("invalid operation indices JSON")
-        before = bytes(row[4]) if row[4] is not None else None
-        after = bytes(row[7]) if row[7] is not None else None
         item = MultiFileCheckpointPath(
             command_id=str(row[0]),
             ordinal=_require_int(row[1], "ordinal", corrupt=True),
             path=str(row[2]),
             before_exists=bool(before_exists_raw),
-            before=before,
-            before_sha256=None
-            if row[5] is None
-            else _canonical_digest(row[5], "before_sha256", corrupt=True),
+            before=bytes(row[4]) if row[4] is not None else None,
+            before_sha256=(
+                None
+                if row[5] is None
+                else _canonical_digest(row[5], "before_sha256", corrupt=True)
+            ),
             after_exists=bool(after_exists_raw),
-            after=after,
-            after_sha256=None
-            if row[8] is None
-            else _canonical_digest(row[8], "after_sha256", corrupt=True),
+            after=bytes(row[7]) if row[7] is not None else None,
+            after_sha256=(
+                None
+                if row[8] is None
+                else _canonical_digest(row[8], "after_sha256", corrupt=True)
+            ),
             roles=tuple(roles_raw),
             operation_indices=tuple(indices_raw),
         )
-        _validate_checkpoint_paths(item.command_id, (item,), corrupt=True)
+        _validate_checkpoint_path(item.command_id, item, corrupt=True)
         return item
     except BridgeError as exc:
         if exc.code == BridgeErrorCode.JOURNAL_CORRUPT.value:
             raise
-        raise _corrupt("Invalid multi-file checkpoint path row", exc) from exc
+        raise BridgeError(
+            BridgeErrorCode.JOURNAL_CORRUPT,
+            "Invalid multi-file checkpoint path row",
+        ) from exc
     except (IndexError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise _corrupt("Invalid multi-file checkpoint path row", exc) from exc
+        raise BridgeError(
+            BridgeErrorCode.JOURNAL_CORRUPT,
+            "Invalid multi-file checkpoint path row",
+        ) from exc
 
 
 def _get_checkpoint(self: Any, command_id: str) -> MultiFileCheckpointRecord | None:
     self._ensure_open()
     try:
         row = self._connection.execute(
-            _journal._RECORD_SELECT + " WHERE command_id = ?", (command_id,)
+            _journal._RECORD_SELECT + " WHERE command_id = ?",
+            (command_id,),
         ).fetchone()
     except sqlite3.Error as exc:
         raise map_sqlite_error(exc, context="multi-file checkpoint read") from exc
     return None if row is None else _row_to_checkpoint_record(row)
 
 
-def _list_checkpoint_paths(self: Any, command_id: str) -> tuple[MultiFileCheckpointPath, ...]:
+def _list_checkpoint_paths(
+    self: Any,
+    command_id: str,
+) -> tuple[MultiFileCheckpointPath, ...]:
     self._ensure_open()
     try:
         rows = self._connection.execute(
-            _journal._PATH_SELECT + " WHERE command_id = ? ORDER BY ordinal ASC", (command_id,)
+            _journal._PATH_SELECT + " WHERE command_id = ? ORDER BY ordinal ASC",
+            (command_id,),
         ).fetchall()
     except sqlite3.Error as exc:
         raise map_sqlite_error(exc, context="multi-file checkpoint path read") from exc
@@ -229,15 +249,20 @@ def _get_checkpoint_bundle(self: Any, command_id: str) -> MultiFileCheckpointBun
         return None
     paths = _list_checkpoint_paths(self, command_id)
     if len(paths) != record.path_count:
-        raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Checkpoint path count differs from header")
-    _validate_checkpoint_paths(command_id, paths, corrupt=True)
+        raise BridgeError(
+            BridgeErrorCode.JOURNAL_CORRUPT,
+            "Checkpoint path count differs from header",
+        )
     total_before = sum(len(item.before or b"") for item in paths)
     total_after = sum(len(item.after or b"") for item in paths)
     if (total_before, total_after) != (
         record.total_before_bytes,
         record.total_after_bytes,
     ):
-        raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Checkpoint byte totals differ from header")
+        raise BridgeError(
+            BridgeErrorCode.JOURNAL_CORRUPT,
+            "Checkpoint byte totals differ from header",
+        )
     expected = compute_multi_file_checkpoint_sha256(
         command_id=record.command_id,
         session_id=record.session_id,
@@ -266,16 +291,20 @@ def _list_incomplete_checkpoints(
         params = (session_id,)
     try:
         rows = self._connection.execute(
-            _journal._RECORD_SELECT + f" WHERE {where} ORDER BY created_at, command_id",
+            _journal._RECORD_SELECT
+            + f" WHERE {where} ORDER BY created_at, command_id",
             params,
         ).fetchall()
     except sqlite3.Error as exc:
-        raise map_sqlite_error(exc, context="incomplete multi-file checkpoint read") from exc
+        raise map_sqlite_error(
+            exc,
+            context="incomplete multi-file checkpoint read",
+        ) from exc
     return tuple(_row_to_checkpoint_record(row) for row in rows)
 
 
 def install_journal_multi_file_patch_hardening(journal_cls: Type[object]) -> None:
-    """Replace read/validation surfaces with bounded corruption-safe variants."""
+    """Install bounded, corruption-safe checkpoint read and validation surfaces."""
 
     if getattr(journal_cls, "_ghb2c_hardening_installed", False):
         return
@@ -289,11 +318,20 @@ def install_journal_multi_file_patch_hardening(journal_cls: Type[object]) -> Non
     setattr(journal_cls, "get_multi_file_patch_checkpoint", _get_checkpoint)
     setattr(journal_cls, "list_multi_file_patch_checkpoint_paths", _list_checkpoint_paths)
     setattr(journal_cls, "get_multi_file_patch_bundle", _get_checkpoint_bundle)
-    setattr(journal_cls, "list_incomplete_multi_file_patch_checkpoints", _list_incomplete_checkpoints)
+    setattr(
+        journal_cls,
+        "list_incomplete_multi_file_patch_checkpoints",
+        _list_incomplete_checkpoints,
+    )
     setattr(journal_cls, "_ghb2c_hardening_installed", True)
 
 
-def _short_temp_path(self: Any, bundle: MultiFileCheckpointBundle, item: MultiFileCheckpointPath, mode: str) -> Path:
+def _short_temp_path(
+    self: Any,
+    bundle: MultiFileCheckpointBundle,
+    item: MultiFileCheckpointPath,
+    mode: str,
+) -> Path:
     target = self.workspace.resolve_allowed_path(item.path)
     checkpoint = bundle.record.checkpoint_sha256[7:23]
     path_digest = hashlib.sha256(item.path.encode("utf-8")).hexdigest()[:16]
@@ -301,7 +339,7 @@ def _short_temp_path(self: Any, bundle: MultiFileCheckpointBundle, item: MultiFi
 
 
 def install_multi_file_patch_executor_hardening(executor_cls: Type[object]) -> None:
-    """Require exclusive ownership and make recovery strictly session-scoped."""
+    """Require exclusive Bridge ownership and session-scoped recovery."""
 
     if getattr(executor_cls, "_ghb2c_hardening_installed", False):
         return
@@ -325,12 +363,19 @@ def install_multi_file_patch_executor_hardening(executor_cls: Type[object]) -> N
         self.instance_lock = instance_lock
 
     def require_lock(self: Any) -> None:
-        lock = self.instance_lock
         runtime_dir = getattr(self.workspace.config, "runtime_dir", None)
         if runtime_dir is None:
-            raise BridgeError(BridgeErrorCode.INVALID_CONFIG, "GHB2-C requires a configured runtime_dir")
+            raise BridgeError(
+                BridgeErrorCode.INVALID_CONFIG,
+                "GHB2-C requires a configured runtime_dir",
+            )
         expected = (Path(runtime_dir) / "bridge.instance.lock").expanduser().resolve()
-        if not isinstance(lock, InstanceLock) or lock.path != expected or not lock.is_acquired:
+        lock = self.instance_lock
+        if (
+            not isinstance(lock, InstanceLock)
+            or lock.path != expected
+            or not lock.is_acquired
+        ):
             raise BridgeError(
                 BridgeErrorCode.INSTANCE_LOCK_FAILED,
                 "GHB2-C requires ownership of the canonical bridge.instance.lock",
@@ -344,19 +389,19 @@ def install_multi_file_patch_executor_hardening(executor_cls: Type[object]) -> N
                 BridgeErrorCode.JOURNAL_CONFLICT,
                 "Workspace and preserved lifecycle records are required for GHB2-C",
             )
-        identity = (
-            str(self.workspace.path),
-            self.workspace.base_sha,
-            workspace.revision,
-            workspace.state_hash,
-        )
-        durable = (
+        durable_identity = (
             lifecycle.workspace_path,
             lifecycle.base_sha,
             lifecycle.expected_revision,
             lifecycle.expected_state_hash,
         )
-        if identity != durable:
+        active_identity = (
+            str(self.workspace.path),
+            self.workspace.base_sha,
+            workspace.revision,
+            workspace.state_hash,
+        )
+        if durable_identity != active_identity:
             raise BridgeError(
                 BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
                 "Workspace lifecycle identity differs from the active workspace",
@@ -391,7 +436,10 @@ def install_multi_file_patch_executor_hardening(executor_cls: Type[object]) -> N
         self.planner.revalidate(plan)
         workspace_record = self.journal.get_workspace(session_id)
         if workspace_record is None:
-            raise BridgeError(BridgeErrorCode.JOURNAL_CONFLICT, "Workspace is not registered")
+            raise BridgeError(
+                BridgeErrorCode.JOURNAL_CONFLICT,
+                "Workspace is not registered",
+            )
         path_by_name = {item.path: item for item in plan.paths}
         changed = [path_by_name[path] for path in plan.changed_paths]
         paths = tuple(
