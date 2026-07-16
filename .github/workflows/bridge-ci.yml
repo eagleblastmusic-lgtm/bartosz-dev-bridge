@@ -180,6 +180,7 @@ jobs:
           python - <<'PY'
           import subprocess
           expected = {
+              ".github/workflows/bridge-ci.yml",
               "bdb_bridge/code_relationship_analyzer.py",
               "tests/helpers/code_relationship_fixture.py",
               "tests/test_code_relationship_core.py",
