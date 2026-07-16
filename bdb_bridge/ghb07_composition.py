@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import signal
+import sqlite3
 import sys
 import uuid
 from pathlib import Path
@@ -12,12 +13,41 @@ from .git_command_transport import GitCommandTransport
 from .ingestion import CommandIngestor
 from .instance_lock import InstanceLock
 from .journal import Journal
+from .migrations import map_sqlite_error
 from .models import BridgeErrorCode
 from .protocol import BridgeError, parse_git_ref
 from .result_outbox import OutboxProcessor, ResultCoordinator
 from .result_transport import GitResultTransport
 from .scheduler import SingleQueueScheduler
 from .service import BridgeService
+
+
+def reconcile_staged_result_after_restart(
+    journal: Journal,
+    outbox: OutboxProcessor,
+):
+    """Reconcile one durable RESULT_STAGED row while the process owns the OS lock.
+
+    A process may crash after the remote push but before the local publication ACK.
+    The pending outbox row then retains its lease.  A new single-instance process may
+    safely read the remote result immediately: identical bytes complete the local ACK,
+    while an absent/unavailable remote remains pending without another push.
+    """
+    try:
+        row = journal._connection.execute(
+            """
+            SELECT command_id
+            FROM commands
+            WHERE state = 'result_staged'
+            ORDER BY created_at ASC, session_id ASC, sequence ASC, command_id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise map_sqlite_error(exc, context="startup staged-result reconciliation") from exc
+    if row is None:
+        return None
+    return outbox.process_command(str(row[0]))
 
 
 def run_foreground(config: BridgeConfig) -> int:
@@ -64,6 +94,7 @@ def run_foreground(config: BridgeConfig) -> int:
         scheduler = SingleQueueScheduler(journal)
         result_transport = GitResultTransport(config, remote_name=res_remote or "origin")
         outbox = OutboxProcessor(journal, result_transport, fault_hook=hook)
+        reconcile_staged_result_after_restart(journal, outbox)
         coordinator = ResultCoordinator(config, journal, outbox, fault_hook=hook)
         service = BridgeService(
             config=config,
