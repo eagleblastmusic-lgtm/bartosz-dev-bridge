@@ -1,8 +1,8 @@
 name: Bridge CI
 
 on:
-  push:
-    branches: [gpt/ghb1-b-code-relationships]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
@@ -189,9 +189,11 @@ jobs:
       - name: Commit targeted fixes
         shell: bash
         run: |
+          rm -f .github/ghb1b-trigger.txt
           git diff --check
-          git add \
+          git add -A \
             .github/workflows/bridge-ci.yml \
+            .github/ghb1b-trigger.txt \
             tests/test_code_relationship_core.py \
             tests/test_journal_migrations.py \
             tests/test_result_outbox_migrations.py \
