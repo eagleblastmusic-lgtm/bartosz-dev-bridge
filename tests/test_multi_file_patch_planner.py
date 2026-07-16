@@ -112,6 +112,7 @@ def test_batch_parser_is_canonical_strict_and_bounded() -> None:
         batch({"schema": "unknown-v1", "kind": "unknown"}),
         batch({**replacement("a.txt", b"a", b"A"), "content_base64": "QQ==="}),
         batch(replacement(".env.production", b"a", b"A")),
+        batch(replacement("a.txt", b"a", b"x" * (1024 * 1024 + 1))),
         {"schema": "bdb-multi-file-patch-v1", "operations": [create(f"f{index}.txt", b"") for index in range(101)]},
     ]
     for invalid in invalid_documents:
@@ -205,12 +206,12 @@ def test_planner_enforces_local_and_manifest_scope_for_every_role(tmp_path: Path
         "allowed/source.txt",
     )
 
-    manifest_denied = parse_multi_file_patch(create("allowed/other.txt", b"new"))
+    manifest_denied = parse_multi_file_patch(batch(create("allowed/other.txt", b"new")))
     with pytest.raises(BridgeError) as manifest:
         service.plan(manifest_denied)
     assert manifest.value.code == BridgeErrorCode.SCOPE_VIOLATION
 
-    local_denied = parse_multi_file_patch(create("other/new.txt", b"new"))
+    local_denied = parse_multi_file_patch(batch(create("other/new.txt", b"new")))
     with pytest.raises(BridgeError) as local:
         service.plan(local_denied)
     assert local.value.code == BridgeErrorCode.POLICY_DENIED
@@ -227,7 +228,14 @@ def test_revalidate_detects_workspace_changes_and_plan_tampering(tmp_path: Path)
     assert changed.value.code == BridgeErrorCode.STATE_MISMATCH
 
     target.write_bytes(b"before")
-    tampered = replace(plan, total_after_bytes=plan.total_after_bytes + 1)
-    with pytest.raises(BridgeError) as invalid:
-        service.revalidate(tampered)
-    assert invalid.value.code == BridgeErrorCode.INVALID_PAYLOAD
+    tampered_total = replace(plan, total_after_bytes=plan.total_after_bytes + 1)
+    with pytest.raises(BridgeError) as invalid_total:
+        service.revalidate(tampered_total)
+    assert invalid_total.value.code == BridgeErrorCode.INVALID_PAYLOAD
+
+    first_path = plan.paths[0]
+    tampered_path = replace(first_path, after=b"tampered")
+    tampered_bytes = replace(plan, paths=(tampered_path, *plan.paths[1:]))
+    with pytest.raises(BridgeError) as invalid_bytes:
+        service.revalidate(tampered_bytes)
+    assert invalid_bytes.value.code == BridgeErrorCode.INVALID_PAYLOAD
