@@ -8,28 +8,19 @@ permissions:
   contents: read
 
 jobs:
-  diagnose:
-    name: diagnose Ubuntu / Python 3.11
+  export:
+    name: export GHB1-B source diagnostics
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-      - name: Install test dependencies
-        run: python -m pip install --disable-pip-version-check -e ".[dev]"
-      - name: Compile Bridge
-        run: |
-          python -m py_compile poc_bridge.py
-          python -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
-          python -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for p in pathlib.Path('bdb_poc').glob('*.py')]"
-      - name: Run tests with captured output
-        run: python -c "import pathlib,subprocess,sys; p=subprocess.run([sys.executable,'-m','pytest','-q'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True); pathlib.Path('pytest-output.txt').write_text(p.stdout,encoding='utf-8'); print(p.stdout,end=''); raise SystemExit(p.returncode)"
-      - name: Upload pytest diagnostics
-        if: always()
+      - name: Upload source diagnostics
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-ubuntu-py311
-          path: pytest-output.txt
+          name: ghb1b-source
+          path: |
+            bdb_bridge
+            bdb_poc
+            tests
+            pyproject.toml
+            poc_bridge.py
           retention-days: 1
