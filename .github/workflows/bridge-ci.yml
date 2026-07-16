@@ -36,207 +36,47 @@ jobs:
                   raise SystemExit(f"{path}: expected {expected}, found {count}: {old!r}")
               file.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
 
-          replace(
-              "tests/test_journal_migrations.py",
-              '            "multi_file_patch_checkpoint_paths",\n',
-              '            "multi_file_patch_checkpoint_paths",\n            "multi_file_patch_profile_runs",\n',
-          )
-          replace(
-              "tests/test_journal_migrations.py",
-              '            (9, "journal_v9_multi_file_patch_recovery"),\n',
-              '            (9, "journal_v9_multi_file_patch_recovery"),\n            (10, "journal_v10_multi_file_patch_runtime"),\n',
-              expected=3,
-          )
-          replace(
-              "tests/test_journal_migrations.py",
-              '[(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]',
-              '[(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]',
-              expected=2,
-          )
+          result_test = Path("tests/test_result_outbox_migrations.py").read_text(encoding="utf-8")
+          if f'V10 = "{V10}"' in result_test:
+              print("Journal v10 golden contracts are already updated")
+              raise SystemExit(0)
 
-          replace(
-              "tests/test_result_outbox_migrations.py",
-              'V9 = "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3"\n',
-              f'V9 = "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3"\nV10 = "{V10}"\n',
-          )
-          replace(
-              "tests/test_result_outbox_migrations.py",
-              '        (9, "journal_v9_multi_file_patch_recovery", V9),\n',
-              '        (9, "journal_v9_multi_file_patch_recovery", V9),\n        (10, "journal_v10_multi_file_patch_runtime", V10),\n',
-          )
-          replace(
-              "tests/test_result_outbox_migrations.py",
-              '        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,),\n',
-              '        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,),\n',
-          )
+          replace("tests/test_journal_migrations.py", '            "multi_file_patch_checkpoint_paths",\n', '            "multi_file_patch_checkpoint_paths",\n            "multi_file_patch_profile_runs",\n')
+          replace("tests/test_journal_migrations.py", '            (9, "journal_v9_multi_file_patch_recovery"),\n', '            (9, "journal_v9_multi_file_patch_recovery"),\n            (10, "journal_v10_multi_file_patch_runtime"),\n', 3)
+          replace("tests/test_journal_migrations.py", '[(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]', '[(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]', 2)
 
-          replace(
-              "tests/test_service_lifecycle_migrations.py",
-              'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 9',
-              'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10',
-          )
+          replace("tests/test_result_outbox_migrations.py", 'V9 = "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3"\n', f'V9 = "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3"\nV10 = "{V10}"\n')
+          replace("tests/test_result_outbox_migrations.py", '        (9, "journal_v9_multi_file_patch_recovery", V9),\n', '        (9, "journal_v9_multi_file_patch_recovery", V9),\n        (10, "journal_v10_multi_file_patch_runtime", V10),\n')
+          replace("tests/test_result_outbox_migrations.py", '        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,),\n', '        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,),\n')
 
-          replace(
-              "tests/test_workspace_recovery_migrations.py",
-              'V9_CHECKSUM = "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3"\n',
-              f'V9_CHECKSUM = "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3"\nV10_CHECKSUM = "{V10}"\n',
-          )
-          replace(
-              "tests/test_workspace_recovery_migrations.py",
-              '        (9, "journal_v9_multi_file_patch_recovery", V9_CHECKSUM),\n',
-              '        (9, "journal_v9_multi_file_patch_recovery", V9_CHECKSUM),\n        (10, "journal_v10_multi_file_patch_runtime", V10_CHECKSUM),\n',
-          )
-          replace(
-              "tests/test_workspace_recovery_migrations.py",
-              '        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,),\n',
-              '        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,),\n',
-          )
-          replace(
-              "tests/test_workspace_recovery_migrations.py",
-              '== (1, 2, 3, 4, 5, 6, 7, 8, 9)',
-              '== (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)',
-          )
-          replace(
-              "tests/test_workspace_recovery_migrations.py",
-              '        "journal_v9_multi_file_patch_recovery",\n',
-              '        "journal_v9_multi_file_patch_recovery",\n        "journal_v10_multi_file_patch_runtime",\n',
-          )
+          replace("tests/test_service_lifecycle_migrations.py", 'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 9', 'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10')
 
-          replace(
-              "tests/test_repository_index_migrations.py",
-              'list(range(1, 10))',
-              'list(range(1, 11))',
-          )
-          replace(
-              "tests/test_repository_index_migrations.py",
-              'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 9',
-              'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10',
-          )
-          replace(
-              "tests/test_repository_index_migrations.py",
-              "VALUES(10,'future','x',?)",
-              "VALUES(11,'future','x',?)",
-          )
+          replace("tests/test_workspace_recovery_migrations.py", 'V9_CHECKSUM = "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3"\n', f'V9_CHECKSUM = "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3"\nV10_CHECKSUM = "{V10}"\n')
+          replace("tests/test_workspace_recovery_migrations.py", '        (9, "journal_v9_multi_file_patch_recovery", V9_CHECKSUM),\n', '        (9, "journal_v9_multi_file_patch_recovery", V9_CHECKSUM),\n        (10, "journal_v10_multi_file_patch_runtime", V10_CHECKSUM),\n')
+          replace("tests/test_workspace_recovery_migrations.py", '        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,),\n', '        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,),\n')
+          replace("tests/test_workspace_recovery_migrations.py", '== (1, 2, 3, 4, 5, 6, 7, 8, 9)', '== (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)')
+          replace("tests/test_workspace_recovery_migrations.py", '        "journal_v9_multi_file_patch_recovery",\n', '        "journal_v9_multi_file_patch_recovery",\n        "journal_v10_multi_file_patch_runtime",\n')
 
-          replace(
-              "tests/test_code_relationship_migrations.py",
-              'list(range(1, 10))',
-              'list(range(1, 11))',
-          )
-          replace(
-              "tests/test_code_relationship_migrations.py",
-              'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 9',
-              'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10',
-          )
-          replace(
-              "tests/test_code_relationship_migrations.py",
-              "VALUES(10,'future','x',?)",
-              "VALUES(11,'future','x',?)",
-          )
+          replace("tests/test_repository_index_migrations.py", 'list(range(1, 10))', 'list(range(1, 11))')
+          replace("tests/test_repository_index_migrations.py", 'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 9', 'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10')
+          replace("tests/test_repository_index_migrations.py", "VALUES(10,'future','x',?)", "VALUES(11,'future','x',?)")
 
-          replace(
-              "tests/test_multi_file_patch_v9_contracts.py",
-              '    assert tuple(migration.version for migration in MIGRATIONS) == tuple(range(1, 10))\n',
-              '    assert tuple(migration.version for migration in MIGRATIONS[:9]) == tuple(range(1, 10))\n',
-          )
+          replace("tests/test_code_relationship_migrations.py", 'list(range(1, 10))', 'list(range(1, 11))')
+          replace("tests/test_code_relationship_migrations.py", 'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 9', 'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10')
+          replace("tests/test_code_relationship_migrations.py", "VALUES(10,'future','x',?)", "VALUES(11,'future','x',?)")
 
-          v10_test = Path("tests/test_multi_file_patch_v10_contracts.py")
-          if v10_test.exists():
-              raise SystemExit("v10 contract test already exists")
-          v10_test.write_text(
-              '''from __future__ import annotations
-
-from bdb_bridge.migrations import MIGRATIONS
-from bdb_bridge.multi_file_patch_runtime_migration import (
-    MIGRATION_V10,
-    MIGRATION_V10_STATEMENTS,
-)
-
-
-V10_CHECKSUM = "6ba6a3338f95ff66679025a177c7a2d95adb75901c22f724d3bddf89ce5fd0fe"
-
-
-def test_v10_registry_name_statements_and_literal_checksum() -> None:
-    assert tuple(migration.version for migration in MIGRATIONS) == tuple(range(1, 11))
-    assert MIGRATIONS[9] is MIGRATION_V10
-    assert MIGRATION_V10.name == "journal_v10_multi_file_patch_runtime"
-    assert MIGRATION_V10.statements == MIGRATION_V10_STATEMENTS
-    assert MIGRATION_V10.checksum() == V10_CHECKSUM
-
-
-def test_v1_through_v9_checksums_remain_frozen() -> None:
-    assert tuple(migration.checksum() for migration in MIGRATIONS[:9]) == (
-        "1d293179f582464fa10eecd37fb381c0a5913d85ed629c9ec244c8bfdb2fe31a",
-        "80178c2da604e77b9f568467ffa54865dbad3867193dc9f489e002cb5c3dbc33",
-        "4dffb2c3e5807cba98d8f5323554e625e4acc58559cc807e2728eab7f07bb9db",
-        "b19f7ef96b5c9e25ad9cad9c6d2160a667c5c1b5db68d1d0e7accb2f1f2ba3c9",
-        "9bfc62c82e71ebbf968f6a171eb0b320a4d2510dec158db13a8d940afd315670",
-        "eaac8a58c752800581d5f02504d7d5b509985fbb2638cb6924f5673828689839",
-        "639b9d4eaa0e142fc958c9fa0a1a03a2421802a75ba963b84c3b835d28e30cf8",
-        "cbc8c9c6b5907c1f4d82cc9f95b095d8cceff4ef4aaca454f883cd3bb2ad55b6",
-        "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3",
-    )
-''',
-              encoding="utf-8",
-              newline="\n",
-          )
-
-          replace(
-              "bdb_bridge/__init__.py",
-              'from .ghb07_cli import install_cli\ninstall_cli()\n',
-              'from .ghb07_cli import install_cli\ninstall_cli()\nfrom .multi_file_patch_cli import install_multi_file_patch_cli\ninstall_multi_file_patch_cli()\n',
-          )
-
-          workflow = '''name: Bridge CI
-
-on:
-  pull_request:
-    branches: [main]
-  push:
-    branches: [gpt/ghb2-d-final-editing-gate]
-
-permissions:
-  contents: read
-
-jobs:
-  v10-contracts:
-    name: Ubuntu / Python 3.12 / v10 contracts
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install test dependencies
-        run: python -m pip install --disable-pip-version-check -e ".[dev]"
-      - name: Run v10 migration contracts
-        run: |
-          python -m pytest -q \
-            tests/test_journal_migrations.py \
-            tests/test_result_outbox_migrations.py \
-            tests/test_service_lifecycle_migrations.py \
-            tests/test_workspace_recovery_migrations.py \
-            tests/test_workspace_lifecycle_migrations.py \
-            tests/test_repository_index_migrations.py \
-            tests/test_code_relationship_migrations.py \
-            tests/test_multi_file_patch_v9_contracts.py \
-            tests/test_multi_file_patch_v10_contracts.py
-      - name: Check whitespace
-        run: git diff --check ec22ae6440a0343306f11212b924bc84ce27edc2...HEAD
-'''
-          Path(".github/workflows/bridge-ci.yml").write_text(workflow, encoding="utf-8", newline="\n")
+          replace("tests/test_multi_file_patch_v9_contracts.py", '    assert tuple(migration.version for migration in MIGRATIONS) == tuple(range(1, 10))\n', '    assert tuple(migration.version for migration in MIGRATIONS[:9]) == tuple(range(1, 10))\n')
+          replace("bdb_bridge/__init__.py", 'from .ghb07_cli import install_cli\ninstall_cli()\n', 'from .ghb07_cli import install_cli\ninstall_cli()\nfrom .multi_file_patch_cli import install_multi_file_patch_cli\ninstall_multi_file_patch_cli()\n')
+          Path("v10-golden.changed").write_text("1", encoding="ascii")
           PY
-      - name: Validate exact scope and commit
+      - name: Validate and commit exact changes
         run: |
+          if [ ! -f v10-golden.changed ]; then exit 0; fi
           python -m py_compile bdb_bridge/__init__.py bdb_bridge/multi_file_patch_cli.py tests/test_multi_file_patch_v10_contracts.py
           git diff --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- \
-            .github/workflows/bridge-ci.yml \
             bdb_bridge/__init__.py \
             tests/test_journal_migrations.py \
             tests/test_result_outbox_migrations.py \
@@ -244,7 +84,6 @@ jobs:
             tests/test_workspace_recovery_migrations.py \
             tests/test_repository_index_migrations.py \
             tests/test_code_relationship_migrations.py \
-            tests/test_multi_file_patch_v9_contracts.py \
-            tests/test_multi_file_patch_v10_contracts.py
+            tests/test_multi_file_patch_v9_contracts.py
           git commit -m "test(journal): freeze Journal v10 contracts"
           git push origin HEAD:gpt/ghb2-d-final-editing-gate
