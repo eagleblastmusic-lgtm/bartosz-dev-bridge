@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -42,4 +44,4 @@ jobs:
             tests/test_repository_index_migrations.py \
             tests/test_code_relationship_migrations.py
       - name: Check whitespace
-        run: git diff --check origin/main...HEAD
+        run: git diff --check 478d246ed3b80487826872b285d5ee14420564cf...HEAD
