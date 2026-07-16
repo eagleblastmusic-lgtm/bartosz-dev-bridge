@@ -19,6 +19,25 @@ from tests.helpers.service_lifecycle_fixture import (
 )
 
 
+def assert_foreground_process_identity(
+    running: dict[str, object],
+    proc: subprocess.Popen,
+) -> None:
+    service_pid = running["pid"]
+    assert isinstance(service_pid, int)
+    assert service_pid > 0
+    assert running["pid_alive"] is True
+    assert is_pid_alive(service_pid) is True
+    assert proc.poll() is None
+
+    # On Windows a virtual-environment redirector may remain as the process
+    # returned by Popen while the real interpreter runs the service. The
+    # Journal must contain the real service PID reported by os.getpid(), not
+    # necessarily the redirector PID.
+    if sys.platform != "win32":
+        assert service_pid == proc.pid
+
+
 def test_foreground_cli_lifecycle_full_contract(tmp_path: Path) -> None:
     config, config_path, durable_marker = make_service_config(
         tmp_path,
@@ -48,10 +67,8 @@ def test_foreground_cli_lifecycle_full_contract(tmp_path: Path) -> None:
     try:
         running = wait_for_status(config_path, "RUNNING")
         assert running["instance_id"].startswith("inst-")
-        assert running["pid"] == proc.pid
         assert running["lock_held"] is True
-        assert running["pid_alive"] is True
-        assert is_pid_alive(proc.pid) is True
+        assert_foreground_process_identity(running, proc)
         first_heartbeat = running["heartbeat_at"]
         assert isinstance(first_heartbeat, str)
 
@@ -161,7 +178,7 @@ def test_fault_after_instance_lock_before_db_start_is_controlled_and_recoverable
     )
     try:
         running = wait_for_status(config_path, "RUNNING")
-        assert running["pid"] == proc.pid
+        assert_foreground_process_identity(running, proc)
         stopped = subprocess.run(stop_cmd, capture_output=True, text=True, check=False)
         assert stopped.returncode == 0
         wait_for_status(config_path, "OFFLINE")
