@@ -37,6 +37,7 @@ def is_sensitive_edit_path(path: str) -> bool:
     return (
         name in _SENSITIVE_NAMES
         or name.startswith(".env.")
+        or name.startswith(".bdb_")
         or pure.suffix.casefold() in _SENSITIVE_SUFFIXES
     )
 
@@ -64,7 +65,7 @@ def _path(document: dict[str, Any], key: str) -> str:
     if is_sensitive_edit_path(value):
         raise BridgeError(
             BridgeErrorCode.POLICY_DENIED,
-            f"Structural editing of sensitive path is denied: {PurePosixPath(value).name}",
+            f"Structural editing of sensitive or reserved path is denied: {PurePosixPath(value).name}",
         )
     return value
 
@@ -213,6 +214,8 @@ def parse_structural_edit(document: dict[str, Any]) -> StructuralEditSpec:
 def structural_edit_document(operation: StructuralEditSpec) -> dict[str, str]:
     if not isinstance(operation, StructuralEditSpec):
         raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "operation must be StructuralEditSpec")
+    if not isinstance(operation.kind, StructuralEditKind):
+        raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "operation.kind must be StructuralEditKind")
     if operation.kind is StructuralEditKind.CREATE_FILE:
         if (
             operation.destination_path is None
