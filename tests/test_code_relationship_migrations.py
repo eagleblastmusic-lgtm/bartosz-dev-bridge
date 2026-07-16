@@ -14,8 +14,8 @@ V8_CHECKSUM = "cbc8c9c6b5907c1f4d82cc9f95b095d8cceff4ef4aaca454f883cd3bb2ad55b6"
 
 
 def test_v8_registry_checksum_and_tables() -> None:
-    assert [item.version for item in MIGRATIONS] == list(range(1, 9))
-    assert MIGRATIONS[-1].name == "journal_v8_code_relationships"
+    assert [item.version for item in MIGRATIONS] == list(range(1, 10))
+    assert MIGRATIONS[7].name == "journal_v8_code_relationships"
     assert MIGRATION_V8.statements == MIGRATION_V8_STATEMENTS
     assert MIGRATION_V8.checksum() == V8_CHECKSUM
     assert {"repository_analyses", "repository_imports", "repository_symbol_references", "repository_dependency_edges"}.issubset(JOURNAL_TABLES)
@@ -41,7 +41,7 @@ def test_v7_upgrade_and_reopen(tmp_path: Path, populated: bool) -> None:
     path = tmp_path / "journal.db"
     _make_v7(path, populated=populated)
     journal = Journal.open(path, now_fn=lambda: NOW)
-    assert journal._connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8
+    assert journal._connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 9
     if populated:
         assert journal.get_repository_snapshot("repo", "a" * 40) is not None
     journal.close()
@@ -62,7 +62,7 @@ def test_v8_failure_rolls_back_and_future_version_is_rejected(tmp_path: Path) ->
     conn.close()
     future = tmp_path / "future.db"
     journal = Journal.open(future, now_fn=lambda: NOW)
-    journal._connection.execute("INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(9,'future','x',?)", (NOW,))
+    journal._connection.execute("INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(10,'future','x',?)", (NOW,))
     journal.close()
     with pytest.raises(BridgeError) as exc:
         Journal.open(future, now_fn=lambda: NOW)

@@ -15,6 +15,12 @@ class InstanceLock:
         self._file = None
         self._locked = False
 
+    @property
+    def is_acquired(self) -> bool:
+        """Return whether this exact object currently owns the platform lock."""
+
+        return self._locked and self._file is not None
+
     def acquire(self) -> bool:
         if self._locked:
             return True

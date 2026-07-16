@@ -11,10 +11,12 @@ install_command_collision_diagnostics(Journal)
 from .workspace_lifecycle_migration import install_workspace_lifecycle_migration
 from .repository_index_migration import install_repository_index_migration
 from .code_relationship_migration import install_code_relationship_migration
+from .multi_file_patch_migration import install_multi_file_patch_migration
 
 install_workspace_lifecycle_migration(Journal)
 install_repository_index_migration(Journal)
 install_code_relationship_migration(Journal)
+install_multi_file_patch_migration(Journal)
 
 from .models import (
     BridgeErrorCode, CommandIngestionRecord, CommandRecord, CommandState, ExecutionOutcome,
@@ -36,6 +38,15 @@ from .service_journal import install_journal_service_api
 from .workspace_lifecycle_journal import install_journal_workspace_lifecycle_api
 from .repository_index_journal import install_journal_repository_index_api
 from .code_relationship_journal import install_journal_code_relationship_api
+from .multi_file_patch_journal import (
+    compute_multi_file_checkpoint_sha256,
+    install_journal_multi_file_patch_api,
+)
+from .multi_file_patch_hardening import (
+    install_journal_multi_file_patch_hardening,
+    install_multi_file_patch_executor_hardening,
+)
+from .multi_file_patch_temp_identity import install_multi_file_patch_temp_identity
 
 install_journal_recovery_api(Journal)
 install_journal_outbox_api(Journal)
@@ -43,6 +54,8 @@ install_journal_service_api(Journal)
 install_journal_workspace_lifecycle_api(Journal)
 install_journal_repository_index_api(Journal)
 install_journal_code_relationship_api(Journal)
+install_journal_multi_file_patch_api(Journal)
+install_journal_multi_file_patch_hardening(Journal)
 
 from .workspace_manager import WorkspaceManager
 from .instance_lock import InstanceLock
@@ -77,7 +90,14 @@ from .code_relationship_models import (
     ResolutionStatus, SearchResult, SymbolReference,
 )
 from .code_relationship_service import RepositoryRelationshipService
+from .multi_file_patch_executor import MultiFilePatchExecutor
+from .multi_file_patch_recovery_models import (
+    MultiFileCheckpointBundle, MultiFileCheckpointPath, MultiFileCheckpointRecord,
+    MultiFileCheckpointState, MultiFileRecoveryOutcome,
+)
 
+install_multi_file_patch_executor_hardening(MultiFilePatchExecutor)
+install_multi_file_patch_temp_identity(MultiFilePatchExecutor)
 install_workspace_lifecycle_error_mapping(WorkspaceLifecycleCoordinator)
 
 __all__ = [
@@ -88,6 +108,8 @@ __all__ = [
     "ExecutionCoordinator", "ExecutionOutcome", "EXECUTOR_VERSION", "GitResultTransport",
     "ImportKind", "IngestionIssue", "IngestionReport", "GitCommandTransport", "InstanceLock",
     "Journal", "JournalEvent", "MANIFEST_PATH_RE", "MAX_RESULT_BYTES", "MAX_TAIL_CHARS",
+    "MultiFileCheckpointBundle", "MultiFileCheckpointPath", "MultiFileCheckpointRecord",
+    "MultiFileCheckpointState", "MultiFilePatchExecutor", "MultiFileRecoveryOutcome",
     "Operation", "OperationEffectRecord", "OperationPlanRecord", "OutboxProcessOutcome",
     "OutboxProcessState", "OutboxProcessor", "OutboxRecord", "OutboxState", "PollReport",
     "ProfileRunOutcome", "PromotionOutcome", "PublishAttempt", "PublishAttemptState",
@@ -104,12 +126,15 @@ __all__ = [
     "WorkspaceEligibility", "WorkspaceLifecycleRecord", "WorkspaceLifecycleState",
     "WorkspaceStatusSnapshot", "WorkspaceLifecycleCoordinator", "SessionFinalizationOutcome",
     "SessionFinalizer", "canonical_json", "command_id_for", "command_path_for",
-    "compute_operation_effect_sha256", "compute_operation_plan_sha256", "finalize_result",
-    "install_journal_outbox_api", "install_journal_workspace_lifecycle_api",
-    "install_workspace_lifecycle_migration", "manifest_path_for", "parse_command_path",
-    "parse_manifest_path", "path_matches", "require_int", "require_string", "result_path_for",
-    "sha256_bytes", "sha256_text", "tail", "validate_base_sha", "validate_path_pattern",
-    "validate_repo_relative_path", "validate_session_id", "parse_git_ref", "sanitize_diagnostics",
+    "compute_multi_file_checkpoint_sha256", "compute_operation_effect_sha256",
+    "compute_operation_plan_sha256", "finalize_result", "install_journal_outbox_api",
+    "install_journal_workspace_lifecycle_api", "install_multi_file_patch_migration",
+    "install_journal_multi_file_patch_hardening", "install_multi_file_patch_executor_hardening",
+    "install_multi_file_patch_temp_identity", "install_workspace_lifecycle_migration",
+    "manifest_path_for", "parse_command_path", "parse_manifest_path", "path_matches",
+    "require_int", "require_string", "result_path_for", "sha256_bytes", "sha256_text",
+    "tail", "validate_base_sha", "validate_path_pattern", "validate_repo_relative_path",
+    "validate_session_id", "parse_git_ref", "sanitize_diagnostics",
 ]
 
 from .ghb07_cli import install_cli
