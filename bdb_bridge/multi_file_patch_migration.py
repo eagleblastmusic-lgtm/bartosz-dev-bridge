@@ -3,10 +3,12 @@ from __future__ import annotations
 from typing import Type
 
 from . import migrations as _base
+from .edit_operation_models import MAX_STRUCTURAL_CONTENT_BYTES
+from .multi_file_patch_models import MAX_BATCH_PATHS, MAX_BATCH_SNAPSHOT_BYTES
 
 
 MIGRATION_V9_STATEMENTS: tuple[str, ...] = (
-    """CREATE TABLE multi_file_patch_checkpoints (
+    f"""CREATE TABLE multi_file_patch_checkpoints (
   command_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
   patch_sha256 TEXT NOT NULL CHECK (
@@ -36,12 +38,17 @@ MIGRATION_V9_STATEMENTS: tuple[str, ...] = (
     AND substr(workspace_state_hash_after, 1, 7) = 'sha256:'
     AND substr(workspace_state_hash_after, 8) NOT GLOB '*[^0-9a-f]*'
   ),
-  path_count INTEGER NOT NULL CHECK (path_count > 0 AND path_count <= 200),
-  total_before_bytes INTEGER NOT NULL CHECK (total_before_bytes >= 0),
-  total_after_bytes INTEGER NOT NULL CHECK (total_after_bytes >= 0),
+  path_count INTEGER NOT NULL CHECK (path_count > 0 AND path_count <= {MAX_BATCH_PATHS}),
+  total_before_bytes INTEGER NOT NULL CHECK (
+    total_before_bytes >= 0 AND total_before_bytes <= {MAX_BATCH_SNAPSHOT_BYTES}
+  ),
+  total_after_bytes INTEGER NOT NULL CHECK (
+    total_after_bytes >= 0 AND total_after_bytes <= {MAX_BATCH_SNAPSHOT_BYTES}
+  ),
   last_error TEXT CHECK (last_error IS NULL OR length(last_error) <= 500),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  CHECK (total_before_bytes + total_after_bytes <= {MAX_BATCH_SNAPSHOT_BYTES}),
   CHECK (
     (state = 'committed' AND workspace_revision_after = workspace_revision_before + 1)
     OR (state != 'committed' AND workspace_revision_after IS NULL)
@@ -50,7 +57,7 @@ MIGRATION_V9_STATEMENTS: tuple[str, ...] = (
   FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 )""",
     "CREATE INDEX idx_multi_file_patch_checkpoint_state ON multi_file_patch_checkpoints(state, updated_at, command_id)",
-    """CREATE TABLE multi_file_patch_checkpoint_paths (
+    f"""CREATE TABLE multi_file_patch_checkpoint_paths (
   command_id TEXT NOT NULL,
   ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
   path TEXT NOT NULL CHECK (length(path) > 0 AND length(path) <= 1024),
@@ -67,16 +74,42 @@ MIGRATION_V9_STATEMENTS: tuple[str, ...] = (
   PRIMARY KEY (command_id, path),
   UNIQUE (command_id, ordinal),
   CHECK (
-    (before_exists = 1 AND before_content IS NOT NULL AND before_sha256 IS NOT NULL)
+    (before_exists = 1
+      AND before_content IS NOT NULL
+      AND length(before_content) <= {MAX_STRUCTURAL_CONTENT_BYTES}
+      AND before_sha256 IS NOT NULL
+      AND length(before_sha256) = 71
+      AND substr(before_sha256, 1, 7) = 'sha256:'
+      AND substr(before_sha256, 8) NOT GLOB '*[^0-9a-f]*')
     OR (before_exists = 0 AND before_content IS NULL AND before_sha256 IS NULL)
   ),
   CHECK (
-    (after_exists = 1 AND after_content IS NOT NULL AND after_sha256 IS NOT NULL)
+    (after_exists = 1
+      AND after_content IS NOT NULL
+      AND length(after_content) <= {MAX_STRUCTURAL_CONTENT_BYTES}
+      AND after_sha256 IS NOT NULL
+      AND length(after_sha256) = 71
+      AND substr(after_sha256, 1, 7) = 'sha256:'
+      AND substr(after_sha256, 8) NOT GLOB '*[^0-9a-f]*')
     OR (after_exists = 0 AND after_content IS NULL AND after_sha256 IS NULL)
   ),
   FOREIGN KEY (command_id) REFERENCES multi_file_patch_checkpoints(command_id)
 )""",
     "CREATE INDEX idx_multi_file_patch_paths_ordinal ON multi_file_patch_checkpoint_paths(command_id, ordinal)",
+    """CREATE TRIGGER multi_file_patch_checkpoint_immutable
+BEFORE UPDATE OF
+  command_id, session_id, patch_sha256, plan_sha256, checkpoint_sha256,
+  workspace_revision_before, workspace_state_hash_before, workspace_state_hash_after,
+  path_count, total_before_bytes, total_after_bytes, created_at
+ON multi_file_patch_checkpoints
+BEGIN
+  SELECT RAISE(ABORT, 'multi-file checkpoint identity is immutable');
+END""",
+    """CREATE TRIGGER multi_file_patch_checkpoint_no_delete
+BEFORE DELETE ON multi_file_patch_checkpoints
+BEGIN
+  SELECT RAISE(ABORT, 'multi-file checkpoints are durable');
+END""",
     """CREATE TRIGGER multi_file_patch_paths_no_update
 BEFORE UPDATE ON multi_file_patch_checkpoint_paths
 BEGIN
