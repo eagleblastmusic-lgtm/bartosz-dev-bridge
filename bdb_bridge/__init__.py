@@ -165,3 +165,5 @@ __all__ = [
 
 from .ghb07_cli import install_cli
 install_cli()
+from .multi_file_patch_cli import install_multi_file_patch_cli
+install_multi_file_patch_cli()
