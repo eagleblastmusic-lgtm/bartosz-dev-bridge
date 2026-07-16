@@ -124,81 +124,13 @@ jobs:
             tests/test_workspace_recovery_migrations.py
       - name: Restore standard workflow
         shell: bash
-        run: |
-          cat > .github/workflows/bridge-ci.yml <<'YAML'
-          name: Bridge CI
-
-          on:
-            pull_request:
-              branches: [main]
-            push:
-              branches: [gpt/poc-0-bootstrap]
-
-          permissions:
-            contents: read
-
-          jobs:
-            test:
-              name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
-              runs-on: ${{ matrix.os }}
-              strategy:
-                fail-fast: false
-                matrix:
-                  os: [ubuntu-latest, windows-latest]
-                  python-version: ["3.11", "3.12"]
-
-              steps:
-                - uses: actions/checkout@v4
-                - uses: actions/setup-python@v5
-                  with:
-                    python-version: ${{ matrix.python-version }}
-                    cache: pip
-                - name: Install test dependencies
-                  run: python -m pip install --disable-pip-version-check -e ".[dev]"
-                - name: Validate PowerShell syntax
-                  if: runner.os == 'Windows'
-                  shell: powershell
-                  run: |
-                    $scripts = @(
-                      "scripts/bootstrap_windows.ps1",
-                      "scripts/bootstrap_poc0b_windows.ps1",
-                      "scripts/run_poc_bridge.ps1",
-                      "scripts/Invoke-GHB0RecoveryGate.ps1"
-                    )
-                    foreach ($script in $scripts) {
-                      $tokens = $null
-                      $errors = $null
-                      [System.Management.Automation.Language.Parser]::ParseFile(
-                        (Resolve-Path $script),
-                        [ref]$tokens,
-                        [ref]$errors
-                      ) | Out-Null
-                      if ($errors.Count -gt 0) {
-                        $errors | ForEach-Object { Write-Error "$script`: $($_.Message)" }
-                        exit 1
-                      }
-                    }
-                - name: Compile Bridge
-                  run: |
-                    python -m py_compile poc_bridge.py
-                    python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
-                    python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
-                - name: Run tests
-                  run: python -m pytest -q
-          YAML
+        run: git show origin/main:.github/workflows/bridge-ci.yml > .github/workflows/bridge-ci.yml
       - name: Commit targeted fixes
         shell: bash
         run: |
           rm -f .github/ghb1b-trigger.txt
           git diff --check
-          git add -A \
-            .github/workflows/bridge-ci.yml \
-            .github/ghb1b-trigger.txt \
-            tests/test_code_relationship_core.py \
-            tests/test_journal_migrations.py \
-            tests/test_result_outbox_migrations.py \
-            tests/test_service_lifecycle_migrations.py \
-            tests/test_workspace_recovery_migrations.py
+          git add -A
           git diff --cached --check
           git config user.name "Bartosz Dev Bridge CI"
           git config user.email "bridge-ci@localhost.invalid"
