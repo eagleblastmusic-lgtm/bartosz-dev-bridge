@@ -12,11 +12,13 @@ from .workspace_lifecycle_migration import install_workspace_lifecycle_migration
 from .repository_index_migration import install_repository_index_migration
 from .code_relationship_migration import install_code_relationship_migration
 from .multi_file_patch_migration import install_multi_file_patch_migration
+from .multi_file_patch_runtime_migration import install_multi_file_patch_runtime_migration
 
 install_workspace_lifecycle_migration(Journal)
 install_repository_index_migration(Journal)
 install_code_relationship_migration(Journal)
 install_multi_file_patch_migration(Journal)
+install_multi_file_patch_runtime_migration(Journal)
 
 from .models import (
     BridgeErrorCode, CommandIngestionRecord, CommandRecord, CommandState, ExecutionOutcome,
@@ -47,6 +49,8 @@ from .multi_file_patch_hardening import (
     install_multi_file_patch_executor_hardening,
 )
 from .multi_file_patch_temp_identity import install_multi_file_patch_temp_identity
+from .multi_file_patch_runtime_journal import install_journal_multi_file_patch_runtime_api
+from .multi_file_patch_gate import install_multi_file_patch_command_gate
 
 install_journal_recovery_api(Journal)
 install_journal_outbox_api(Journal)
@@ -56,6 +60,8 @@ install_journal_repository_index_api(Journal)
 install_journal_code_relationship_api(Journal)
 install_journal_multi_file_patch_api(Journal)
 install_journal_multi_file_patch_hardening(Journal)
+install_journal_multi_file_patch_runtime_api(Journal)
+install_multi_file_patch_command_gate()
 
 from .workspace_manager import WorkspaceManager
 from .instance_lock import InstanceLock
@@ -95,9 +101,14 @@ from .multi_file_patch_recovery_models import (
     MultiFileCheckpointBundle, MultiFileCheckpointPath, MultiFileCheckpointRecord,
     MultiFileCheckpointState, MultiFileRecoveryOutcome,
 )
+from .multi_file_patch_runtime_models import (
+    MultiFilePatchProfileRecord, MultiFilePatchRuntimeResult,
+)
+from .multi_file_patch_result import install_multi_file_patch_result_support
 
 install_multi_file_patch_executor_hardening(MultiFilePatchExecutor)
 install_multi_file_patch_temp_identity(MultiFilePatchExecutor)
+install_multi_file_patch_result_support(ResultCoordinator)
 install_workspace_lifecycle_error_mapping(WorkspaceLifecycleCoordinator)
 
 __all__ = [
@@ -110,6 +121,7 @@ __all__ = [
     "Journal", "JournalEvent", "MANIFEST_PATH_RE", "MAX_RESULT_BYTES", "MAX_TAIL_CHARS",
     "MultiFileCheckpointBundle", "MultiFileCheckpointPath", "MultiFileCheckpointRecord",
     "MultiFileCheckpointState", "MultiFilePatchExecutor", "MultiFileRecoveryOutcome",
+    "MultiFilePatchProfileRecord", "MultiFilePatchRuntimeResult",
     "Operation", "OperationEffectRecord", "OperationPlanRecord", "OutboxProcessOutcome",
     "OutboxProcessState", "OutboxProcessor", "OutboxRecord", "OutboxState", "PollReport",
     "ProfileRunOutcome", "PromotionOutcome", "PublishAttempt", "PublishAttemptState",
@@ -129,8 +141,10 @@ __all__ = [
     "compute_multi_file_checkpoint_sha256", "compute_operation_effect_sha256",
     "compute_operation_plan_sha256", "finalize_result", "install_journal_outbox_api",
     "install_journal_workspace_lifecycle_api", "install_multi_file_patch_migration",
-    "install_journal_multi_file_patch_hardening", "install_multi_file_patch_executor_hardening",
-    "install_multi_file_patch_temp_identity", "install_workspace_lifecycle_migration",
+    "install_multi_file_patch_runtime_migration", "install_journal_multi_file_patch_hardening",
+    "install_multi_file_patch_executor_hardening", "install_multi_file_patch_temp_identity",
+    "install_journal_multi_file_patch_runtime_api", "install_multi_file_patch_command_gate",
+    "install_multi_file_patch_result_support", "install_workspace_lifecycle_migration",
     "manifest_path_for", "parse_command_path", "parse_manifest_path", "path_matches",
     "require_int", "require_string", "result_path_for", "sha256_bytes", "sha256_text",
     "tail", "validate_base_sha", "validate_path_pattern", "validate_repo_relative_path",
