@@ -114,6 +114,8 @@ def validate_control_location(value: str, *, prepare_only: bool) -> str:
         raise RuntimeError("Control URL must be an HTTPS github.com repository URL")
     if parsed.username or parsed.password:
         raise RuntimeError("Control URL must not contain embedded credentials")
+    if parsed.query or parsed.fragment:
+        raise RuntimeError("Control URL must not contain a query string or fragment")
     if not parsed.path.endswith(".git") or len(parsed.path.strip("/").split("/")) != 2:
         raise RuntimeError("Control URL must have the form https://github.com/<owner>/<repo>.git")
     return value
@@ -250,6 +252,13 @@ def main() -> int:
             verified = git(control, "rev-parse", "--verify", ref, timeout=30.0).stdout.strip()
             if not verified:
                 raise RuntimeError(f"Remote ref is unavailable after fetch: {ref}")
+
+        for ref in ("origin/commands", "origin/results"):
+            paths = git(control, "ls-tree", "-r", "--name-only", ref).stdout.splitlines()
+            if any(path == "sessions" or path.startswith("sessions/") for path in paths):
+                raise RuntimeError(
+                    f"{ref} already contains session data; use a fresh single-use pilot repository"
+                )
 
         worktrees = root / "worktrees"
         runtime = root / "runtime"
@@ -471,4 +480,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"GITHUB REMOTE PILOT: FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
