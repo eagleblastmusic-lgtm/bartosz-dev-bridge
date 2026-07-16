@@ -82,12 +82,13 @@ class MultiFilePatchPlanner:
 
     def revalidate(self, plan: MultiFilePatchPlan) -> None:
         validate_multi_file_patch_spec(plan.patch)
+        self._validate_plan_shape(plan)
         if plan.plan_sha256 != self._plan_sha256(plan):
             raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file plan hash mismatch")
         for item in plan.paths:
             resolved = self.workspace.resolve_allowed_path(item.path)
             if item.before_exists:
-                if not resolved.is_file():
+                if not resolved.is_file() or resolved.is_symlink():
                     raise BridgeError(
                         BridgeErrorCode.STATE_MISMATCH,
                         f"Planned source disappeared or changed type: {item.path}",
@@ -103,6 +104,43 @@ class MultiFilePatchPlanner:
                     BridgeErrorCode.STATE_MISMATCH,
                     f"Planned absent path appeared: {item.path}",
                 )
+
+    def _validate_plan_shape(self, plan: MultiFilePatchPlan) -> None:
+        paths = tuple(item.path for item in plan.paths)
+        if paths != tuple(sorted(paths)) or len(paths) != len(set(paths)):
+            raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file plan paths are not canonical")
+        if plan.touched_paths != paths:
+            raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file touched paths mismatch")
+        changed: list[str] = []
+        total_before = 0
+        total_after = 0
+        for item in plan.paths:
+            if item.before_exists != (item.before is not None):
+                raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file before existence mismatch")
+            if item.after_exists != (item.after is not None):
+                raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file after existence mismatch")
+            expected_before_hash = sha256_bytes(item.before) if item.before is not None else None
+            expected_after_hash = sha256_bytes(item.after) if item.after is not None else None
+            if item.before_sha256 != expected_before_hash or item.after_sha256 != expected_after_hash:
+                raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file plan bytes/hash mismatch")
+            if len(item.before or b"") > MAX_STRUCTURAL_CONTENT_BYTES or len(item.after or b"") > MAX_STRUCTURAL_CONTENT_BYTES:
+                raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file path bytes exceed per-file cap")
+            if item.roles != tuple(sorted(set(item.roles))) or not item.roles:
+                raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file path roles are not canonical")
+            if item.operation_indices != tuple(sorted(set(item.operation_indices))) or not item.operation_indices:
+                raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file operation indices are not canonical")
+            if any(index < 0 or index >= plan.patch.operation_count for index in item.operation_indices):
+                raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file operation index is out of range")
+            if item.before_exists != item.after_exists or item.before != item.after:
+                changed.append(item.path)
+            total_before += len(item.before or b"")
+            total_after += len(item.after or b"")
+        if plan.changed_paths != tuple(changed) or not plan.changed_paths:
+            raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file changed paths mismatch")
+        if plan.total_before_bytes != total_before or plan.total_after_bytes != total_after:
+            raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file plan byte totals mismatch")
+        if total_before + total_after > MAX_BATCH_SNAPSHOT_BYTES:
+            raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file plan exceeds snapshot cap")
 
     def _simulate_structural(
         self,
