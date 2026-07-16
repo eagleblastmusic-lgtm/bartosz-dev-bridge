@@ -91,6 +91,7 @@ def test_structural_parser_is_canonical_and_deterministic(document, kind, source
         {**create_document("new.bin", b"new"), "content_sha256": "sha256:" + "0" * 64},
         delete_document("../escape.bin", b"old"),
         delete_document(".env.production", b"secret"),
+        delete_document("pkg/.bdb_temp_foreign", b"internal"),
         relocate_document("rename_file", "a/x.bin", "b/y.bin", b"x"),
         relocate_document("move_file", "a/x.bin", "a/y.bin", b"x"),
     ],
@@ -182,10 +183,39 @@ def test_engine_rejects_missing_parent_large_source_and_tampered_plan(tmp_path: 
     assert mismatch.value.code == BridgeErrorCode.INVALID_PAYLOAD
     assert not (root / "safe.bin").exists()
 
-    invalid_operation = replace(operation, operation_sha256="sha256:" + "0" * 64)
+    invalid_hash = replace(operation, operation_sha256="sha256:" + "0" * 64)
     with pytest.raises(BridgeError) as invalid:
-        edit.plan(invalid_operation)
+        edit.plan(invalid_hash)
     assert invalid.value.code == BridgeErrorCode.INVALID_PAYLOAD
+
+    invalid_kind = replace(operation, kind="create_file")  # type: ignore[arg-type]
+    with pytest.raises(BridgeError) as invalid_type:
+        edit.plan(invalid_kind)
+    assert invalid_type.value.code == BridgeErrorCode.INVALID_PAYLOAD
+
+
+def test_engine_enforces_local_and_manifest_scope(tmp_path: Path) -> None:
+    config = SimpleNamespace(
+        fixture_repo_path=tmp_path / "source",
+        worktree_root=tmp_path / "worktrees",
+        allowed_paths=("allowed/*",),
+    )
+    workspace = WorkspaceManager(config, SESSION_ID, BASE_SHA, ["allowed/only.bin"])
+    workspace.path.mkdir(parents=True)
+    (workspace.path / "allowed").mkdir()
+    (workspace.path / "other").mkdir()
+    edit = StructuralEditEngine(workspace)
+
+    allowed = parse_structural_edit(create_document("allowed/only.bin", b"ok"))
+    assert edit.plan(allowed).operation == allowed
+
+    with pytest.raises(BridgeError) as manifest_scope:
+        edit.plan(parse_structural_edit(create_document("allowed/other.bin", b"no")))
+    assert manifest_scope.value.code == BridgeErrorCode.SCOPE_VIOLATION
+
+    with pytest.raises(BridgeError) as local_scope:
+        edit.plan(parse_structural_edit(create_document("other/file.bin", b"no")))
+    assert local_scope.value.code == BridgeErrorCode.POLICY_DENIED
 
 
 def test_engine_rejects_existing_relocation_destination_and_temp_collision(tmp_path: Path) -> None:
