@@ -46,6 +46,7 @@ from .multi_file_patch_hardening import (
     install_journal_multi_file_patch_hardening,
     install_multi_file_patch_executor_hardening,
 )
+from .multi_file_patch_temp_identity import install_multi_file_patch_temp_identity
 
 install_journal_recovery_api(Journal)
 install_journal_outbox_api(Journal)
@@ -96,6 +97,7 @@ from .multi_file_patch_recovery_models import (
 )
 
 install_multi_file_patch_executor_hardening(MultiFilePatchExecutor)
+install_multi_file_patch_temp_identity(MultiFilePatchExecutor)
 install_workspace_lifecycle_error_mapping(WorkspaceLifecycleCoordinator)
 
 __all__ = [
@@ -128,10 +130,11 @@ __all__ = [
     "compute_operation_plan_sha256", "finalize_result", "install_journal_outbox_api",
     "install_journal_workspace_lifecycle_api", "install_multi_file_patch_migration",
     "install_journal_multi_file_patch_hardening", "install_multi_file_patch_executor_hardening",
-    "install_workspace_lifecycle_migration", "manifest_path_for", "parse_command_path",
-    "parse_manifest_path", "path_matches", "require_int", "require_string", "result_path_for",
-    "sha256_bytes", "sha256_text", "tail", "validate_base_sha", "validate_path_pattern",
-    "validate_repo_relative_path", "validate_session_id", "parse_git_ref", "sanitize_diagnostics",
+    "install_multi_file_patch_temp_identity", "install_workspace_lifecycle_migration",
+    "manifest_path_for", "parse_command_path", "parse_manifest_path", "path_matches",
+    "require_int", "require_string", "result_path_for", "sha256_bytes", "sha256_text",
+    "tail", "validate_base_sha", "validate_path_pattern", "validate_repo_relative_path",
+    "validate_session_id", "parse_git_ref", "sanitize_diagnostics",
 ]
 
 from .ghb07_cli import install_cli
