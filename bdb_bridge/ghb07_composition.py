@@ -95,7 +95,13 @@ def run_foreground(config: BridgeConfig) -> int:
         result_transport = GitResultTransport(config, remote_name=res_remote or "origin")
         outbox = OutboxProcessor(journal, result_transport, fault_hook=hook)
         reconcile_staged_result_after_restart(journal, outbox)
-        coordinator = ResultCoordinator(config, journal, outbox, fault_hook=hook)
+        coordinator = ResultCoordinator(
+            config,
+            journal,
+            outbox,
+            fault_hook=hook,
+            instance_lock=lock,
+        )
         service = BridgeService(
             config=config,
             journal=journal,
