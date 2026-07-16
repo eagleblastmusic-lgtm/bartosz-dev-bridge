@@ -1,6 +1,37 @@
 name: Bridge CI
 
 on:
+  push:
+    branches: [gpt/ghb2-d-final-editing-gate]
+
+permissions:
+  contents: write
+
+jobs:
+  fix-checkpoint-hook-boundary:
+    name: Fix checkpoint hook boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gpt/ghb2-d-final-editing-gate
+          fetch-depth: 0
+      - name: Apply exact fix and restore diagnostic workflow
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          target = Path("bdb_bridge/multi_file_patch_hardening.py")
+          text = target.read_text(encoding="utf-8")
+          old = """    def checkpoint(self: Any, **kwargs: Any) -> MultiFileCheckpointBundle:\n        require_lock(self)\n        require_lifecycle(self)\n        preflight_temp_ownership(self, **kwargs)\n        return original_checkpoint(self, **kwargs)\n"""
+          new = """    def checkpoint(self: Any, **kwargs: Any) -> MultiFileCheckpointBundle:\n        require_lock(self)\n        require_lifecycle(self)\n        preflight_kwargs = dict(kwargs)\n        preflight_kwargs.pop(\"fault_hook\", None)\n        preflight_temp_ownership(self, **preflight_kwargs)\n        return original_checkpoint(self, **kwargs)\n"""
+          if text.count(old) != 1:
+              raise SystemExit("checkpoint wrapper contract did not match exactly once")
+          target.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
+
+          workflow = '''name: Bridge CI
+
+on:
   pull_request:
     branches: [main]
   push:
@@ -24,7 +55,7 @@ jobs:
       - name: Capture first failing GHB2-D test
         continue-on-error: true
         run: |
-          python - <<'PY'
+          python - <<'PYTEST'
           import pathlib
           import subprocess
           process = subprocess.run(
@@ -36,7 +67,7 @@ jobs:
           )
           pathlib.Path("ghb2d-first-failure.log").write_text(process.stdout, encoding="utf-8")
           pathlib.Path("ghb2d-first-failure.exit").write_text(str(process.returncode), encoding="ascii")
-          PY
+          PYTEST
       - name: Upload first failure
         if: always()
         uses: actions/upload-artifact@v4
@@ -48,3 +79,15 @@ jobs:
           if-no-files-found: error
       - name: Enforce targeted result
         run: python -c "import pathlib,sys; sys.exit(int(pathlib.Path('ghb2d-first-failure.exit').read_text()))"
+'''
+          Path(".github/workflows/bridge-ci.yml").write_text(workflow, encoding="utf-8", newline="\n")
+          PY
+      - name: Validate and commit
+        run: |
+          python -m py_compile bdb_bridge/multi_file_patch_hardening.py
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- bdb_bridge/multi_file_patch_hardening.py .github/workflows/bridge-ci.yml
+          git commit -m "fix(bridge): isolate checkpoint fault hook from preflight"
+          git push origin HEAD:gpt/ghb2-d-final-editing-gate
