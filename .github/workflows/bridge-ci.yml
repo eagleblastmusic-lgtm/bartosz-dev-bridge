@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [gpt/poc-0-bootstrap, gpt/ghb2-c-durable-batch-recovery]
+    branches: [gpt/poc-0-bootstrap]
 
 permissions:
   contents: read
@@ -50,12 +50,10 @@ jobs:
               exit 1
             }
           }
-      - name: Compile GHB2-C
+      - name: Compile Bridge
         run: |
-          python -m py_compile bdb_bridge/multi_file_patch_migration.py
-          python -m py_compile bdb_bridge/multi_file_patch_recovery_models.py
-          python -m py_compile bdb_bridge/multi_file_patch_journal.py
-          python -m py_compile bdb_bridge/multi_file_patch_executor.py
-          python -m py_compile tests/test_multi_file_patch_recovery.py
-      - name: Run targeted GHB2-C tests
-        run: python -m pytest -q tests/test_multi_file_patch_recovery.py
+          python -m py_compile poc_bridge.py
+          python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
+          python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
+      - name: Run tests
+        run: python -m pytest -q
