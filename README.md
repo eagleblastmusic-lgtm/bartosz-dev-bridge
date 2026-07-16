@@ -5,7 +5,7 @@ Lokalny Bridge dla ChatGPT Plus i GitHuba, rozwinięty od POC-0 do trwałego, po
 Aktualna faza:
 
 ```text
-GHB-1 — repository intelligence gate closed
+GHB2-C — durable batch recovery implemented; runtime activation pending GHB2-D
 ```
 
 ## Działający zakres
@@ -26,7 +26,9 @@ GHB-1 — repository intelligence gate closed
 - bezpieczny, opt-in i crash-recoverable cleanup wyłącznie sesji `COMPLETED`;
 - immutable repository snapshots, tracked files, Python symbols i outline;
 - statyczne importy, references, callers, dependency graph i deterministyczne search;
-- bounded context pack oraz large-repository gate.
+- bounded context pack oraz large-repository gate;
+- canonical multi-file patch planning z exact before/after bytes;
+- trwały Journal v9, crash-recoverable batch apply/rollback i session-scoped recovery.
 
 ## CLI
 
@@ -60,6 +62,8 @@ Indeks repozytorium (GHB1-A) opisuje dokładny commit Git wskazany przez `--ref`
 Relacje kodu (GHB1-B) są budowane wyłącznie na immutable snapshotach GHB1-A. Szczegóły: [docs/GHB1B_CODE_RELATIONSHIPS.md](docs/GHB1B_CODE_RELATIONSHIPS.md).
 
 Context pack i końcowa bramka większego repozytorium (GHB1-C) są opisane w [docs/GHB1C_CONTEXT_PACK.md](docs/GHB1C_CONTEXT_PACK.md).
+
+Trwały checkpoint, fizyczny batch apply, rollback, commit CAS i recovery GHB2-C są opisane w [docs/GHB2C_DURABLE_BATCH_RECOVERY.md](docs/GHB2C_DURABLE_BATCH_RECOVERY.md). Funkcja nie jest jeszcze podłączona do zdalnego command/runtime; aktywacja należy wyłącznie do GHB2-D.
 
 Tryb background nie tworzy Windows Service, Scheduled Task ani procesu administracyjnego. Child sam zdobywa platformowy lock i prowadzi graceful lifecycle.
 
@@ -138,13 +142,13 @@ Bridge nie używa `shutil.rmtree`, `Remove-Item -Recurse`, `rmdir /s`, `git rese
 
 ## Granice bezpieczeństwa
 
-GHB-0/GHB-1 nadal nie dodają:
+GHB-0/GHB-1/GHB2-C nadal nie dodają:
 
 - protocol ACK ani automatycznego `ACKNOWLEDGED`;
 - automatic cleanup lub retention;
 - cleanupu aktywnych/manual sessions;
 - Windows Service, Scheduled Task, GUI, tray, installer lub autostart;
-- produkcyjnego execution;
+- zdalnej aktywacji `multi_file_patch` przed GHB2-D;
 - arbitrary shell lub `shell=True`;
 - wielu workerów i równoległych sesji;
 - HTTP/WebSocket remote control;
@@ -157,4 +161,5 @@ Legacy POC-0A i POC-0B pozostają regresjami przez `poc_bridge.py` oraz `bdb_poc
 Dokumentacja operatorska:
 
 - `docs/GHB0_WINDOWS_RUNBOOK.md`;
-- `docs/GHB0_RECOVERY_GATE.md`.
+- `docs/GHB0_RECOVERY_GATE.md`;
+- `docs/GHB2C_DURABLE_BATCH_RECOVERY.md`.
