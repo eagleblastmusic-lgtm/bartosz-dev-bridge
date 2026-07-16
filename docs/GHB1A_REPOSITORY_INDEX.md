@@ -17,12 +17,14 @@ Poza zakresem GHB1-A: embeddings, semantic search, LLM, watcher, background inde
 
 Indeks budowany jest wyłącznie z obiektów Git wskazanego commita (`config.fixture_repo_path` + `--ref`, domyślnie `HEAD`):
 
-1. `git rev-parse --verify <ref>^{commit}`
+1. `git rev-parse --verify --end-of-options <ref>^{commit}`
 2. tree SHA commita
 3. `git ls-tree -r -z --long`
 4. bajty blobów przez `git cat-file`
 
-Working tree (staged/unstaged/untracked/ignored) nie wpływa na snapshot. Indekser nie wykonuje `checkout`, `fetch`, `pull`, `reset` ani kodu z indeksowanego repozytorium. Symlinki i submodule/gitlink są metadata-only.
+Working tree (staged/unstaged/untracked/ignored) nie wpływa na snapshot. Indekser nie wykonuje `checkout`, `fetch`, `pull`, `reset` ani kodu z indeksowanego repozytorium. Ref zaczynający się od `-` jest odrzucany, a argumenty Git są przekazywane przez `subprocess` z `shell=False`.
+
+Symlink i submodule/gitlink są metadata-only. Dla symlinku hash obejmuje dokładne bajty blobu celu linku zapisanego w Git. Gitlink nie jest klasyfikowany jako tekst, nie ma `line_count`, a jego deterministyczna tożsamość opiera się na SHA wskazanego commita.
 
 ## Journal v7
 
@@ -39,8 +41,9 @@ Snapshot jest widoczny atomowo albo wcale. Ponowne indeksowanie tego samego `(re
 ## Klasyfikacja plików
 
 - tekst = brak `NUL` + strict UTF-8;
-- `content_sha256` z dokładnych bajtów;
+- `content_sha256` z dokładnych bajtów regularnego blobu albo symlinku; gitlink używa deterministycznych bajtów SHA commita jako metadanych;
 - `line_count` tylko dla tekstu;
+- submodule/gitlink zawsze `metadata_only`, `is_text=false`, `line_count=null`;
 - języki po rozszerzeniu (python, markdown, json, yaml, toml, javascript, typescript, css, html, liquid, powershell, shell, plain_text, unknown);
 - symbole tylko dla Python;
 - limit parsowania: `MAX_PARSE_BYTES = 1 MiB` → `parse_status=too_large`.
@@ -49,9 +52,11 @@ Snapshot jest widoczny atomowo albo wcale. Ponowne indeksowanie tego samego `(re
 
 ## Symbole Python v1
 
-Parser używa wyłącznie `ast.parse`. Rodzaje: `class`, `function`, `async_function`, `method`, `async_method`, `nested_function`, `nested_class`.
+Parser używa wyłącznie `ast.parse`. Rodzaje: `class`, `function`, `async_function`, `method`, `async_method`, `nested_function`, `nested_async_function`, `nested_class`.
 
-`qualified_name` odzwierciedla hierarchię (`Outer.Inner.method`). `symbol_id` to SHA-256 kanonicznego zestawu identity + zakres źródłowy. Outline jest preorder według położenia w źródle. Błąd składni nie przerywa snapshotu.
+Definicje są odkrywane także w ciałach instrukcji złożonych, takich jak `if`, `for`, `while`, `with`, `try` i `match`, bez wykonywania kodu. `qualified_name` odzwierciedla hierarchię (`Outer.Inner.method`). `symbol_id` to SHA-256 kanonicznego zestawu identity + zakres źródłowy. Outline jest preorder według położenia w źródle. Błąd składni nie przerywa snapshotu.
+
+Nazwy dekoratorów są ograniczone liczbowo i długościowo przed zapisem, aby zachować ograniczony, bezpieczny rekord Journal.
 
 ## Semantyka idempotencji
 
@@ -76,7 +81,9 @@ JSON: jeden obiekt + `\n`, `sort_keys=True`, separators `(',', ':')`, bez absolu
 - diagnostyki przez `sanitize_diagnostics`;
 - lock i Journal zamykane w `finally`;
 - brak usuwania worktree/Journal/repozytorium;
-- brak wykonywania indeksowanego kodu.
+- brak wykonywania indeksowanego kodu;
+- brak importowania modułów analizowanego projektu;
+- brak mutujących komend Git w indeksowanym repozytorium.
 
 ## Znane ograniczenia / kolejne etapy
 

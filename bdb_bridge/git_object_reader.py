@@ -30,29 +30,30 @@ class GitObjectReader:
         if not self._repo_path.exists():
             raise BridgeError("invalid_config", "fixture_repo_path does not exist")
         result = self._run(["rev-parse", "--is-inside-work-tree"], check=False)
-        if result.returncode != 0 or result.stdout.strip() not in {b"true", b"true\n"}:
-            # bare repos also work for read-only indexing
+        if result.returncode != 0 or result.stdout.strip() != b"true":
             bare = self._run(["rev-parse", "--is-bare-repository"], check=False)
-            if bare.returncode != 0 or bare.stdout.strip() not in {b"true", b"true\n"}:
+            if bare.returncode != 0 or bare.stdout.strip() != b"true":
                 raise BridgeError("invalid_config", "fixture_repo_path is not a Git repository")
 
     def resolve_commit(self, ref: str) -> str:
-        if not isinstance(ref, str) or not ref or "\x00" in ref:
-            raise BridgeError("invalid_payload", "Git ref must be a non-empty string")
-        result = self._run(["rev-parse", "--verify", f"{ref}^{{commit}}"])
-        sha = result.stdout.strip().decode("ascii", errors="strict")
-        if len(sha) != 40 or any(ch not in "0123456789abcdef" for ch in sha):
-            raise BridgeError("invalid_payload", "Resolved commit SHA is invalid")
-        return sha
+        if (
+            not isinstance(ref, str)
+            or not ref
+            or len(ref) > 1024
+            or "\x00" in ref
+            or ref.startswith("-")
+        ):
+            raise BridgeError("invalid_payload", "Git ref must be a safe non-empty string")
+        result = self._run(["rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"])
+        return _validate_object_sha(result.stdout.strip().decode("ascii", errors="strict"), field="commit_sha")
 
     def resolve_tree(self, commit_sha: str) -> str:
-        result = self._run(["rev-parse", "--verify", f"{commit_sha}^{{tree}}"])
-        sha = result.stdout.strip().decode("ascii", errors="strict")
-        if len(sha) != 40 or any(ch not in "0123456789abcdef" for ch in sha):
-            raise BridgeError("invalid_payload", "Resolved tree SHA is invalid")
-        return sha
+        commit_sha = _validate_object_sha(commit_sha, field="commit_sha")
+        result = self._run(["rev-parse", "--verify", "--end-of-options", f"{commit_sha}^{{tree}}"])
+        return _validate_object_sha(result.stdout.strip().decode("ascii", errors="strict"), field="tree_sha")
 
     def list_tree(self, commit_sha: str) -> tuple[GitTreeEntry, ...]:
+        commit_sha = _validate_object_sha(commit_sha, field="commit_sha")
         result = self._run(["ls-tree", "-r", "-z", "--long", commit_sha])
         raw = result.stdout
         if not raw:
@@ -70,15 +71,16 @@ class GitObjectReader:
                 raise BridgeError("invalid_payload", "Malformed git ls-tree metadata")
             mode = parts[0].decode("ascii", errors="strict")
             object_type = parts[1].decode("ascii", errors="strict")
-            object_sha = parts[2].decode("ascii", errors="strict").lower()
+            object_sha = _validate_object_sha(
+                parts[2].decode("ascii", errors="strict").lower(),
+                field="object_sha",
+            )
             size_token = parts[3].decode("ascii", errors="strict").strip()
             path = path_bytes.decode("utf-8", errors="strict")
             if "\x00" in path or path.startswith("/") or "\\" in path or any(
                 part in {"", ".", ".."} for part in path.split("/")
             ):
                 raise BridgeError("unsafe_path", f"Rejected unsafe git path: {sanitize_diagnostics(path)}")
-            if len(object_sha) != 40 or any(ch not in "0123456789abcdef" for ch in object_sha):
-                raise BridgeError("invalid_payload", "Invalid object SHA in ls-tree")
             file_kind = _file_kind(mode, object_type)
             if size_token == "-":
                 size_bytes = 0
@@ -103,6 +105,7 @@ class GitObjectReader:
         return tuple(entries)
 
     def read_blob(self, object_sha: str) -> bytes:
+        object_sha = _validate_object_sha(object_sha, field="object_sha")
         result = self._run(["cat-file", "blob", object_sha])
         return result.stdout
 
@@ -126,6 +129,12 @@ class GitObjectReader:
             detail = sanitize_diagnostics(completed.stderr or completed.stdout) or "git command failed"
             raise BridgeError("invalid_payload", f"git {' '.join(args[:2])} failed: {detail}")
         return completed
+
+
+def _validate_object_sha(value: str, *, field: str) -> str:
+    if len(value) != 40 or any(ch not in "0123456789abcdef" for ch in value):
+        raise BridgeError("invalid_payload", f"{field} is invalid")
+    return value
 
 
 def _file_kind(mode: str, object_type: str) -> FileKind:

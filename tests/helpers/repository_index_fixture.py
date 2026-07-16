@@ -21,10 +21,19 @@ def module_function(a, b=1, *args, flag=True, **kwargs):
 
     More detail.
     """
+    if flag:
+        async def nested_async():
+            return a
+
     def nested():
         return a
 
     return nested()
+
+
+if True:
+    def guarded_function():
+        return 1
 
 
 async def module_async(x: int) -> int:
@@ -39,6 +48,10 @@ class Outer:
 
     async def async_method(self):
         return 1
+
+    if True:
+        def guarded_method(self):
+            return 3
 
     class Inner:
         def inner_method(self):

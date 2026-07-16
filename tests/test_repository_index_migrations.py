@@ -10,7 +10,7 @@ from bdb_bridge.migrations import JOURNAL_TABLES, MIGRATIONS, Migration, apply_m
 from bdb_bridge.repository_index_migration import MIGRATION_V7, MIGRATION_V7_STATEMENTS
 
 NOW = "2026-07-16T00:00:00Z"
-V7_CHECKSUM = "3894bf7b5c8e12771148978eb76bf4d712ff1642860757e4b4efb2ee85bcbbbe"
+V7_CHECKSUM = "639b9d4eaa0e142fc958c9fa0a1a03a2421802a75ba963b84c3b835d28e30cf8"
 
 
 def test_v7_registry_and_literal_checksum() -> None:

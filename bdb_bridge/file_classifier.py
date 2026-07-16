@@ -42,12 +42,9 @@ def detect_language(path: str) -> str:
     suffix = PurePosixPath(path).suffix.lower()
     if suffix in _EXTENSION_LANGUAGE:
         return _EXTENSION_LANGUAGE[suffix]
-    # double suffix e.g. .html.liquid
     suffixes = [s.lower() for s in PurePosixPath(path).suffixes]
     if len(suffixes) >= 2 and suffixes[-1] == ".liquid":
         return "liquid"
-    if not suffix:
-        return "unknown"
     return "unknown"
 
 
@@ -75,7 +72,9 @@ def classify_content(
     max_parse_bytes: int,
 ) -> tuple[str, bool, int | None, ParseStatus, str | None]:
     language = detect_language(path)
-    if file_kind in {FileKind.SYMLINK, FileKind.SUBMODULE}:
+    if file_kind is FileKind.SUBMODULE:
+        return language, False, None, ParseStatus.METADATA_ONLY, None
+    if file_kind is FileKind.SYMLINK:
         is_text = is_strict_utf8_text(data) if data else False
         line_count = count_text_lines(data.decode("utf-8")) if is_text else None
         return language, is_text, line_count, ParseStatus.METADATA_ONLY, None

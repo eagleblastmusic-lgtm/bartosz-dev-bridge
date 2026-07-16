@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from bdb_bridge import BridgeError
+from bdb_bridge.git_object_reader import GitObjectReader
 from bdb_bridge.python_symbol_parser import parse_python_symbols
 from bdb_bridge.repository_index_builder import RepositoryIndexBuilder
 from bdb_bridge.repository_index_models import FileKind, ParseStatus, SymbolKind
@@ -16,7 +17,7 @@ from tests.helpers.repository_index_fixture import NOW, REPO_ID, git, make_index
 def test_index_exact_commit_ignores_working_tree_changes(tmp_path: Path) -> None:
     cfg, journal, fixture, commits = make_index_fixture(tmp_path)
     service = RepositoryIndexService(cfg, journal)
-    first = service.index(commits["commit1"])
+    service.index(commits["commit1"])
     write_blob(fixture, "src/sample.py", b"def mutated():\n    return 1\n")
     write_blob(fixture, "untracked.txt", b"nope\n")
     git(fixture, "add", "src/sample.py")
@@ -27,6 +28,9 @@ def test_index_exact_commit_ignores_working_tree_changes(tmp_path: Path) -> None
     blob = git(fixture, "cat-file", "blob", f"{commits['commit1']}:src/sample.py")
     assert files["src/sample.py"].content_sha256 == hashlib.sha256(blob).hexdigest()
     assert "untracked.txt" not in files
+    with pytest.raises(BridgeError) as exc:
+        GitObjectReader(fixture).resolve_commit("--help")
+    assert exc.value.code == "invalid_payload"
     journal.close()
 
 
@@ -60,10 +64,12 @@ def test_file_classification_matrix(tmp_path: Path) -> None:
     assert files["src/too_large.py"].symbols == ()
     assert files["docs/note.md"].parse_status is ParseStatus.UNSUPPORTED_LANGUAGE
     assert files["paths/file with space.txt"].is_text is True
-    assert "paths/unicod\u0119.txt" in files
+    assert "paths/unicodę.txt" in files
     assert files["broken/syntax.py"].parse_status is ParseStatus.SYNTAX_ERROR
     assert files["vendor/nested"].file_kind is FileKind.SUBMODULE
     assert files["vendor/nested"].parse_status is ParseStatus.METADATA_ONLY
+    assert files["vendor/nested"].is_text is False
+    assert files["vendor/nested"].line_count is None
     if commits["has_symlink"]:
         assert files["links/note_link"].file_kind is FileKind.SYMLINK
         assert files["links/note_link"].parse_status is ParseStatus.METADATA_ONLY
@@ -80,14 +86,16 @@ def test_python_symbols_cover_required_shapes(tmp_path: Path) -> None:
     assert by_qname["Outer"].kind is SymbolKind.CLASS
     assert by_qname["Outer.method"].kind is SymbolKind.METHOD
     assert by_qname["Outer.async_method"].kind is SymbolKind.ASYNC_METHOD
+    assert by_qname["Outer.guarded_method"].kind is SymbolKind.METHOD
     assert by_qname["module_function.nested"].kind is SymbolKind.NESTED_FUNCTION
+    assert by_qname["module_function.nested_async"].kind is SymbolKind.NESTED_ASYNC_FUNCTION
+    assert by_qname["guarded_function"].kind is SymbolKind.FUNCTION
     assert by_qname["Outer.Inner"].kind is SymbolKind.NESTED_CLASS
     assert by_qname["decorated"].decorators == ("decorator",)
     assert by_qname["module_function"].docstring_summary == "First summary line."
     assert "*args" in (by_qname["module_function"].signature or "")
     assert "**kwargs" in (by_qname["module_function"].signature or "")
     assert [item.ordinal for item in sample.symbols] == list(range(len(sample.symbols)))
-    # deterministic symbol ids
     source = git(fixture, "cat-file", "blob", f"{commits['commit1']}:src/sample.py").decode("utf-8")
     again = parse_python_symbols(
         source=source,
@@ -133,7 +141,6 @@ def test_persist_atomicity_and_conflict(tmp_path: Path) -> None:
         journal.save_repository_snapshot(corrupted)
     assert exc.value.code == "journal_conflict"
 
-    # mid-persist rollback via fault: delete after insert should not leave partial on failed txn
     builder = RepositoryIndexBuilder(
         repo_path=fixture,
         repository_id=REPO_ID,

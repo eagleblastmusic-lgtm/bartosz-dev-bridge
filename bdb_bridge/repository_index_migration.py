@@ -71,7 +71,7 @@ MIGRATION_V7_STATEMENTS: tuple[str, ...] = (
   kind TEXT NOT NULL CHECK (
     kind IN (
       'class', 'function', 'async_function', 'method', 'async_method',
-      'nested_function', 'nested_class'
+      'nested_function', 'nested_async_function', 'nested_class'
     )
   ),
   name TEXT NOT NULL CHECK (length(name) > 0 AND length(name) <= 256),

@@ -14,6 +14,9 @@ from .repository_index_models import (
     SymbolKind,
 )
 
+_MAX_DECORATORS = 16
+_MAX_DECORATOR_TEXT = 240
+
 
 @dataclass(frozen=True)
 class PythonParseResult:
@@ -60,11 +63,20 @@ class _SymbolCollector:
                 self._handle_class(node, parent_stack=parent_stack, nested=bool(parent_stack))
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self._handle_function(node, parent_stack=parent_stack, in_class=in_class)
+            else:
+                for block in _compound_blocks(node):
+                    self.visit_body(block, parent_stack=parent_stack, in_class=in_class)
 
     def _handle_class(self, node: ast.ClassDef, *, parent_stack: tuple[str, ...], nested: bool) -> None:
         kind = SymbolKind.NESTED_CLASS if nested else SymbolKind.CLASS
         qualified = ".".join((*parent_stack, node.name))
-        symbol = self._make_symbol(node=node, kind=kind, name=node.name, qualified_name=qualified, parent_stack=parent_stack)
+        symbol = self._make_symbol(
+            node=node,
+            kind=kind,
+            name=node.name,
+            qualified_name=qualified,
+            parent_stack=parent_stack,
+        )
         self.symbols.append(symbol)
         self.visit_body(node.body, parent_stack=(*parent_stack, node.name), in_class=True)
 
@@ -79,7 +91,7 @@ class _SymbolCollector:
         if in_class:
             kind = SymbolKind.ASYNC_METHOD if is_async else SymbolKind.METHOD
         elif parent_stack:
-            kind = SymbolKind.NESTED_FUNCTION
+            kind = SymbolKind.NESTED_ASYNC_FUNCTION if is_async else SymbolKind.NESTED_FUNCTION
         else:
             kind = SymbolKind.ASYNC_FUNCTION if is_async else SymbolKind.FUNCTION
 
@@ -113,7 +125,6 @@ class _SymbolCollector:
         docstring_summary = _docstring_summary(node)
         parent_symbol_id = None
         if parent_stack:
-            # parent is the most recently emitted symbol with matching qualified name
             parent_qname = ".".join(parent_stack)
             for existing in reversed(self.symbols):
                 if existing.qualified_name == parent_qname:
@@ -149,6 +160,23 @@ class _SymbolCollector:
         )
 
 
+def _compound_blocks(node: ast.stmt) -> tuple[list[ast.stmt], ...]:
+    if isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+        return (node.body, node.orelse)
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return (node.body,)
+    if isinstance(node, (ast.Try, ast.TryStar)):
+        return (
+            node.body,
+            *(handler.body for handler in node.handlers),
+            node.orelse,
+            node.finalbody,
+        )
+    if isinstance(node, ast.Match):
+        return tuple(case.body for case in node.cases)
+    return ()
+
+
 def _symbol_id(
     *,
     repository_id: str,
@@ -182,8 +210,8 @@ def _decorator_names(node: ast.AST) -> tuple[str, ...]:
     if not decorator_list:
         return ()
     names: list[str] = []
-    for decorator in decorator_list:
-        names.append(_expr_name(decorator))
+    for decorator in decorator_list[:_MAX_DECORATORS]:
+        names.append(_expr_name(decorator)[:_MAX_DECORATOR_TEXT])
     return tuple(names)
 
 
