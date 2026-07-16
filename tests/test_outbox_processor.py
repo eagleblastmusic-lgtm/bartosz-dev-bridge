@@ -13,6 +13,7 @@ from bdb_bridge import (
     RemoteResultState,
     sha256_bytes,
 )
+from bdb_bridge.ghb07_composition import reconcile_staged_result_after_restart
 from tests.helpers.result_outbox_fixture import COMMAND_ID, NOW, make_journal, stage
 
 
@@ -75,6 +76,45 @@ def test_existing_identical_zero_push_and_collision_zero_push(tmp_path: Path) ->
     different = FakeTransport(remote=b"different")
     assert OutboxProcessor(journal, different, now_fn=lambda: NOW).process_command(COMMAND_ID).state == OutboxProcessState.COLLISION
     assert different.pushes == 0
+    journal.close()
+
+
+def test_restart_reconciles_leased_identical_remote_without_wait_or_repush(tmp_path: Path) -> None:
+    journal = make_journal(tmp_path)
+    staged, _, _ = stage(journal)
+    leased = journal.claim_outbox_command(COMMAND_ID, NOW, lease_seconds=60.0)
+    assert leased is not None
+    assert leased.next_attempt_at is not None and leased.next_attempt_at > NOW
+
+    transport = FakeTransport(remote=staged.result_bytes)
+    outcome = reconcile_staged_result_after_restart(
+        journal,
+        OutboxProcessor(journal, transport, now_fn=lambda: NOW),
+    )
+
+    assert outcome is not None and outcome.state == OutboxProcessState.PUBLISHED
+    assert transport.pushes == 0
+    assert journal.get_command(COMMAND_ID).state == CommandState.RESULT_PUBLISHED
+    assert journal.get_outbox(COMMAND_ID).published_commit_sha == "f" * 40
+    journal.close()
+
+
+def test_restart_reconciliation_respects_lease_when_remote_is_absent(tmp_path: Path) -> None:
+    journal = make_journal(tmp_path)
+    stage(journal)
+    leased = journal.claim_outbox_command(COMMAND_ID, NOW, lease_seconds=60.0)
+    assert leased is not None
+
+    transport = FakeTransport(remote=None)
+    outcome = reconcile_staged_result_after_restart(
+        journal,
+        OutboxProcessor(journal, transport, now_fn=lambda: NOW),
+    )
+
+    assert outcome is not None and outcome.state == OutboxProcessState.RETRY_SCHEDULED
+    assert transport.pushes == 0
+    assert journal.get_command(COMMAND_ID).state == CommandState.RESULT_STAGED
+    assert journal.get_outbox(COMMAND_ID).next_attempt_at == leased.next_attempt_at
     journal.close()
 
 

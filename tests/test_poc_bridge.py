@@ -41,11 +41,12 @@ def run_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedP
 def init_fixture(tmp_path: Path) -> tuple[Path, str]:
     source = Path(__file__).parents[1] / "bdb-poc-fixture"
     fixture = tmp_path / "fixture"
-    shutil.copytree(source, fixture)
+    shutil.copytree(source, fixture, ignore=shutil.ignore_patterns(".pytest_cache", "__pycache__", "*.pyc"))
     run_git(fixture, "init", "-b", "main")
+    run_git(fixture, "config", "core.autocrlf", "false")
     run_git(fixture, "config", "user.name", "POC Test")
     run_git(fixture, "config", "user.email", "poc@example.invalid")
-    run_git(fixture, "add", "--", ".gitignore", "pyproject.toml", "src", "tests")
+    run_git(fixture, "add", "--", ".gitattributes", ".gitignore", "pyproject.toml", "src", "tests")
     run_git(fixture, "commit", "-m", "fixture baseline")
     return fixture, run_git(fixture, "rev-parse", "HEAD").stdout.strip()
 

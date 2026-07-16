@@ -17,7 +17,7 @@ BASE_SHA = "a" * 40
 def init_fixture(tmp_path: Path) -> Path:
     source = Path(__file__).parents[1] / "bdb-poc-fixture"
     fixture = tmp_path / "fixture"
-    shutil.copytree(source, fixture)
+    shutil.copytree(source, fixture, ignore=shutil.ignore_patterns(".pytest_cache", "__pycache__", "*.pyc"))
     return fixture
 
 

@@ -1,99 +1,138 @@
 # Bartosz Dev Bridge
 
-Lokalny Bridge dla ChatGPT Plus i GitHuba, rozwijany etapami na podstawie potwierdzonego POC-0.
+Lokalny Bridge dla ChatGPT Plus i GitHuba, rozwinięty od POC-0 do trwałego, pojedynczego runtime’u z procesową bramką recovery.
 
 Aktualna faza:
 
 ```text
-GHB0-6 — Service lifecycle i pojedyncza instancja
+GHB-0 — recovery gate closed
 ```
+
+## Działający zakres
+
+- durable Git ingestion i immutable command identity;
+- single queue i jeden aktywny worker;
+- izolowane session worktree;
+- atomic exact-byte patching;
+- plan/effect recovery bez podwójnej revision;
+- immutable result staging i durable outbox;
+- fast-forward result publication i collision detection;
+- service lifecycle `RUNNING → STOPPING → OFFLINE`;
+- wspólny OS lock i heartbeat;
+- Windows foreground i background jako zwykły proces użytkownika;
+- siedmiosesyjna recovery gate A–G z rzeczywistymi restartami;
+- jawne session finalization;
+- persisted `preserve` jako polityka domyślna;
+- bezpieczny, opt-in i crash-recoverable cleanup wyłącznie sesji `COMPLETED`.
 
 ## CLI
 
 ```text
 bdb bridge start --config <path> --foreground
-bdb bridge start --config <path> --background   # tylko Windows
+bdb bridge start --config <path> --background   # Windows
 bdb bridge stop --config <path>
 bdb bridge status --config <path> [--json]
+
+bdb bridge session finalize --config <path> --session-id <uuid>
+
+bdb bridge workspace status --config <path> --session-id <uuid> [--json]
+bdb bridge workspace preserve --config <path> --session-id <uuid>
+bdb bridge workspace cleanup --config <path> --session-id <uuid> --confirm-session-id <uuid>
 ```
 
-Tryb background na Windows uruchamia zwykły proces użytkownika. Nie tworzy Windows Service, Scheduled Task ani procesu administracyjnego. Child sam zdobywa platformowy OS lock i sam prowadzi graceful lifecycle.
+Tryb background nie tworzy Windows Service, Scheduled Task ani procesu administracyjnego. Child sam zdobywa platformowy lock i prowadzi graceful lifecycle.
 
-## Cykl usługi
-
-Każdy cykl zachowuje kolejność:
+## Kolejność service loop
 
 ```text
-recovery → pending outbox → ingestion → execution
+recovery → pending outbox → ingestion → execution → wait
 ```
 
-Pomiędzy bezpiecznymi fazami sprawdzany jest trwały stan zatrzymania. Żądanie `STOPPING` zapisane podczas długiej fazy execution nie przerywa patcha ani profilu w połowie: faza kończy się bezpiecznie, po czym usługa przechodzi bezpośrednio do końcowego `OFFLINE`, bez dodatkowego pełnego `idle_poll_seconds`.
+Pomiędzy bezpiecznymi fazami sprawdzany jest trwały stop. Żądanie zapisane podczas execution nie przerywa patcha ani profilu w połowie; faza kończy się bezpiecznie, a następnie service przechodzi do końcowego `OFFLINE` bez dodatkowego pełnego idle delay.
 
-## Stany lifecycle
+## Recovery gate
 
-- `OFFLINE` — brak aktywnej instancji i OS lock jest wolny;
-- `RUNNING` — aktywna instancja posiada lock, PID i aktualizowany heartbeat;
-- `STOPPING` — trwałe żądanie graceful stop zostało zapisane i jest obserwowalne;
-- `STALE` — baza, PID, heartbeat i stan locka nie tworzą spójnej aktywnej instancji.
-
-Końcowe zatrzymanie zapisuje `STOPPED`, po czym publiczny status staje się `OFFLINE`. Journal, lock file, session worktree i inne durable markery nie są usuwane przez lifecycle.
-
-## Pojedyncza instancja
-
-`InstanceLock` korzysta z:
-
-- `msvcrt.locking` na Windows;
-- `fcntl.flock` na POSIX.
-
-Contention jest mapowane na `INSTANCE_ALREADY_RUNNING`. Awaria backendu, ścieżki albo uprawnień jest mapowana na `INSTANCE_LOCK_FAILED` i nie jest traktowana jak zwykłe zajęcie locka. Drugi realny proces nie może rozpocząć działania, gdy lock należy do aktywnej instancji.
-
-## Heartbeat
-
-`HeartbeatWorker` działa jako osobny, niedaemonowy wątek i otwiera własne połączenie SQLite na podstawie ścieżki Journalu. Nie współdzieli głównego obiektu `Journal` usługi. Heartbeat jest aktualizowany także wtedy, gdy bezpieczna faza execution trwa przez kilka interwałów, a worker kończy się przez kontrolowany `stop()` i `join()`.
-
-## Recovery po ponownym otwarciu
-
-Po restarcie nowy Journal i nowy graph service/coordinator obsługują trwałe stany:
+Macierz wykonuje świeże, procesowe scenariusze:
 
 ```text
-CLAIMED         → recovery bez drugiego claimu
-EXECUTING       → recovery bez ponownego patcha
-EFFECT_RECORDED → dokończenie profilu/resultu bez ponownego patcha
-RESULT_STAGED   → wyłącznie outbox/publication
+A  DISCOVERED przed validation
+B  CLAIMED
+C  temp write przed atomic replace
+D  atomic replace przed EFFECT_RECORDED
+E  EFFECT_RECORDED przed profile/result
+F  RESULT_STAGED przed publish
+G  remote push przed local publication ACK
 ```
 
-Workspace revision rośnie dokładnie o jeden, plan i effect pozostają pojedyncze, a staged result/outbox są idempotentne. Recovery jest wykonywane przed pending outbox, a pending outbox przed nowym ingestion.
+Każdy case korzysta z nowego syntetycznego fixture repo, bare/control repo, Journalu, worktree, session ID i procesu foreground. Po fault exit uruchamiany jest nowy proces, a po sukcesie kolejny restart sprawdza no-op. Bramka potwierdza pojedynczy patch, revision, plan, effect, result, outbox i publish oraz exact remote bytes/hash/path.
 
-## Fault points
+Dodatkowe scenariusze obejmują persisted transport retry, command collision, result collision, divergent workspace i drugi proces blokowany przez OS lock.
 
-GHB0-6 zachowuje kontrolowane punkty awarii, między innymi:
+Windows gate:
 
-- `AFTER_INSTANCE_LOCK_BEFORE_DB_START` — proces kończy się bez active service row, a OS zwalnia lock;
-- `AFTER_EXECUTE_CLAIM` — trwały `CLAIMED` jest odzyskiwany po ponownym otwarciu bez drugiego claimu i bez podwójnego patcha/effectu.
+```powershell
+.\scripts\Invoke-GHB0RecoveryGate.ps1
+.\scripts\Invoke-GHB0RecoveryGate.ps1 -Python ".venv\Scripts\python.exe"
+```
 
-## Background preflight
+## Workspace lifecycle v6
 
-Przed uruchomieniem child process sprawdzane są Journal i publiczny status. Child nie jest uruchamiany przy:
+Journal v6 dodaje trwały rekord lifecycle z immutable identity: session, exact absolute path, base SHA, revision i state hash.
 
-- uszkodzonym lub nieobsługiwanym schemacie Journalu;
-- błędzie status readera;
-- `INSTANCE_LOCK_FAILED`;
-- permission error;
-- nieprawidłowej konfiguracji;
-- stanie `RUNNING` lub `STOPPING`.
+Dyspozycje:
 
-Tolerowany jest wyłącznie prawidłowy stan nieaktywnej instancji. Diagnostyka jest ograniczona i sanitizowana; błędy nie są ignorowane przez szerokie `except Exception: pass`.
+```text
+preserve | cleanup
+```
+
+Stany:
+
+```text
+preserved | cleanup_requested | removing | removed | blocked
+```
+
+Domyślna polityka to `preserve`. Restart, stop, collision, transport error i manual reconciliation nie usuwają worktree.
+
+## Session finalization
+
+Finalizacja jest jawna i transakcyjna:
+
+```text
+ACTIVE → COMPLETING → COMPLETED
+```
+
+Wymaga service `OFFLINE`, wspólnego OS locka i braku unresolved command, pending/collision outbox, blocking ingestion issue oraz manual reconciliation. `RESULT_PUBLISHED` pozostaje bez protocol ACK. Finalizacja zapisuje `preserve` i nie usuwa worktree ani Journalu.
+
+## Safe cleanup
+
+Cleanup wymaga exact confirmation tego samego UUID, stanu `COMPLETED`, service `OFFLINE`, zdobytego wspólnego locka i pełnej eligibility. Sprawdzane są m.in. exact path, brak reparse points, source cleanliness, dokładnie jedna detached registration na exact base SHA, brak unauthorized/temp paths oraz zgodność physical state hash.
+
+Jedyna operacja fizyczna:
+
+```text
+git -C <fixture_repo> worktree remove --force <exact_workspace_path>
+```
+
+Bridge nie używa `shutil.rmtree`, `Remove-Item -Recurse`, `rmdir /s`, `git reset`, `git clean` ani `git worktree prune`. Cleanup jest odzyskiwany po awarii przed startem, po `removing` oraz po fizycznym remove przed local DB ACK.
 
 ## Granice bezpieczeństwa
 
-GHB0-6 nie dodaje:
+GHB-0 nadal nie dodaje:
 
-- `taskkill`, `TerminateProcess` ani zabijania procesu podczas graceful stop;
-- PowerShella do sterowania usługą;
-- Windows Service ani Scheduled Task;
-- usuwania Journalu lub session worktree;
-- daemonowego cleanupu;
-- nowych operacji, ogólnego terminala, GUI, Hermesa ani integracji z GicleeApp;
-- zależności `bdb_bridge → bdb_poc`.
+- protocol ACK ani automatycznego `ACKNOWLEDGED`;
+- automatic cleanup lub retention;
+- cleanupu aktywnych/manual sessions;
+- Windows Service, Scheduled Task, GUI, tray, installer lub autostart;
+- produkcyjnego execution;
+- arbitrary shell lub `shell=True`;
+- wielu workerów i równoległych sesji;
+- HTTP/WebSocket remote control;
+- Hermesa, GicleeApp, Browser Lab, Playwright lub LSP;
+- zależności runtime `bdb_bridge → bdb_poc`.
 
-Legacy POC-0 pozostaje dostępny przez `bdb_poc` i `poc_bridge.py`.
+Legacy POC-0A i POC-0B pozostają regresjami przez `poc_bridge.py` oraz `bdb_poc.PocBridge`.
+
+Dokumentacja operatorska:
+
+- `docs/GHB0_WINDOWS_RUNBOOK.md`;
+- `docs/GHB0_RECOVERY_GATE.md`.

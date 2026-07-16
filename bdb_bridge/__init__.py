@@ -1,6 +1,17 @@
 from .config import BridgeConfig
 from .ingestion import CommandIngestor
 from .journal import Journal
+from .recovery_gate_hooks import (
+    install_command_collision_diagnostics,
+    install_command_ingestor_fault_hook,
+)
+
+install_command_ingestor_fault_hook(CommandIngestor)
+install_command_collision_diagnostics(Journal)
+from .workspace_lifecycle_migration import install_workspace_lifecycle_migration
+
+install_workspace_lifecycle_migration(Journal)
+
 from .models import (
     BridgeErrorCode,
     CommandIngestionRecord,
@@ -51,10 +62,12 @@ from .recovery_journal import (
 )
 from .outbox_journal import install_journal_outbox_api
 from .service_journal import install_journal_service_api
+from .workspace_lifecycle_journal import install_journal_workspace_lifecycle_api
 
 install_journal_recovery_api(Journal)
 install_journal_outbox_api(Journal)
 install_journal_service_api(Journal)
+install_journal_workspace_lifecycle_api(Journal)
 
 from .workspace_manager import WorkspaceManager
 from .instance_lock import InstanceLock
@@ -91,6 +104,19 @@ from .scheduler import SingleQueueScheduler
 from .serializers import MAX_RESULT_BYTES, MAX_TAIL_CHARS, canonical_json, finalize_result, sha256_text, tail
 from .transport import CommandSnapshot, CommandTransport, RemoteDocument
 from .git_command_transport import GitCommandTransport
+from .workspace_types import (
+    WorkspaceCleanupOutcome,
+    WorkspaceDisposition,
+    WorkspaceEligibility,
+    WorkspaceLifecycleRecord,
+    WorkspaceLifecycleState,
+    WorkspaceStatusSnapshot,
+)
+from .workspace_lifecycle import WorkspaceLifecycleCoordinator
+from .workspace_lifecycle_errors import install_workspace_lifecycle_error_mapping
+from .session_finalization import SessionFinalizationOutcome, SessionFinalizer
+
+install_workspace_lifecycle_error_mapping(WorkspaceLifecycleCoordinator)
 
 __all__ = [
     "BridgeConfig", "BridgeError", "BridgeErrorCode", "BridgeService", "COMMAND_PATH_RE",
@@ -110,10 +136,17 @@ __all__ = [
     "ServiceInstanceState", "ServiceStatus", "ServiceInstanceRecord", "ServiceStatusSnapshot",
     "ServiceStatusReader", "is_pid_alive", "HeartbeatWorker",
     "BridgeCycleReport", "ServiceRunOutcome", "StopRequestOutcome", "BackgroundStartOutcome",
+    "WorkspaceCleanupOutcome", "WorkspaceDisposition", "WorkspaceEligibility",
+    "WorkspaceLifecycleRecord", "WorkspaceLifecycleState", "WorkspaceStatusSnapshot",
+    "WorkspaceLifecycleCoordinator", "SessionFinalizationOutcome", "SessionFinalizer",
     "canonical_json", "command_id_for", "command_path_for", "compute_operation_effect_sha256",
     "compute_operation_plan_sha256", "finalize_result", "install_journal_outbox_api",
+    "install_journal_workspace_lifecycle_api", "install_workspace_lifecycle_migration",
     "manifest_path_for", "parse_command_path", "parse_manifest_path", "path_matches",
     "require_int", "require_string", "result_path_for", "sha256_bytes", "sha256_text", "tail",
     "validate_base_sha", "validate_path_pattern", "validate_repo_relative_path", "validate_session_id",
     "parse_git_ref", "sanitize_diagnostics",
 ]
+
+from .ghb07_cli import install_cli
+install_cli()

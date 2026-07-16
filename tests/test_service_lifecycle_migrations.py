@@ -36,8 +36,8 @@ def test_v5_empty_upgrade(tmp_path: Path) -> None:
     cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='service_instances'")
     assert cur.fetchone() is None
 
-    # Run upgrade to v5
-    apply_migrations(conn, MIGRATIONS, now_fn=fixed_now)
+    # Run upgrade to v5 only; v6 is covered separately.
+    apply_migrations(conn, MIGRATIONS[:5], now_fn=fixed_now)
     assert conn.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,), (5,)]
 
     # Verify table and constraints
@@ -58,13 +58,14 @@ def test_v5_populated_upgrade(tmp_path: Path) -> None:
 
     conn.close()
 
-    # Open through Journal to trigger migration auto-run to v5
+    # Open through Journal to trigger all current migrations, including v5 and v6.
     journal = Journal.open(path, now_fn=fixed_now)
 
     # Verify data is still intact
     assert journal._conn.execute("SELECT session_id FROM sessions").fetchone()[0] == "s1"
     assert journal._conn.execute("SELECT command_id FROM commands").fetchone()[0] == "c1"
     assert journal._conn.execute("SELECT COUNT(*) FROM service_instances").fetchone()[0] == 0
+    assert journal._conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 6
     journal.close()
 
 

@@ -49,6 +49,7 @@ def test_empty_db_applies_all_migrations(tmp_path: Path) -> None:
             "operation_effects",
             "outbox",
             "service_instances",
+            "workspace_lifecycle",
         }
         migrations = journal._connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
@@ -59,6 +60,7 @@ def test_empty_db_applies_all_migrations(tmp_path: Path) -> None:
             (3, "journal_v3_execution"),
             (4, "journal_v4_result_outbox"),
             (5, "journal_v5_service_lifecycle"),
+            (6, "journal_v6_workspace_lifecycle"),
         ]
     finally:
         journal.close()
@@ -91,7 +93,7 @@ def test_reopen_is_noop(tmp_path: Path) -> None:
     journal = Journal.open(path, now_fn=fixed_now)
     try:
         rows = journal._connection.execute("SELECT version FROM schema_migrations").fetchall()
-        assert rows == [(1,), (2,), (3,), (4,), (5,)]
+        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,)]
     finally:
         journal.close()
 
@@ -161,7 +163,7 @@ def test_name_mismatch_detected(tmp_path: Path) -> None:
 def test_future_schema_version_rejected(tmp_path: Path) -> None:
     journal = open_db(tmp_path)
     journal._connection.execute(
-        "INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (6, 'future', 'abc', ?)",
+        "INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (7, 'future', 'abc', ?)",
         (FIXED_NOW,),
     )
     journal._connection.commit()
@@ -270,7 +272,7 @@ def test_concurrent_open_empty_db_creates_schema_once(tmp_path: Path) -> None:
     conn = sqlite3.connect(path)
     versions = conn.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
     conn.close()
-    assert versions == [(1,), (2,), (3,), (4,), (5,)]
+    assert versions == [(1,), (2,), (3,), (4,), (5,), (6,)]
 
 
 def test_journal_open_closes_connection_on_migration_failure(tmp_path: Path) -> None:
@@ -321,6 +323,7 @@ def test_upgrade_existing_v1_database_to_v2(tmp_path: Path) -> None:
             (3, "journal_v3_execution"),
             (4, "journal_v4_result_outbox"),
             (5, "journal_v5_service_lifecycle"),
+            (6, "journal_v6_workspace_lifecycle"),
         ]
         assert journal._connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='ingestion_sources'"
@@ -333,10 +336,8 @@ def test_upgrade_existing_v1_database_to_v2_with_data(tmp_path: Path) -> None:
     path = tmp_path / "v1_data.db"
     conn = sqlite3.connect(path, timeout=5.0, isolation_level=None)
 
-    # 1. Apply v1
     apply_migrations(conn, (MIGRATIONS[0],), now_fn=fixed_now)
 
-    # 2. Insert real v1 data: sessions, commands, workspaces, results, events
     now = FIXED_NOW
     conn.execute(
         "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)",
@@ -367,7 +368,6 @@ def test_upgrade_existing_v1_database_to_v2_with_data(tmp_path: Path) -> None:
         ("s2", "c1", "test_event", '{"foo":"bar"}', now)
     )
 
-    # Check current state in v1
     v1_sessions = conn.execute("SELECT * FROM sessions ORDER BY session_id").fetchall()
     v1_commands = conn.execute("SELECT * FROM commands ORDER BY command_id").fetchall()
     v1_workspaces = conn.execute("SELECT * FROM workspaces").fetchall()
@@ -376,7 +376,6 @@ def test_upgrade_existing_v1_database_to_v2_with_data(tmp_path: Path) -> None:
 
     conn.close()
 
-    # 3. Apply remaining migrations
     journal = Journal.open(path, now_fn=fixed_now)
     try:
         versions = journal._connection.execute(
@@ -388,6 +387,7 @@ def test_upgrade_existing_v1_database_to_v2_with_data(tmp_path: Path) -> None:
             (3, "journal_v3_execution"),
             (4, "journal_v4_result_outbox"),
             (5, "journal_v5_service_lifecycle"),
+            (6, "journal_v6_workspace_lifecycle"),
         ]
 
         v2_sessions = journal._connection.execute("SELECT session_id, repository_id, base_sha, state, created_at, updated_at FROM sessions ORDER BY session_id").fetchall()
@@ -507,7 +507,6 @@ def test_v2_blocks_two_active_sessions(tmp_path: Path) -> None:
 def test_v2_blocks_two_active_workers(tmp_path: Path) -> None:
     journal = open_db(tmp_path)
     try:
-        now = FIXED_NOW
         session = "018f3f66-6cb3-4f66-9f2e-3d7647d1b799"
         journal.create_session(session, "repo", "a" * 40)
         journal.record_command(
