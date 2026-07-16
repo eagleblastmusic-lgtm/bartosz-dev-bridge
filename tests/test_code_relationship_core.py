@@ -55,6 +55,17 @@ def test_analysis_resolves_core_shapes_without_source_execution(tmp_path: Path) 
         for item in by_expression["local"]
     )
     assert all(item.target_symbol_id != class_local.symbol_id for item in by_expression["local"])
+    nested_class_reads = [
+        item
+        for item in analysis.references
+        if item.reference_kind is ReferenceKind.NAME_READ and item.expression == "local"
+    ]
+    assert nested_class_reads
+    assert all(
+        item.resolution_status is ResolutionStatus.RESOLVED
+        and item.target_symbol_id == module_local.symbol_id
+        for item in nested_class_reads
+    )
     assert any(item.resolution_status is ResolutionStatus.DYNAMIC for item in by_expression["helper"])
     assert any(item.resolution_status is ResolutionStatus.DYNAMIC for item in by_expression["obj.missing"])
     assert any(item.expression == "recursive" and item.resolution_status is ResolutionStatus.RESOLVED for item in calls)

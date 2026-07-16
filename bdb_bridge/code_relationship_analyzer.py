@@ -358,13 +358,11 @@ def nearest_class(scope: _Scope) -> _Scope | None:
 
 def _lexical_scopes(scope: _Scope):
     current: _Scope | None = scope
-    skip_class_scopes = scope.kind == "function"
     while current:
         yield current
         current = current.parent
-        if skip_class_scopes:
-            while current is not None and current.kind == "class":
-                current = current.parent
+        while current is not None and current.kind == "class":
+            current = current.parent
 
 
 def _lookup(name: str, scope: _Scope) -> _Binding | None:

@@ -70,6 +70,13 @@ class Child(Base):
         return local()
 
 
+class ScopeContainer:
+    local = 9
+
+    class Nested:
+        chosen = local
+
+
 def unknown(obj):
     return obj.missing()
 '''
