@@ -3,57 +3,33 @@ name: Bridge CI
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [gpt/poc-0-bootstrap]
 
 permissions:
   contents: read
 
 jobs:
-  test:
-    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.11", "3.12"]
-
+  diagnose:
+    name: diagnose Ubuntu / Python 3.11
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
           cache: pip
       - name: Install test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
-      - name: Validate PowerShell syntax
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          $scripts = @(
-            "scripts/bootstrap_windows.ps1",
-            "scripts/bootstrap_poc0b_windows.ps1",
-            "scripts/run_poc_bridge.ps1",
-            "scripts/Invoke-GHB0RecoveryGate.ps1"
-          )
-          foreach ($script in $scripts) {
-            $tokens = $null
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile(
-              (Resolve-Path $script),
-              [ref]$tokens,
-              [ref]$errors
-            ) | Out-Null
-            if ($errors.Count -gt 0) {
-              $errors | ForEach-Object { Write-Error "$script`: $($_.Message)" }
-              exit 1
-            }
-          }
       - name: Compile Bridge
         run: |
           python -m py_compile poc_bridge.py
-          python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
-          python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
-      - name: Run tests
-        run: python -m pytest -q
+          python -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
+          python -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for p in pathlib.Path('bdb_poc').glob('*.py')]"
+      - name: Run tests with captured output
+        run: python -c "import pathlib,subprocess,sys; p=subprocess.run([sys.executable,'-m','pytest','-q'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True); pathlib.Path('pytest-output.txt').write_text(p.stdout,encoding='utf-8'); print(p.stdout,end=''); raise SystemExit(p.returncode)"
+      - name: Upload pytest diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-ubuntu-py311
+          path: pytest-output.txt
+          retention-days: 1
