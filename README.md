@@ -82,6 +82,16 @@ Na Windows pełny syntetyczny POC można uruchomić jedną komendą:
 
 Bramka automatycznie używa `.venv\Scripts\python.exe`, tworzy wyłącznie tymczasowe repozytoria i sprawdza lokalny transport Git, finalny `multi_file_patch`, rollback, durable recovery oraz foreground lifecycle. Szczegóły: [docs/LOCAL_E2E_POC.md](docs/LOCAL_E2E_POC.md).
 
+## Trwały pilot operatorski
+
+Po zielonym lokalnym POC można uruchomić trwały, zachowywany przebieg poza checkoutem Bridge:
+
+```powershell
+.\scripts\Invoke-BDBPersistentPilot.ps1
+```
+
+Pilot uruchamia prawdziwy proces `bdb`, osobne repo źródłowe, osobny bare remote Git, finalny `multi_file_patch`, profil `poc_pytest`, publikację wyniku i graceful stop. Pozostawia worktree, Journal, logi i `pilot-report.json`; nie dotyka repozytoriów biznesowych ani `bartosz-dev-poc-control`. Szczegóły: [docs/PERSISTENT_OPERATOR_PILOT.md](docs/PERSISTENT_OPERATOR_PILOT.md).
+
 Tryb background nie tworzy Windows Service, Scheduled Task ani procesu administracyjnego. Child sam zdobywa platformowy lock i prowadzi graceful lifecycle.
 
 ## Kolejność service loop
@@ -183,4 +193,5 @@ Dokumentacja operatorska:
 - `docs/GHB0_RECOVERY_GATE.md`;
 - `docs/GHB2C_DURABLE_BATCH_RECOVERY.md`;
 - `docs/GHB2D_FINAL_EDITING_GATE.md`;
-- `docs/LOCAL_E2E_POC.md`.
+- `docs/LOCAL_E2E_POC.md`;
+- `docs/PERSISTENT_OPERATOR_PILOT.md`.
