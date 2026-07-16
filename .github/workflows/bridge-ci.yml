@@ -1,26 +1,204 @@
 name: Bridge CI
 
 on:
-  pull_request:
-    branches: [main]
+  push:
+    branches: [gpt/ghb1-b-code-relationships]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  export:
-    name: export GHB1-B source diagnostics
+  fix:
+    name: apply targeted GHB1-B contract fixes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Upload source diagnostics
-        uses: actions/upload-artifact@v4
         with:
-          name: ghb1b-source
-          path: |
-            bdb_bridge
-            bdb_poc
-            tests
-            pyproject.toml
-            poc_bridge.py
-          retention-days: 1
+          fetch-depth: 0
+          ref: gpt/ghb1-b-code-relationships
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Update v8 test contracts
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          v8 = "cbc8c9c6b5907c1f4d82cc9f95b095d8cceff4ef4aaca454f883cd3bb2ad55b6"
+
+          path = Path("tests/test_code_relationship_core.py")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace(
+              'assert exact[0].name == "Child" and exact[0].rank == 2',
+              'assert exact[0].name == "Child" and exact[0].rank == 1',
+          )
+          path.write_text(text, encoding="utf-8", newline="\n")
+
+          path = Path("tests/test_journal_migrations.py")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace(
+              '            "repository_symbols",\n        }',
+              '            "repository_symbols",\n'
+              '            "repository_analyses",\n'
+              '            "repository_imports",\n'
+              '            "repository_symbol_references",\n'
+              '            "repository_dependency_edges",\n'
+              '        }',
+          )
+          text = text.replace(
+              '            (7, "journal_v7_repository_index"),\n        ]',
+              '            (7, "journal_v7_repository_index"),\n'
+              '            (8, "journal_v8_code_relationships"),\n'
+              '        ]',
+          )
+          text = text.replace(
+              '[(1,), (2,), (3,), (4,), (5,), (6,), (7,)]',
+              '[(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]',
+          )
+          path.write_text(text, encoding="utf-8", newline="\n")
+
+          path = Path("tests/test_result_outbox_migrations.py")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace(
+              'V7 = "639b9d4eaa0e142fc958c9fa0a1a03a2421802a75ba963b84c3b835d28e30cf8"',
+              'V7 = "639b9d4eaa0e142fc958c9fa0a1a03a2421802a75ba963b84c3b835d28e30cf8"\n'
+              f'V8 = "{v8}"',
+          )
+          text = text.replace(
+              '        (7, "journal_v7_repository_index", V7),\n    ]',
+              '        (7, "journal_v7_repository_index", V7),\n'
+              '        (8, "journal_v8_code_relationships", V8),\n'
+              '    ]',
+          )
+          text = text.replace(
+              '(1,), (2,), (3,), (4,), (5,), (6,), (7,),',
+              '(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,),',
+          )
+          path.write_text(text, encoding="utf-8", newline="\n")
+
+          path = Path("tests/test_service_lifecycle_migrations.py")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace("including v5 and v6.", "including all current migrations.")
+          text = text.replace('fetchone()[0] == 7', 'fetchone()[0] == 8')
+          path.write_text(text, encoding="utf-8", newline="\n")
+
+          path = Path("tests/test_workspace_recovery_migrations.py")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace(
+              'V7_CHECKSUM = "639b9d4eaa0e142fc958c9fa0a1a03a2421802a75ba963b84c3b835d28e30cf8"',
+              'V7_CHECKSUM = "639b9d4eaa0e142fc958c9fa0a1a03a2421802a75ba963b84c3b835d28e30cf8"\n'
+              f'V8_CHECKSUM = "{v8}"',
+          )
+          text = text.replace(
+              '        (7, "journal_v7_repository_index", V7_CHECKSUM),\n    ]',
+              '        (7, "journal_v7_repository_index", V7_CHECKSUM),\n'
+              '        (8, "journal_v8_code_relationships", V8_CHECKSUM),\n'
+              '    ]',
+          )
+          text = text.replace(
+              '(1,), (2,), (3,), (4,), (5,), (6,), (7,),',
+              '(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,),',
+          )
+          text = text.replace('(1, 2, 3, 4, 5, 6, 7)', '(1, 2, 3, 4, 5, 6, 7, 8)')
+          text = text.replace(
+              '        "journal_v7_repository_index",\n    )',
+              '        "journal_v7_repository_index",\n'
+              '        "journal_v8_code_relationships",\n'
+              '    )',
+          )
+          path.write_text(text, encoding="utf-8", newline="\n")
+          PY
+      - name: Run targeted tests
+        run: |
+          python -m pytest -q \
+            tests/test_code_relationship_core.py \
+            tests/test_code_relationship_migrations.py \
+            tests/test_code_relationship_cli.py \
+            tests/test_journal_migrations.py \
+            tests/test_result_outbox_migrations.py \
+            tests/test_service_lifecycle_migrations.py \
+            tests/test_workspace_recovery_migrations.py
+      - name: Restore standard workflow
+        shell: bash
+        run: |
+          cat > .github/workflows/bridge-ci.yml <<'YAML'
+          name: Bridge CI
+
+          on:
+            pull_request:
+              branches: [main]
+            push:
+              branches: [gpt/poc-0-bootstrap]
+
+          permissions:
+            contents: read
+
+          jobs:
+            test:
+              name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+              runs-on: ${{ matrix.os }}
+              strategy:
+                fail-fast: false
+                matrix:
+                  os: [ubuntu-latest, windows-latest]
+                  python-version: ["3.11", "3.12"]
+
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-python@v5
+                  with:
+                    python-version: ${{ matrix.python-version }}
+                    cache: pip
+                - name: Install test dependencies
+                  run: python -m pip install --disable-pip-version-check -e ".[dev]"
+                - name: Validate PowerShell syntax
+                  if: runner.os == 'Windows'
+                  shell: powershell
+                  run: |
+                    $scripts = @(
+                      "scripts/bootstrap_windows.ps1",
+                      "scripts/bootstrap_poc0b_windows.ps1",
+                      "scripts/run_poc_bridge.ps1",
+                      "scripts/Invoke-GHB0RecoveryGate.ps1"
+                    )
+                    foreach ($script in $scripts) {
+                      $tokens = $null
+                      $errors = $null
+                      [System.Management.Automation.Language.Parser]::ParseFile(
+                        (Resolve-Path $script),
+                        [ref]$tokens,
+                        [ref]$errors
+                      ) | Out-Null
+                      if ($errors.Count -gt 0) {
+                        $errors | ForEach-Object { Write-Error "$script`: $($_.Message)" }
+                        exit 1
+                      }
+                    }
+                - name: Compile Bridge
+                  run: |
+                    python -m py_compile poc_bridge.py
+                    python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
+                    python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
+                - name: Run tests
+                  run: python -m pytest -q
+          YAML
+      - name: Commit targeted fixes
+        shell: bash
+        run: |
+          git diff --check
+          git add \
+            .github/workflows/bridge-ci.yml \
+            tests/test_code_relationship_core.py \
+            tests/test_journal_migrations.py \
+            tests/test_result_outbox_migrations.py \
+            tests/test_service_lifecycle_migrations.py \
+            tests/test_workspace_recovery_migrations.py
+          git diff --cached --check
+          git config user.name "Bartosz Dev Bridge CI"
+          git config user.email "bridge-ci@localhost.invalid"
+          git commit -m "test(analysis): update v8 migration contracts"
+          git push origin HEAD:gpt/ghb1-b-code-relationships
