@@ -81,11 +81,11 @@ Fragmenty:
 
 Pełne źródło nie jest zapisywane do Journalu. Context pack powstaje on demand i nie ma migracji Journal v9.
 
-Pliki binary, symlink i submodule są metadata-only. Regularny plik większy niż 1 MiB również nie jest wczytywany do packu. Każdy odczytany blob jest weryfikowany względem trwałego `content_sha256` snapshotu.
+Pliki binary, symlink i submodule są metadata-only. Regularny plik większy niż 1 MiB również nie jest wczytywany do packu. Typowe committed secret paths (`.env*`, klucze prywatne, keystore oraz jawne pliki credentials/service-account) są zawsze metadata-only z `omitted_reason=sensitive_path`. Każdy pozostały odczytany blob jest weryfikowany względem trwałego `content_sha256` snapshotu.
 
 ## Identyczność
 
-Pack nie zawiera timestampu. `pack_sha256` jest SHA-256 kanonicznego JSON-u wszystkich pól packu poza samym `pack_sha256`.
+Pack nie zawiera timestampu. `pack_sha256` jest SHA-256 tej samej kanonicznej reprezentacji JSON (`sort_keys=True`, zwarte separatory, standardowe escaping Unicode), której używa CLI, dla wszystkich pól packu poza samym `pack_sha256`.
 
 Ten sam repository ID, commit, seed i limity dają identyczny wynik na Windows i Linux. Zmiany staged, unstaged, ignored oraz untracked nie wpływają na wynik.
 

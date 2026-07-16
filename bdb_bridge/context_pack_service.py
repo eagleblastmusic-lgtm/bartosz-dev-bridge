@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 from .code_relationship_models import ANALYSIS_VERSION, DependencyEdge, RepositoryAnalysis, SearchResult
 from .code_relationship_service import RepositoryRelationshipService
@@ -506,6 +507,8 @@ class ContextPackService:
         remaining_bytes: int,
     ) -> tuple[ContextFile | None, int, bool]:
         reason = ",".join(sorted(candidate.reasons))
+        if _is_sensitive_path(record.path):
+            return ContextFile(record.path, record.language, record.content_sha256, record.size_bytes, reason, candidate.priority, "sensitive_path", ()), 0, False
         if record.file_kind is not FileKind.REGULAR:
             return ContextFile(record.path, record.language, record.content_sha256, record.size_bytes, reason, candidate.priority, "metadata_only", ()), 0, False
         if not record.is_text:
@@ -577,6 +580,16 @@ class ContextPackService:
         return analysis
 
 
+def _is_sensitive_path(path: str) -> bool:
+    pure = PurePosixPath(path)
+    name = pure.name.casefold()
+    if name == ".env" or name.startswith(".env."):
+        return True
+    if name in {"id_rsa", "id_ed25519", "credentials.json", "service-account.json"}:
+        return True
+    return pure.suffix.casefold() in {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"}
+
+
 def _direction(value: str) -> ContextDirection:
     try:
         return ContextDirection(value)
@@ -644,7 +657,7 @@ def _line_numbered(lines: list[str], start: int, end: int) -> str:
 
 
 def _canonical_bytes(payload: dict[str, object]) -> bytes:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
 def _context_file_dict(item: ContextFile) -> dict[str, object]:

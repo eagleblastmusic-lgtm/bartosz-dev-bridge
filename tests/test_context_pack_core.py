@@ -64,7 +64,7 @@ def test_context_pack_is_immutable_deterministic_and_bounded(tmp_path: Path) -> 
     digest_payload.pop("pack_sha256")
     expected = hashlib.sha256(
         json.dumps(
-            digest_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            digest_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
         ).encode("utf-8")
     ).hexdigest()
     assert first.pack_sha256 == expected
@@ -99,6 +99,28 @@ def test_context_pack_query_file_seed_and_validation(tmp_path: Path) -> None:
         service.build(ref=commits["commit1"], path="pkg/service.py", max_bytes=100)
     journal.close()
 
+
+def test_context_hash_matches_cli_unicode_and_sensitive_paths_are_metadata_only(tmp_path: Path) -> None:
+    cfg, journal, fixture, commits = make_relationship_fixture(tmp_path)
+    write_text(fixture, "pkg/unicode_mod.py", "def żółw():\n    return 'zażółć'\n")
+    write_text(fixture, ".env.production", "SECRET_TOKEN=must-not-be-exported\n")
+    git(fixture, "add", "-A")
+    git(fixture, "commit", "-m", "add unicode and sensitive fixtures")
+    commit = git(fixture, "rev-parse", "HEAD")
+    RepositoryIndexService(cfg, journal).index(commit)
+    RepositoryRelationshipService(cfg, journal).analyze(commit)
+    service = ContextPackService(cfg, journal)
+    unicode_pack = service.build(ref=commit, query="żółw", max_files=3, max_bytes=4096)
+    payload = context_pack_dict(unicode_pack)
+    digest_payload = dict(payload)
+    digest_payload.pop("pack_sha256")
+    expected = hashlib.sha256(json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    assert unicode_pack.pack_sha256 == expected
+    sensitive = service.build(ref=commit, path=".env.production", depth=0, max_files=1, max_bytes=4096)
+    assert sensitive.files[0].omitted_reason == "sensitive_path"
+    assert sensitive.files[0].excerpts == ()
+    assert "must-not-be-exported" not in json.dumps(context_pack_dict(sensitive), sort_keys=True)
+    journal.close()
 
 def test_large_repository_gate_reports_limits_and_bounded_sample(tmp_path: Path) -> None:
     cfg, journal, fixture, commits, service, relationships = _ready(tmp_path)
