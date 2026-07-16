@@ -15,6 +15,7 @@ V3_CHECKSUM = "4dffb2c3e5807cba98d8f5323554e625e4acc58559cc807e2728eab7f07bb9db"
 V4_CHECKSUM = "b19f7ef96b5c9e25ad9cad9c6d2160a667c5c1b5db68d1d0e7accb2f1f2ba3c9"
 V5_CHECKSUM = "9bfc62c82e71ebbf968f6a171eb0b320a4d2510dec158db13a8d940afd315670"
 V6_CHECKSUM = "eaac8a58c752800581d5f02504d7d5b509985fbb2638cb6924f5673828689839"
+V7_CHECKSUM = "3894bf7b5c8e12771148978eb76bf4d712ff1642860757e4b4efb2ee85bcbbbe"
 
 
 def fixed_now() -> str:
@@ -29,12 +30,15 @@ def test_ghb04_v1_through_v6_literal_golden_checksums() -> None:
         (4, "journal_v4_result_outbox", V4_CHECKSUM),
         (5, "journal_v5_service_lifecycle", V5_CHECKSUM),
         (6, "journal_v6_workspace_lifecycle", V6_CHECKSUM),
+        (7, "journal_v7_repository_index", V7_CHECKSUM),
     ]
 
 
 def test_ghb04_empty_and_populated_v2_upgrade_to_v3(tmp_path: Path) -> None:
     empty = Journal.open(tmp_path / "empty.db", now_fn=fixed_now)
-    assert empty._connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,)]
+    assert empty._connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall() == [
+        (1,), (2,), (3,), (4,), (5,), (6,), (7,),
+    ]
     assert {r[0] for r in empty._connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")} == JOURNAL_TABLES
     empty.close()
 
@@ -82,7 +86,11 @@ def test_ghb04_v3_reopen_noop_checksum_mismatch_and_future_version(tmp_path: Pat
 
     future = tmp_path / "future.db"
     journal = Journal.open(future, now_fn=fixed_now)
-    journal._connection.execute("INSERT INTO schema_migrations VALUES (7, 'future', 'x', ?)", (FIXED_NOW,))
+    max_version = journal._connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+    journal._connection.execute(
+        "INSERT INTO schema_migrations VALUES (?, 'future', 'x', ?)",
+        (int(max_version) + 1, FIXED_NOW),
+    )
     journal.close()
     with pytest.raises(BridgeError) as exc:
         Journal.open(future, now_fn=fixed_now)
@@ -90,7 +98,7 @@ def test_ghb04_v3_reopen_noop_checksum_mismatch_and_future_version(tmp_path: Pat
 
 
 def test_ghb04_migration_registry_is_exact() -> None:
-    assert tuple(m.version for m in MIGRATIONS) == (1, 2, 3, 4, 5, 6)
+    assert tuple(m.version for m in MIGRATIONS) == (1, 2, 3, 4, 5, 6, 7)
     assert tuple(m.name for m in MIGRATIONS) == (
         "journal_v1_initial",
         "journal_v2_ingestion",
@@ -98,4 +106,5 @@ def test_ghb04_migration_registry_is_exact() -> None:
         "journal_v4_result_outbox",
         "journal_v5_service_lifecycle",
         "journal_v6_workspace_lifecycle",
+        "journal_v7_repository_index",
     )

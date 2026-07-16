@@ -65,7 +65,7 @@ def test_v5_populated_upgrade(tmp_path: Path) -> None:
     assert journal._conn.execute("SELECT session_id FROM sessions").fetchone()[0] == "s1"
     assert journal._conn.execute("SELECT command_id FROM commands").fetchone()[0] == "c1"
     assert journal._conn.execute("SELECT COUNT(*) FROM service_instances").fetchone()[0] == 0
-    assert journal._conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 6
+    assert journal._conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 7
     journal.close()
 
 

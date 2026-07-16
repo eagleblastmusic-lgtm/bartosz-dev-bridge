@@ -38,7 +38,14 @@ bdb bridge session finalize --config <path> --session-id <uuid>
 bdb bridge workspace status --config <path> --session-id <uuid> [--json]
 bdb bridge workspace preserve --config <path> --session-id <uuid>
 bdb bridge workspace cleanup --config <path> --session-id <uuid> --confirm-session-id <uuid>
+
+bdb bridge repo index --config <path> [--ref HEAD] [--json]
+bdb bridge repo status --config <path> [--ref HEAD] [--json]
+bdb bridge repo files --config <path> [--ref HEAD] [--json]
+bdb bridge repo outline --config <path> --path <posix-path> [--ref HEAD] [--json]
 ```
+
+Indeks repozytorium (GHB1-A) opisuje dokładny commit Git wskazany przez `--ref` w `fixture_repo_path`. Szczegóły: [docs/GHB1A_REPOSITORY_INDEX.md](docs/GHB1A_REPOSITORY_INDEX.md).
 
 Tryb background nie tworzy Windows Service, Scheduled Task ani procesu administracyjnego. Child sam zdobywa platformowy lock i prowadzi graceful lifecycle.
 

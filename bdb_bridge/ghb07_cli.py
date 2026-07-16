@@ -11,6 +11,11 @@ from .instance_lock import InstanceLock
 from .journal import Journal
 from .models import ServiceStatus
 from .protocol import BridgeError, sanitize_diagnostics
+from .repository_index_service import (
+    RepositoryIndexService,
+    file_dict,
+    snapshot_summary_dict,
+)
 from .service_status import ServiceStatusReader
 from .session_finalization import SessionFinalizer
 from .workspace_lifecycle import WorkspaceLifecycleCoordinator
@@ -44,6 +49,18 @@ def _parser() -> argparse.ArgumentParser:
     cleanup.add_argument("--config", required=True)
     cleanup.add_argument("--session-id", required=True)
     cleanup.add_argument("--confirm-session-id", required=True)
+    repo = commands.add_parser("repo")
+    repo_commands = repo.add_subparsers(dest="repo_command", required=True)
+    for name in ("index", "status", "files"):
+        command = repo_commands.add_parser(name)
+        command.add_argument("--config", required=True)
+        command.add_argument("--ref", default="HEAD")
+        command.add_argument("--json", action="store_true")
+    outline = repo_commands.add_parser("outline")
+    outline.add_argument("--config", required=True)
+    outline.add_argument("--ref", default="HEAD")
+    outline.add_argument("--path", required=True)
+    outline.add_argument("--json", action="store_true")
     return parser
 
 
@@ -76,6 +93,10 @@ def _offline(config: BridgeConfig) -> tuple[Journal, InstanceLock]:
 def _error(prefix: str, exc: Exception) -> int:
     _legacy._write_controlled_error(prefix, exc)
     return 1
+
+
+def _print_json(payload: dict[str, object]) -> None:
+    sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
 
 
 def _finalize(config: BridgeConfig, session_id: str) -> int:
@@ -179,9 +200,132 @@ def _cleanup(config: BridgeConfig, session_id: str, confirm: str) -> int:
             lock.release()
 
 
+def _repo_index(config: BridgeConfig, ref: str, output_json: bool) -> int:
+    journal = None
+    lock = None
+    try:
+        journal, lock = _offline(config)
+        outcome = RepositoryIndexService(config, journal).index(ref)
+        payload = {
+            **snapshot_summary_dict(outcome.snapshot),
+            "created": outcome.created,
+            "idempotent": outcome.idempotent,
+        }
+        if output_json:
+            _print_json(payload)
+        else:
+            print(
+                f"Indexed {payload['repository_id']}@{payload['commit_sha'][:12]} "
+                f"files={payload['file_count']} symbols={payload['symbol_count']} "
+                f"idempotent={str(outcome.idempotent).lower()}"
+            )
+        return 0
+    except Exception as exc:
+        return _error("Repository index failed", exc)
+    finally:
+        if journal is not None:
+            journal.close()
+        if lock is not None:
+            lock.release()
+
+
+def _repo_status(config: BridgeConfig, ref: str, output_json: bool) -> int:
+    journal = None
+    lock = None
+    try:
+        journal, lock = _offline(config)
+        status = RepositoryIndexService(config, journal).status(ref)
+        payload: dict[str, object] = {
+            "commit_sha": status.commit_sha,
+            "indexed": status.indexed,
+            "ref": status.ref,
+            "repository_id": status.repository_id,
+            "tree_sha": status.tree_sha,
+        }
+        if status.snapshot is not None:
+            payload["snapshot"] = snapshot_summary_dict(status.snapshot)
+        else:
+            payload["snapshot"] = None
+        if output_json:
+            _print_json(payload)
+        else:
+            print(
+                f"Repository {status.repository_id}@{status.commit_sha[:12]} "
+                f"indexed={str(status.indexed).lower()}"
+            )
+        return 0
+    except Exception as exc:
+        return _error("Repository status failed", exc)
+    finally:
+        if journal is not None:
+            journal.close()
+        if lock is not None:
+            lock.release()
+
+
+def _repo_files(config: BridgeConfig, ref: str, output_json: bool) -> int:
+    journal = None
+    lock = None
+    try:
+        journal, lock = _offline(config)
+        snapshot, files = RepositoryIndexService(config, journal).files(ref)
+        payload = {
+            "commit_sha": snapshot.commit_sha,
+            "files": [file_dict(item) for item in files],
+            "repository_id": snapshot.repository_id,
+            "tree_sha": snapshot.tree_sha,
+        }
+        if output_json:
+            _print_json(payload)
+        else:
+            print(f"Repository files: {len(files)}")
+            for item in files:
+                print(f"- {item.path} ({item.language}, {item.parse_status.value})")
+        return 0
+    except Exception as exc:
+        return _error("Repository files failed", exc)
+    finally:
+        if journal is not None:
+            journal.close()
+        if lock is not None:
+            lock.release()
+
+
+def _repo_outline(config: BridgeConfig, ref: str, path: str, output_json: bool) -> int:
+    journal = None
+    lock = None
+    try:
+        journal, lock = _offline(config)
+        outline = RepositoryIndexService(config, journal).outline(path, ref)
+        payload = {
+            "commit_sha": outline.commit_sha,
+            "file": file_dict(outline.file),
+            "language": outline.language,
+            "parse_diagnostic": outline.parse_diagnostic,
+            "parse_status": outline.parse_status,
+            "path": outline.path,
+            "repository_id": outline.repository_id,
+            "symbols": [node.to_dict() for node in outline.symbols],
+        }
+        if output_json:
+            _print_json(payload)
+        else:
+            print(f"Outline {outline.path}: parse_status={outline.parse_status}")
+            for node in outline.symbols:
+                print(f"- {node.kind} {node.qualified_name}")
+        return 0
+    except Exception as exc:
+        return _error("Repository outline failed", exc)
+    finally:
+        if journal is not None:
+            journal.close()
+        if lock is not None:
+            lock.release()
+
+
 def main() -> None:
     argv = sys.argv[1:]
-    if len(argv) < 2 or argv[0] != "bridge" or argv[1] not in {"session", "workspace"}:
+    if len(argv) < 2 or argv[0] != "bridge" or argv[1] not in {"session", "workspace", "repo"}:
         _ORIGINAL_MAIN()
         return
     args = _parser().parse_args(argv)
@@ -191,12 +335,21 @@ def main() -> None:
         sys.exit(_error("Failed to load config", exc))
     if args.bridge_command == "session":
         code = _finalize(config, args.session_id)
-    elif args.workspace_command == "status":
-        code = _status(config, args.session_id, args.json)
-    elif args.workspace_command == "preserve":
-        code = _preserve(config, args.session_id)
+    elif args.bridge_command == "workspace":
+        if args.workspace_command == "status":
+            code = _status(config, args.session_id, args.json)
+        elif args.workspace_command == "preserve":
+            code = _preserve(config, args.session_id)
+        else:
+            code = _cleanup(config, args.session_id, args.confirm_session_id)
+    elif args.repo_command == "index":
+        code = _repo_index(config, args.ref, args.json)
+    elif args.repo_command == "status":
+        code = _repo_status(config, args.ref, args.json)
+    elif args.repo_command == "files":
+        code = _repo_files(config, args.ref, args.json)
     else:
-        code = _cleanup(config, args.session_id, args.confirm_session_id)
+        code = _repo_outline(config, args.ref, args.path, args.json)
     sys.exit(code)
 
 

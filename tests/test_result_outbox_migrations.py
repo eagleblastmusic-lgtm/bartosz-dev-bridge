@@ -15,6 +15,7 @@ V3 = "4dffb2c3e5807cba98d8f5323554e625e4acc58559cc807e2728eab7f07bb9db"
 V4 = "b19f7ef96b5c9e25ad9cad9c6d2160a667c5c1b5db68d1d0e7accb2f1f2ba3c9"
 V5 = "9bfc62c82e71ebbf968f6a171eb0b320a4d2510dec158db13a8d940afd315670"
 V6 = "eaac8a58c752800581d5f02504d7d5b509985fbb2638cb6924f5673828689839"
+V7 = "3894bf7b5c8e12771148978eb76bf4d712ff1642860757e4b4efb2ee85bcbbbe"
 
 
 def now() -> str:
@@ -29,14 +30,18 @@ def test_v6_registry_and_literal_checksums() -> None:
         (4, "journal_v4_result_outbox", V4),
         (5, "journal_v5_service_lifecycle", V5),
         (6, "journal_v6_workspace_lifecycle", V6),
+        (7, "journal_v7_repository_index", V7),
     ]
     assert "outbox" in JOURNAL_TABLES
     assert "workspace_lifecycle" in JOURNAL_TABLES
+    assert "repository_snapshots" in JOURNAL_TABLES
 
 
 def test_empty_and_populated_v3_upgrade(tmp_path: Path) -> None:
     empty = Journal.open(tmp_path / "empty.db", now_fn=now)
-    assert empty._connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,)]
+    assert empty._connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall() == [
+        (1,), (2,), (3,), (4,), (5,), (6,), (7,),
+    ]
     assert {r[0] for r in empty._connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")} == JOURNAL_TABLES
     empty.close()
 
