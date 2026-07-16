@@ -67,7 +67,7 @@ def test_search_ranking_validation_and_snapshot_only_mode(tmp_path: Path) -> Non
     RepositoryIndexService(cfg, journal).index(commits["commit1"])
     service = RepositoryRelationshipService(cfg, journal)
     exact = service.search(ref=commits["commit1"], query="Child", kind="symbol", limit=20)
-    assert exact[0].name == "Child" and exact[0].rank == 2
+    assert exact[0].name == "Child" and exact[0].rank == 1
     qualified = service.search(ref=commits["commit1"], query="Child.run", kind="symbol", limit=20)
     assert qualified[0].qualified_name == "Child.run" and qualified[0].rank == 1
     paths = service.search(ref=commits["commit1"], query="pkg/service.py", kind="file", limit=20)
