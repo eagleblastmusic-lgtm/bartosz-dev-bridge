@@ -5,7 +5,7 @@ Lokalny Bridge dla ChatGPT Plus i GitHuba, rozwinięty od POC-0 do trwałego, po
 Aktualna faza:
 
 ```text
-GHB-0 — recovery gate closed
+GHB-1 — repository intelligence
 ```
 
 ## Działający zakres
@@ -23,7 +23,9 @@ GHB-0 — recovery gate closed
 - siedmiosesyjna recovery gate A–G z rzeczywistymi restartami;
 - jawne session finalization;
 - persisted `preserve` jako polityka domyślna;
-- bezpieczny, opt-in i crash-recoverable cleanup wyłącznie sesji `COMPLETED`.
+- bezpieczny, opt-in i crash-recoverable cleanup wyłącznie sesji `COMPLETED`;
+- immutable repository snapshots, tracked files, Python symbols i outline;
+- statyczne importy, references, callers, dependency graph i deterministyczne search.
 
 ## CLI
 
@@ -43,9 +45,16 @@ bdb bridge repo index --config <path> [--ref HEAD] [--json]
 bdb bridge repo status --config <path> [--ref HEAD] [--json]
 bdb bridge repo files --config <path> [--ref HEAD] [--json]
 bdb bridge repo outline --config <path> --path <posix-path> [--ref HEAD] [--json]
+bdb bridge repo analyze --config <path> [--ref HEAD] [--json]
+bdb bridge repo search --config <path> [--ref HEAD] --query <text> [--kind all|file|symbol] [--limit 50] [--json]
+bdb bridge repo references --config <path> [--ref HEAD] (--symbol-id <id> | --path <path> --qualified-name <name>) [--direction incoming|outgoing] [--kind <kind>] [--limit 100] [--json]
+bdb bridge repo callers --config <path> [--ref HEAD] (--symbol-id <id> | --path <path> --qualified-name <name>) [--limit 100] [--json]
+bdb bridge repo dependencies --config <path> [--ref HEAD] --path <path> [--direction incoming|outgoing] [--depth 1] [--edge-kind all|import|call|reference] [--max-nodes 200] [--json]
 ```
 
 Indeks repozytorium (GHB1-A) opisuje dokładny commit Git wskazany przez `--ref` w `fixture_repo_path`. Szczegóły: [docs/GHB1A_REPOSITORY_INDEX.md](docs/GHB1A_REPOSITORY_INDEX.md).
+
+Relacje kodu (GHB1-B) są budowane wyłącznie na immutable snapshotach GHB1-A. Szczegóły: [docs/GHB1B_CODE_RELATIONSHIPS.md](docs/GHB1B_CODE_RELATIONSHIPS.md).
 
 Tryb background nie tworzy Windows Service, Scheduled Task ani procesu administracyjnego. Child sam zdobywa platformowy lock i prowadzi graceful lifecycle.
 
@@ -124,7 +133,7 @@ Bridge nie używa `shutil.rmtree`, `Remove-Item -Recurse`, `rmdir /s`, `git rese
 
 ## Granice bezpieczeństwa
 
-GHB-0 nadal nie dodaje:
+GHB-0/GHB-1 nadal nie dodają:
 
 - protocol ACK ani automatycznego `ACKNOWLEDGED`;
 - automatic cleanup lub retention;
@@ -134,7 +143,8 @@ GHB-0 nadal nie dodaje:
 - arbitrary shell lub `shell=True`;
 - wielu workerów i równoległych sesji;
 - HTTP/WebSocket remote control;
-- Hermesa, GicleeApp, Browser Lab, Playwright lub LSP;
+- wykonywania lub importowania kodu analizowanego repozytorium;
+- Hermesa, GicleeApp, Browser Lab, Playwright, LSP ani embeddings;
 - zależności runtime `bdb_bridge → bdb_poc`.
 
 Legacy POC-0A i POC-0B pozostają regresjami przez `poc_bridge.py` oraz `bdb_poc.PocBridge`.

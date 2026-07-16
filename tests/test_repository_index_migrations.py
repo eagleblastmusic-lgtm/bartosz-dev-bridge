@@ -14,8 +14,8 @@ V7_CHECKSUM = "639b9d4eaa0e142fc958c9fa0a1a03a2421802a75ba963b84c3b835d28e30cf8"
 
 
 def test_v7_registry_and_literal_checksum() -> None:
-    assert [m.version for m in MIGRATIONS] == [1, 2, 3, 4, 5, 6, 7]
-    assert MIGRATIONS[-1].name == "journal_v7_repository_index"
+    assert [m.version for m in MIGRATIONS] == list(range(1, 9))
+    assert MIGRATIONS[6].name == "journal_v7_repository_index"
     assert MIGRATION_V7.checksum() == V7_CHECKSUM
     assert MIGRATION_V7.statements == MIGRATION_V7_STATEMENTS
     assert {
@@ -62,11 +62,11 @@ def _make_v6(path: Path, *, populated: bool) -> None:
 
 
 @pytest.mark.parametrize("populated", [False, True])
-def test_v6_upgrade_to_v7_preserves_data(tmp_path: Path, populated: bool) -> None:
+def test_v6_upgrade_preserves_data(tmp_path: Path, populated: bool) -> None:
     path = tmp_path / "v6.db"
     _make_v6(path, populated=populated)
     journal = Journal.open(path, now_fn=lambda: NOW)
-    assert journal._connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 7
+    assert journal._connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8
     if populated:
         assert journal.get_workspace("018f3f66-6cb3-4f66-9f2e-3d7647d1b707") is not None
     journal.close()
@@ -93,11 +93,11 @@ def test_v7_statement_failure_rolls_back_only_v7(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_future_version_rejected_after_v7(tmp_path: Path) -> None:
+def test_future_version_rejected_after_v8(tmp_path: Path) -> None:
     path = tmp_path / "future.db"
     journal = Journal.open(path, now_fn=lambda: NOW)
     journal._connection.execute(
-        "INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(8,'future','x',?)",
+        "INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(9,'future','x',?)",
         (NOW,),
     )
     journal._connection.commit()
