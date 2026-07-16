@@ -59,6 +59,7 @@ def test_empty_db_applies_all_migrations(tmp_path: Path) -> None:
             "repository_dependency_edges",
             "multi_file_patch_checkpoints",
             "multi_file_patch_checkpoint_paths",
+            "multi_file_patch_profile_runs",
         }
         migrations = journal._connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version"
@@ -73,6 +74,7 @@ def test_empty_db_applies_all_migrations(tmp_path: Path) -> None:
             (7, "journal_v7_repository_index"),
             (8, "journal_v8_code_relationships"),
             (9, "journal_v9_multi_file_patch_recovery"),
+            (10, "journal_v10_multi_file_patch_runtime"),
         ]
     finally:
         journal.close()
@@ -105,7 +107,7 @@ def test_reopen_is_noop(tmp_path: Path) -> None:
     journal = Journal.open(path, now_fn=fixed_now)
     try:
         rows = journal._connection.execute("SELECT version FROM schema_migrations").fetchall()
-        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
+        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
     finally:
         journal.close()
 
@@ -285,7 +287,7 @@ def test_concurrent_open_empty_db_creates_schema_once(tmp_path: Path) -> None:
     conn = sqlite3.connect(path)
     versions = conn.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
     conn.close()
-    assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
+    assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
 
 
 def test_journal_open_closes_connection_on_migration_failure(tmp_path: Path) -> None:
@@ -340,6 +342,7 @@ def test_upgrade_existing_v1_database_to_v2(tmp_path: Path) -> None:
             (7, "journal_v7_repository_index"),
             (8, "journal_v8_code_relationships"),
             (9, "journal_v9_multi_file_patch_recovery"),
+            (10, "journal_v10_multi_file_patch_runtime"),
         ]
         assert journal._connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='ingestion_sources'"
@@ -407,6 +410,7 @@ def test_upgrade_existing_v1_database_to_v2_with_data(tmp_path: Path) -> None:
             (7, "journal_v7_repository_index"),
             (8, "journal_v8_code_relationships"),
             (9, "journal_v9_multi_file_patch_recovery"),
+            (10, "journal_v10_multi_file_patch_runtime"),
         ]
 
         v2_sessions = journal._connection.execute("SELECT session_id, repository_id, base_sha, state, created_at, updated_at FROM sessions ORDER BY session_id").fetchall()

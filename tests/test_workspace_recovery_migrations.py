@@ -18,6 +18,7 @@ V6_CHECKSUM = "eaac8a58c752800581d5f02504d7d5b509985fbb2638cb6924f5673828689839"
 V7_CHECKSUM = "639b9d4eaa0e142fc958c9fa0a1a03a2421802a75ba963b84c3b835d28e30cf8"
 V8_CHECKSUM = "cbc8c9c6b5907c1f4d82cc9f95b095d8cceff4ef4aaca454f883cd3bb2ad55b6"
 V9_CHECKSUM = "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3"
+V10_CHECKSUM = "6ba6a3338f95ff66679025a177c7a2d95adb75901c22f724d3bddf89ce5fd0fe"
 
 
 def fixed_now() -> str:
@@ -35,13 +36,14 @@ def test_ghb04_v1_through_v6_literal_golden_checksums() -> None:
         (7, "journal_v7_repository_index", V7_CHECKSUM),
         (8, "journal_v8_code_relationships", V8_CHECKSUM),
         (9, "journal_v9_multi_file_patch_recovery", V9_CHECKSUM),
+        (10, "journal_v10_multi_file_patch_runtime", V10_CHECKSUM),
     ]
 
 
 def test_ghb04_empty_and_populated_v2_upgrade_to_v3(tmp_path: Path) -> None:
     empty = Journal.open(tmp_path / "empty.db", now_fn=fixed_now)
     assert empty._connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall() == [
-        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,),
+        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,),
     ]
     assert {r[0] for r in empty._connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")} == JOURNAL_TABLES
     empty.close()
@@ -102,7 +104,7 @@ def test_ghb04_v3_reopen_noop_checksum_mismatch_and_future_version(tmp_path: Pat
 
 
 def test_ghb04_migration_registry_is_exact() -> None:
-    assert tuple(m.version for m in MIGRATIONS) == (1, 2, 3, 4, 5, 6, 7, 8, 9)
+    assert tuple(m.version for m in MIGRATIONS) == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
     assert tuple(m.name for m in MIGRATIONS) == (
         "journal_v1_initial",
         "journal_v2_ingestion",
@@ -113,4 +115,5 @@ def test_ghb04_migration_registry_is_exact() -> None:
         "journal_v7_repository_index",
         "journal_v8_code_relationships",
         "journal_v9_multi_file_patch_recovery",
+        "journal_v10_multi_file_patch_runtime",
     )

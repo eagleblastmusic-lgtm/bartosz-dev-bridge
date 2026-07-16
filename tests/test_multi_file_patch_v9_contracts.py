@@ -8,7 +8,7 @@ V9_CHECKSUM = "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3"
 
 
 def test_v9_registry_name_statements_and_literal_checksum() -> None:
-    assert tuple(migration.version for migration in MIGRATIONS) == tuple(range(1, 10))
+    assert tuple(migration.version for migration in MIGRATIONS[:9]) == tuple(range(1, 10))
     assert MIGRATIONS[8] is MIGRATION_V9
     assert MIGRATION_V9.name == "journal_v9_multi_file_patch_recovery"
     assert MIGRATION_V9.statements == MIGRATION_V9_STATEMENTS
