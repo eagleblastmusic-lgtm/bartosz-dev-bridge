@@ -1,6 +1,8 @@
 name: Bridge CI
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [gpt/ghb2-d-final-editing-gate]
 
