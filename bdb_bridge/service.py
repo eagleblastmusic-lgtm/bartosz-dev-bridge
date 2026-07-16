@@ -79,6 +79,15 @@ class BridgeService:
             return True
         return False
 
+    def _claim_next(self, instance_id: str):
+        try:
+            return self.scheduler.claim_next(service_instance_id=instance_id)
+        except TypeError as exc:
+            message = str(exc)
+            if "unexpected keyword argument 'service_instance_id'" not in message:
+                raise
+            return self.scheduler.claim_next()
+
     def run_cycle(self, instance_id: str) -> BridgeCycleReport:
         t0 = time.perf_counter()
 
@@ -148,7 +157,7 @@ class BridgeService:
         has_blocking = self.journal.has_blocking_ingestion_issues()
 
         if rec_cmd is None and not has_blocking:
-            cmd = self.scheduler.claim_next(service_instance_id=instance_id)
+            cmd = self._claim_next(instance_id)
             if cmd is not None:
                 self._fault("AFTER_EXECUTE_CLAIM")
                 try:
