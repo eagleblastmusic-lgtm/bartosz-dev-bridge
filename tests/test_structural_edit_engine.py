@@ -87,7 +87,7 @@ def test_structural_parser_is_canonical_and_deterministic(document, kind, source
     "document",
     [
         {**create_document("new.bin", b"new"), "extra": True},
-        {**create_document("new.bin", b"new"), "content_base64": "bmV3"},
+        {**create_document("new.bin", b"new"), "content_base64": "bmV3=="},
         {**create_document("new.bin", b"new"), "content_sha256": "sha256:" + "0" * 64},
         delete_document("../escape.bin", b"old"),
         delete_document(".env.production", b"secret"),
@@ -181,6 +181,11 @@ def test_engine_rejects_missing_parent_large_source_and_tampered_plan(tmp_path: 
         edit.apply(tampered)
     assert mismatch.value.code == BridgeErrorCode.INVALID_PAYLOAD
     assert not (root / "safe.bin").exists()
+
+    invalid_operation = replace(operation, operation_sha256="sha256:" + "0" * 64)
+    with pytest.raises(BridgeError) as invalid:
+        edit.plan(invalid_operation)
+    assert invalid.value.code == BridgeErrorCode.INVALID_PAYLOAD
 
 
 def test_engine_rejects_existing_relocation_destination_and_temp_collision(tmp_path: Path) -> None:
