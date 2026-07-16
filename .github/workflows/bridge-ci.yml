@@ -7,83 +7,38 @@ on:
     branches: [gpt/ghb2-d-final-editing-gate]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  update-v10-golden-contracts:
-    name: Update Journal v10 golden contracts
+  v10-contracts:
+    name: Ubuntu / Python 3.12 / v10 contracts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: gpt/ghb2-d-final-editing-gate
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Apply exact v10 updates
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Compile migration and CLI surfaces
         run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          V10 = "6ba6a3338f95ff66679025a177c7a2d95adb75901c22f724d3bddf89ce5fd0fe"
-
-          def replace(path: str, old: str, new: str, expected: int = 1) -> None:
-              file = Path(path)
-              text = file.read_text(encoding="utf-8")
-              count = text.count(old)
-              if count != expected:
-                  raise SystemExit(f"{path}: expected {expected}, found {count}: {old!r}")
-              file.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
-
-          result_test = Path("tests/test_result_outbox_migrations.py").read_text(encoding="utf-8")
-          if f'V10 = "{V10}"' in result_test:
-              print("Journal v10 golden contracts are already updated")
-              raise SystemExit(0)
-
-          replace("tests/test_journal_migrations.py", '            "multi_file_patch_checkpoint_paths",\n', '            "multi_file_patch_checkpoint_paths",\n            "multi_file_patch_profile_runs",\n')
-          replace("tests/test_journal_migrations.py", '            (9, "journal_v9_multi_file_patch_recovery"),\n', '            (9, "journal_v9_multi_file_patch_recovery"),\n            (10, "journal_v10_multi_file_patch_runtime"),\n', 3)
-          replace("tests/test_journal_migrations.py", '[(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]', '[(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]', 2)
-
-          replace("tests/test_result_outbox_migrations.py", 'V9 = "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3"\n', f'V9 = "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3"\nV10 = "{V10}"\n')
-          replace("tests/test_result_outbox_migrations.py", '        (9, "journal_v9_multi_file_patch_recovery", V9),\n', '        (9, "journal_v9_multi_file_patch_recovery", V9),\n        (10, "journal_v10_multi_file_patch_runtime", V10),\n')
-          replace("tests/test_result_outbox_migrations.py", '        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,),\n', '        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,),\n')
-
-          replace("tests/test_service_lifecycle_migrations.py", 'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 9', 'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10')
-
-          replace("tests/test_workspace_recovery_migrations.py", 'V9_CHECKSUM = "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3"\n', f'V9_CHECKSUM = "ff7019381e0c16588fc4871d0041bd44d08a74ee2dfe3f1387274f8715be3af3"\nV10_CHECKSUM = "{V10}"\n')
-          replace("tests/test_workspace_recovery_migrations.py", '        (9, "journal_v9_multi_file_patch_recovery", V9_CHECKSUM),\n', '        (9, "journal_v9_multi_file_patch_recovery", V9_CHECKSUM),\n        (10, "journal_v10_multi_file_patch_runtime", V10_CHECKSUM),\n')
-          replace("tests/test_workspace_recovery_migrations.py", '        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,),\n', '        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,),\n')
-          replace("tests/test_workspace_recovery_migrations.py", '== (1, 2, 3, 4, 5, 6, 7, 8, 9)', '== (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)')
-          replace("tests/test_workspace_recovery_migrations.py", '        "journal_v9_multi_file_patch_recovery",\n', '        "journal_v9_multi_file_patch_recovery",\n        "journal_v10_multi_file_patch_runtime",\n')
-
-          replace("tests/test_repository_index_migrations.py", 'list(range(1, 10))', 'list(range(1, 11))')
-          replace("tests/test_repository_index_migrations.py", 'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 9', 'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10')
-          replace("tests/test_repository_index_migrations.py", "VALUES(10,'future','x',?)", "VALUES(11,'future','x',?)")
-
-          replace("tests/test_code_relationship_migrations.py", 'list(range(1, 10))', 'list(range(1, 11))')
-          replace("tests/test_code_relationship_migrations.py", 'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 9', 'SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10')
-          replace("tests/test_code_relationship_migrations.py", "VALUES(10,'future','x',?)", "VALUES(11,'future','x',?)")
-
-          replace("tests/test_multi_file_patch_v9_contracts.py", '    assert tuple(migration.version for migration in MIGRATIONS) == tuple(range(1, 10))\n', '    assert tuple(migration.version for migration in MIGRATIONS[:9]) == tuple(range(1, 10))\n')
-          replace("bdb_bridge/__init__.py", 'from .ghb07_cli import install_cli\ninstall_cli()\n', 'from .ghb07_cli import install_cli\ninstall_cli()\nfrom .multi_file_patch_cli import install_multi_file_patch_cli\ninstall_multi_file_patch_cli()\n')
-          Path("v10-golden.changed").write_text("1", encoding="ascii")
-          PY
-      - name: Validate and commit exact changes
+          python -m py_compile bdb_bridge/multi_file_patch_runtime_migration.py
+          python -m py_compile bdb_bridge/multi_file_patch_cli.py
+          python -m py_compile tests/test_multi_file_patch_v10_contracts.py
+      - name: Run v10 migration contracts
         run: |
-          if [ ! -f v10-golden.changed ]; then exit 0; fi
-          python -m py_compile bdb_bridge/__init__.py bdb_bridge/multi_file_patch_cli.py tests/test_multi_file_patch_v10_contracts.py
-          git diff --check
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- \
-            bdb_bridge/__init__.py \
+          python -m pytest -q \
             tests/test_journal_migrations.py \
             tests/test_result_outbox_migrations.py \
             tests/test_service_lifecycle_migrations.py \
             tests/test_workspace_recovery_migrations.py \
+            tests/test_workspace_lifecycle_migrations.py \
             tests/test_repository_index_migrations.py \
             tests/test_code_relationship_migrations.py \
-            tests/test_multi_file_patch_v9_contracts.py
-          git commit -m "test(journal): freeze Journal v10 contracts"
-          git push origin HEAD:gpt/ghb2-d-final-editing-gate
+            tests/test_multi_file_patch_v9_contracts.py \
+            tests/test_multi_file_patch_v10_contracts.py
+      - name: Check whitespace
+        run: git diff --check ec22ae6440a0343306f11212b924bc84ce27edc2...HEAD
