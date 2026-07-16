@@ -92,6 +92,16 @@ Po zielonym lokalnym POC można uruchomić trwały, zachowywany przebieg poza ch
 
 Pilot uruchamia prawdziwy proces `bdb`, osobne repo źródłowe, osobny bare remote Git, finalny `multi_file_patch`, profil `poc_pytest`, publikację wyniku i graceful stop. Pozostawia worktree, Journal, logi i `pilot-report.json`; nie dotyka repozytoriów biznesowych ani `bartosz-dev-poc-control`. Szczegóły: [docs/PERSISTENT_OPERATOR_PILOT.md](docs/PERSISTENT_OPERATOR_PILOT.md).
 
+## Prywatny transport GitHub
+
+Po zielonym trwałym pilocie można uruchomić Bridge w tle przeciwko osobnemu prywatnemu repozytorium `commands/results`:
+
+```powershell
+.\scripts\Invoke-BDBGitHubPilot.ps1
+```
+
+Bootstrap tworzy wyłącznie sztuczne repo źródłowe, klonuje prywatny kanał GitHub, generuje kanoniczny manifest i `multi_file_patch`, zapisuje ich dokładne ścieżki oraz uruchamia zwykły proces użytkownika w stanie `RUNNING`. Komenda jest następnie dostarczana przez konektor GitHub, a wynik odczytywany z gałęzi `results`. Szczegóły: [docs/GITHUB_REMOTE_PILOT.md](docs/GITHUB_REMOTE_PILOT.md).
+
 Tryb background nie tworzy Windows Service, Scheduled Task ani procesu administracyjnego. Child sam zdobywa platformowy lock i prowadzi graceful lifecycle.
 
 ## Kolejność service loop
@@ -194,4 +204,5 @@ Dokumentacja operatorska:
 - `docs/GHB2C_DURABLE_BATCH_RECOVERY.md`;
 - `docs/GHB2D_FINAL_EDITING_GATE.md`;
 - `docs/LOCAL_E2E_POC.md`;
-- `docs/PERSISTENT_OPERATOR_PILOT.md`.
+- `docs/PERSISTENT_OPERATOR_PILOT.md`;
+- `docs/GITHUB_REMOTE_PILOT.md`.

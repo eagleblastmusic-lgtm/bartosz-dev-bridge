@@ -46,7 +46,8 @@ jobs:
             "scripts/run_poc_bridge.ps1",
             "scripts/Invoke-GHB0RecoveryGate.ps1",
             "scripts/Invoke-BDBLocalE2E.ps1",
-            "scripts/Invoke-BDBPersistentPilot.ps1"
+            "scripts/Invoke-BDBPersistentPilot.ps1",
+            "scripts/Invoke-BDBGitHubPilot.ps1"
           )
           foreach ($script in $scripts) {
             $tokens = $null
@@ -65,6 +66,7 @@ jobs:
         run: |
           python -m py_compile poc_bridge.py
           python -m py_compile scripts/run_persistent_pilot.py
+          python -m py_compile scripts/prepare_github_pilot.py
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
       - name: Run tests
@@ -79,3 +81,33 @@ jobs:
         run: |
           $root = Join-Path $env:RUNNER_TEMP "bdb-persistent-pilot"
           .\scripts\Invoke-BDBPersistentPilot.ps1 -Python (Get-Command python).Source -Root $root
+      - name: Prepare private GitHub pilot smoke
+        if: runner.os == 'Windows' && matrix.python-version == '3.14'
+        shell: powershell
+        run: |
+          $remote = Join-Path $env:RUNNER_TEMP "github-pilot-control.git"
+          $seed = Join-Path $env:RUNNER_TEMP "github-pilot-seed"
+          $root = Join-Path $env:RUNNER_TEMP "bdb-github-pilot"
+          git init --bare $remote
+          git clone $remote $seed
+          git -C $seed config user.name "CI Pilot"
+          git -C $seed config user.email "ci@example.invalid"
+          "seed" | Set-Content -Path (Join-Path $seed "README.md") -Encoding utf8
+          git -C $seed add -- README.md
+          git -C $seed commit -m "seed"
+          git -C $seed branch -M main
+          git -C $seed push origin main
+          git -C $seed switch -c commands
+          git -C $seed push origin commands
+          git -C $seed switch main
+          git -C $seed switch -c results
+          git -C $seed push origin results
+          .\scripts\Invoke-BDBGitHubPilot.ps1 `
+            -Python (Get-Command python).Source `
+            -ControlUrl $remote `
+            -Root $root `
+            -PrepareOnly
+          $report = Get-Content (Join-Path $root "github-pilot-report.json") -Raw | ConvertFrom-Json
+          if ($report.status -ne "prepared") {
+            throw "GitHub pilot preparation did not finish in prepared state"
+          }
