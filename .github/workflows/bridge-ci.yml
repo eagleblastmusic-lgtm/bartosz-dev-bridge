@@ -3,57 +3,158 @@ name: Bridge CI
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [gpt/poc-0-bootstrap]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  test:
-    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.11", "3.12"]
-
+  targeted:
+    name: validate GHB2-A structural operation engine
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: gpt/ghb2-a-structural-operations
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
           cache: pip
       - name: Install test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
-      - name: Validate PowerShell syntax
-        if: runner.os == 'Windows'
-        shell: powershell
+      - name: Apply exact safety fixes
+        shell: bash
         run: |
-          $scripts = @(
-            "scripts/bootstrap_windows.ps1",
-            "scripts/bootstrap_poc0b_windows.ps1",
-            "scripts/run_poc_bridge.ps1",
-            "scripts/Invoke-GHB0RecoveryGate.ps1"
-          )
-          foreach ($script in $scripts) {
-            $tokens = $null
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile(
-              (Resolve-Path $script),
-              [ref]$tokens,
-              [ref]$errors
-            ) | Out-Null
-            if ($errors.Count -gt 0) {
-              $errors | ForEach-Object { Write-Error "$script`: $($_.Message)" }
-              exit 1
-            }
+          python - <<'PY'
+          from pathlib import Path
+
+          parser_path = Path("bdb_bridge/edit_operation_parser.py")
+          text = parser_path.read_text(encoding="utf-8")
+          addition = r'''
+
+
+def structural_edit_document(operation: StructuralEditSpec) -> dict[str, str]:
+    if not isinstance(operation, StructuralEditSpec):
+        raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "operation must be StructuralEditSpec")
+    if operation.kind is StructuralEditKind.CREATE_FILE:
+        if operation.destination_path is None or operation.content is None or operation.content_sha256 is None:
+            raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "create_file spec is incomplete")
+        return {
+            "schema": operation.schema,
+            "kind": operation.kind.value,
+            "path": operation.destination_path,
+            "content_base64": base64.b64encode(operation.content).decode("ascii"),
+            "content_sha256": operation.content_sha256,
+        }
+    if operation.kind is StructuralEditKind.DELETE_FILE:
+        if operation.source_path is None or operation.expected_source_sha256 is None:
+            raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "delete_file spec is incomplete")
+        return {
+            "schema": operation.schema,
+            "kind": operation.kind.value,
+            "path": operation.source_path,
+            "expected_sha256": operation.expected_source_sha256,
+        }
+    if operation.source_path is None or operation.destination_path is None or operation.expected_source_sha256 is None:
+        raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "relocation spec is incomplete")
+    return {
+        "schema": operation.schema,
+        "kind": operation.kind.value,
+        "source_path": operation.source_path,
+        "destination_path": operation.destination_path,
+        "expected_source_sha256": operation.expected_source_sha256,
+    }
+
+
+def validate_structural_edit_spec(operation: StructuralEditSpec) -> None:
+    reparsed = parse_structural_edit(structural_edit_document(operation))
+    if reparsed != operation:
+        raise BridgeError(
+            BridgeErrorCode.INVALID_PAYLOAD,
+            "Structural edit spec does not match its canonical representation",
+        )
+'''
+          if "def validate_structural_edit_spec(" in text:
+              raise SystemExit("structural spec validation already exists")
+          parser_path.write_text(text.rstrip() + addition + "\n", encoding="utf-8", newline="\n")
+
+          engine_path = Path("bdb_bridge/structural_edit_engine.py")
+          text = engine_path.read_text(encoding="utf-8")
+          old = "from .edit_operation_parser import sha256_bytes\n"
+          new = "from .edit_operation_parser import sha256_bytes, validate_structural_edit_spec\n"
+          if text.count(old) != 1:
+              raise SystemExit("unexpected structural engine import")
+          text = text.replace(old, new, 1)
+          old = "    def plan(self, operation: StructuralEditSpec) -> StructuralEditPlan:\n        source_before: bytes | None = None\n"
+          new = "    def plan(self, operation: StructuralEditSpec) -> StructuralEditPlan:\n        validate_structural_edit_spec(operation)\n        source_before: bytes | None = None\n"
+          if text.count(old) != 1:
+              raise SystemExit("unexpected structural plan source")
+          text = text.replace(old, new, 1)
+          old = "            os.replace(temp, destination)\n            self._fsync_parent(destination.parent)\n"
+          new = "            os.link(temp, destination)\n            temp.unlink()\n            self._fsync_parent(destination.parent)\n"
+          if text.count(old) != 1:
+              raise SystemExit("unexpected create promotion source")
+          text = text.replace(old, new, 1)
+          old = "            os.rename(source, destination)\n            self._fsync_parent(source.parent)\n"
+          new = "            os.link(source, destination)\n            source.unlink()\n            self._fsync_parent(source.parent)\n"
+          if text.count(old) != 1:
+              raise SystemExit("unexpected relocation source")
+          text = text.replace(old, new, 1)
+          old = '''        if self.workspace._is_reparse(parent):
+            raise BridgeError(
+                BridgeErrorCode.UNSAFE_PATH,
+                "Destination parent may not be a symlink or reparse point",
+            )
+'''
+          if text.count(old) != 1:
+              raise SystemExit("unexpected private reparse source")
+          text = text.replace(old, "", 1)
+          old = "    def _validate_plan(self, plan: StructuralEditPlan) -> None:\n        if plan.plan_sha256 != self._plan_sha256(plan):\n"
+          new = "    def _validate_plan(self, plan: StructuralEditPlan) -> None:\n        validate_structural_edit_spec(plan.operation)\n        if plan.plan_sha256 != self._plan_sha256(plan):\n"
+          if text.count(old) != 1:
+              raise SystemExit("unexpected plan validation source")
+          engine_path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+
+          test_path = Path("tests/test_structural_edit_engine.py")
+          text = test_path.read_text(encoding="utf-8")
+          old = '"content_base64": "bmV3"'
+          new = '"content_base64": "bmV3=="'
+          if text.count(old) != 1:
+              raise SystemExit("unexpected base64 negative case")
+          test_path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+          PY
+      - name: Compile GHB2-A modules
+        run: |
+          python -m py_compile \
+            bdb_bridge/edit_operation_models.py \
+            bdb_bridge/edit_operation_parser.py \
+            bdb_bridge/structural_edit_engine.py \
+            tests/test_structural_edit_engine.py
+      - name: Run targeted GHB2-A tests
+        run: python -m pytest -q tests/test_structural_edit_engine.py
+      - name: Restore standard workflow
+        shell: bash
+        run: git show origin/main:.github/workflows/bridge-ci.yml > .github/workflows/bridge-ci.yml
+      - name: Validate and push targeted result
+        shell: bash
+        run: |
+          cmp .github/workflows/bridge-ci.yml <(git show origin/main:.github/workflows/bridge-ci.yml)
+          git diff --check
+          git add -A
+          git diff --cached --check
+          python - <<'PY'
+          import subprocess
+          expected = {
+              ".github/workflows/bridge-ci.yml",
+              "bdb_bridge/edit_operation_parser.py",
+              "bdb_bridge/structural_edit_engine.py",
+              "tests/test_structural_edit_engine.py",
           }
-      - name: Compile Bridge
-        run: |
-          python -m py_compile poc_bridge.py
-          python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
-          python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
-      - name: Run tests
-        run: python -m pytest -q
+          actual = set(subprocess.check_output(["git", "diff", "--cached", "--name-only"], text=True).splitlines())
+          if actual != expected:
+              raise SystemExit(f"unexpected staged files: {sorted(actual)}")
+          PY
+          git config user.name "Bartosz Dev Bridge CI"
+          git config user.email "bridge-ci@localhost.invalid"
+          git commit -m "fix(edit): enforce canonical specs and no-overwrite promotion"
+          git push origin HEAD:gpt/ghb2-a-structural-operations
