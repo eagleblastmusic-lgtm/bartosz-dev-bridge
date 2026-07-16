@@ -44,7 +44,8 @@ jobs:
             "scripts/bootstrap_windows.ps1",
             "scripts/bootstrap_poc0b_windows.ps1",
             "scripts/run_poc_bridge.ps1",
-            "scripts/Invoke-GHB0RecoveryGate.ps1"
+            "scripts/Invoke-GHB0RecoveryGate.ps1",
+            "scripts/Invoke-BDBLocalE2E.ps1"
           )
           foreach ($script in $scripts) {
             $tokens = $null
