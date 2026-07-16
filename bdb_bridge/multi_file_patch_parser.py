@@ -4,7 +4,12 @@ import base64
 import binascii
 from typing import Any
 
-from .edit_operation_models import EDIT_OPERATION_SCHEMA, StructuralEditKind, StructuralEditSpec
+from .edit_operation_models import (
+    EDIT_OPERATION_SCHEMA,
+    MAX_STRUCTURAL_CONTENT_BYTES,
+    StructuralEditKind,
+    StructuralEditSpec,
+)
 from .edit_operation_parser import (
     is_sensitive_edit_path,
     parse_structural_edit,
@@ -68,6 +73,11 @@ def _decode_content(document: dict[str, Any]) -> tuple[bytes, str]:
         raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "content_base64 is not canonical base64") from exc
     if base64.b64encode(content).decode("ascii") != encoded:
         raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "content_base64 has noncanonical padding")
+    if len(content) > MAX_STRUCTURAL_CONTENT_BYTES:
+        raise BridgeError(
+            BridgeErrorCode.POLICY_DENIED,
+            f"Replacement content exceeds {MAX_STRUCTURAL_CONTENT_BYTES} bytes",
+        )
     expected = _digest(document, "content_sha256")
     if sha256_bytes(content) != expected:
         raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "content_sha256 does not match content")
