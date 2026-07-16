@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,14 +40,15 @@ class MultiFilePatchPlanner:
     def plan(self, patch: MultiFilePatchSpec) -> MultiFilePatchPlan:
         validate_multi_file_patch_spec(patch)
         states: dict[str, _VirtualState] = {}
+        path_identities: dict[str, str] = {}
         for index, operation in enumerate(patch.operations):
             if isinstance(operation, FileReplacementSpec):
-                state = self._state(states, operation.path, "replace", index)
+                state = self._state(states, path_identities, operation.path, "replace", index)
                 self._require_present(state, operation.path)
                 self._require_hash(state.current, operation.expected_sha256, operation.path)
                 state.current = operation.content
                 continue
-            self._simulate_structural(states, operation, index)
+            self._simulate_structural(states, path_identities, operation, index)
 
         paths = tuple(self._planned_state(state) for _, state in sorted(states.items()))
         changed_paths = tuple(
@@ -85,30 +87,20 @@ class MultiFilePatchPlanner:
         self._validate_plan_shape(plan)
         if plan.plan_sha256 != self._plan_sha256(plan):
             raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file plan hash mismatch")
-        for item in plan.paths:
-            resolved = self.workspace.resolve_allowed_path(item.path)
-            if item.before_exists:
-                if not resolved.is_file() or resolved.is_symlink():
-                    raise BridgeError(
-                        BridgeErrorCode.STATE_MISMATCH,
-                        f"Planned source disappeared or changed type: {item.path}",
-                    )
-                actual = self._read_bounded(resolved, item.path)
-                if actual != item.before:
-                    raise BridgeError(
-                        BridgeErrorCode.STATE_MISMATCH,
-                        f"Planned source bytes changed: {item.path}",
-                    )
-            elif resolved.exists() or resolved.is_symlink():
-                raise BridgeError(
-                    BridgeErrorCode.STATE_MISMATCH,
-                    f"Planned absent path appeared: {item.path}",
-                )
+        expected = self.plan(plan.patch)
+        if expected != plan:
+            raise BridgeError(
+                BridgeErrorCode.INVALID_PAYLOAD,
+                "Multi-file plan differs from the canonical workspace replan",
+            )
 
     def _validate_plan_shape(self, plan: MultiFilePatchPlan) -> None:
         paths = tuple(item.path for item in plan.paths)
         if paths != tuple(sorted(paths)) or len(paths) != len(set(paths)):
             raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file plan paths are not canonical")
+        identities = [_path_identity(path) for path in paths]
+        if len(identities) != len(set(identities)):
+            raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file plan contains path aliases")
         if plan.touched_paths != paths:
             raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Multi-file touched paths mismatch")
         changed: list[str] = []
@@ -145,20 +137,28 @@ class MultiFilePatchPlanner:
     def _simulate_structural(
         self,
         states: dict[str, _VirtualState],
+        path_identities: dict[str, str],
         operation: StructuralEditSpec,
         index: int,
     ) -> None:
         if operation.kind is StructuralEditKind.CREATE_FILE:
             assert operation.destination_path is not None and operation.content is not None
             destination = self._state(
-                states, operation.destination_path, "create-destination", index, destination=True
+                states,
+                path_identities,
+                operation.destination_path,
+                "create-destination",
+                index,
+                destination=True,
             )
             self._require_absent(destination, operation.destination_path)
             destination.current = operation.content
             return
         if operation.kind is StructuralEditKind.DELETE_FILE:
             assert operation.source_path is not None and operation.expected_source_sha256 is not None
-            source = self._state(states, operation.source_path, "delete-source", index)
+            source = self._state(
+                states, path_identities, operation.source_path, "delete-source", index
+            )
             self._require_present(source, operation.source_path)
             self._require_hash(source.current, operation.expected_source_sha256, operation.source_path)
             source.current = None
@@ -168,9 +168,16 @@ class MultiFilePatchPlanner:
             and operation.destination_path is not None
             and operation.expected_source_sha256 is not None
         )
-        source = self._state(states, operation.source_path, "relocation-source", index)
+        source = self._state(
+            states, path_identities, operation.source_path, "relocation-source", index
+        )
         destination = self._state(
-            states, operation.destination_path, "relocation-destination", index, destination=True
+            states,
+            path_identities,
+            operation.destination_path,
+            "relocation-destination",
+            index,
+            destination=True,
         )
         self._require_present(source, operation.source_path)
         self._require_hash(source.current, operation.expected_source_sha256, operation.source_path)
@@ -181,6 +188,7 @@ class MultiFilePatchPlanner:
     def _state(
         self,
         states: dict[str, _VirtualState],
+        path_identities: dict[str, str],
         path: str,
         role: str,
         index: int,
@@ -194,6 +202,14 @@ class MultiFilePatchPlanner:
                     BridgeErrorCode.POLICY_DENIED,
                     f"Multi-file patch exceeds {MAX_BATCH_PATHS} unique paths",
                 )
+            identity = _path_identity(path)
+            owner = path_identities.get(identity)
+            if owner is not None and owner != path:
+                raise BridgeError(
+                    BridgeErrorCode.INVALID_PAYLOAD,
+                    f"Multi-file paths alias after case/Unicode normalization: {owner} and {path}",
+                )
+            path_identities[identity] = path
             resolved = self.workspace.resolve_allowed_path(path)
             if destination and not resolved.parent.is_dir():
                 raise BridgeError(
@@ -300,3 +316,7 @@ class MultiFilePatchPlanner:
 
     def _plan_sha256(self, plan: MultiFilePatchPlan) -> str:
         return sha256_bytes(canonical_json(self._plan_payload(plan)).encode("utf-8"))
+
+
+def _path_identity(path: str) -> str:
+    return unicodedata.normalize("NFC", path).casefold()
