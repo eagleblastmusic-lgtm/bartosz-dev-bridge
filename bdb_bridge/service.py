@@ -148,7 +148,7 @@ class BridgeService:
         has_blocking = self.journal.has_blocking_ingestion_issues()
 
         if rec_cmd is None and not has_blocking:
-            cmd = self.scheduler.claim_next()
+            cmd = self.scheduler.claim_next(service_instance_id=instance_id)
             if cmd is not None:
                 self._fault("AFTER_EXECUTE_CLAIM")
                 try:
