@@ -17,8 +17,8 @@ V6_CHECKSUM = "eaac8a58c752800581d5f02504d7d5b509985fbb2638cb6924f5673828689839"
 
 
 def test_v6_registry_and_literal_checksum() -> None:
-    assert [m.version for m in MIGRATIONS] == [1, 2, 3, 4, 5, 6]
-    assert [m.name for m in MIGRATIONS][-1] == "journal_v6_workspace_lifecycle"
+    assert [m.version for m in MIGRATIONS][:6] == [1, 2, 3, 4, 5, 6]
+    assert MIGRATIONS[5].name == "journal_v6_workspace_lifecycle"
     assert MIGRATION_V6.checksum() == V6_CHECKSUM
     assert MIGRATION_V6.statements == MIGRATION_V6_STATEMENTS
 
@@ -32,6 +32,7 @@ def test_empty_and_reopen_apply_v6(tmp_path: Path) -> None:
     assert journal._connection.execute(
         "SELECT version,name,checksum FROM schema_migrations WHERE version=6"
     ).fetchone() == (6, "journal_v6_workspace_lifecycle", V6_CHECKSUM)
+    assert journal._connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] >= 6
     triggers = {
         row[0]
         for row in journal._connection.execute(
@@ -67,7 +68,10 @@ def test_v5_upgrade_to_v6_preserves_data(tmp_path: Path, populated: bool) -> Non
     path = tmp_path / "v5.db"
     _make_v5(path, populated=populated)
     journal = Journal.open(path, now_fn=lambda: NOW)
-    assert journal._connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 6
+    assert journal._connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] >= 6
+    assert journal._connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='workspace_lifecycle'"
+    ).fetchone() == ("workspace_lifecycle",)
     if populated:
         assert journal.get_workspace(SESSION) is not None
     journal.close()
@@ -93,8 +97,11 @@ def test_v6_second_statement_failure_rolls_back_only_v6(tmp_path: Path) -> None:
 def test_future_version_rejected(tmp_path: Path) -> None:
     path = tmp_path / "future.db"
     journal = Journal.open(path, now_fn=lambda: NOW)
+    max_version = journal._connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+    future = int(max_version) + 1
     journal._connection.execute(
-        "INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(7,'future','x',?)", (NOW,)
+        "INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(?,'future','x',?)",
+        (future, NOW),
     )
     journal._connection.commit()
     journal.close()

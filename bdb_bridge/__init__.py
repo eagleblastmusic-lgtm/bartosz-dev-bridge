@@ -9,8 +9,10 @@ from .recovery_gate_hooks import (
 install_command_ingestor_fault_hook(CommandIngestor)
 install_command_collision_diagnostics(Journal)
 from .workspace_lifecycle_migration import install_workspace_lifecycle_migration
+from .repository_index_migration import install_repository_index_migration
 
 install_workspace_lifecycle_migration(Journal)
+install_repository_index_migration(Journal)
 
 from .models import (
     BridgeErrorCode,
@@ -63,11 +65,13 @@ from .recovery_journal import (
 from .outbox_journal import install_journal_outbox_api
 from .service_journal import install_journal_service_api
 from .workspace_lifecycle_journal import install_journal_workspace_lifecycle_api
+from .repository_index_journal import install_journal_repository_index_api
 
 install_journal_recovery_api(Journal)
 install_journal_outbox_api(Journal)
 install_journal_service_api(Journal)
 install_journal_workspace_lifecycle_api(Journal)
+install_journal_repository_index_api(Journal)
 
 from .workspace_manager import WorkspaceManager
 from .instance_lock import InstanceLock
