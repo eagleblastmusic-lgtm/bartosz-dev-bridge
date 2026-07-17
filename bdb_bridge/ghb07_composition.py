@@ -13,8 +13,10 @@ from .git_command_transport import GitCommandTransport
 from .ingestion import CommandIngestor
 from .instance_lock import InstanceLock
 from .journal import Journal
+from .local_spool_transport import LocalSpoolTransport
 from .migrations import map_sqlite_error
 from .models import BridgeErrorCode
+from .priority_ingestion import PriorityCommandIngestor
 from .protocol import BridgeError, parse_git_ref
 from .result_outbox import OutboxProcessor, ResultCoordinator
 from .result_transport import GitResultTransport
@@ -29,7 +31,7 @@ def reconcile_staged_result_after_restart(
     """Reconcile one durable RESULT_STAGED row while the process owns the OS lock.
 
     A process may crash after the remote push but before the local publication ACK.
-    The pending outbox row then retains its lease.  A new single-instance process may
+    The pending outbox row then retains its lease. A new single-instance process may
     safely read the remote result immediately: identical bytes complete the local ACK,
     while an absent/unavailable remote remains pending without another push.
     """
@@ -85,12 +87,25 @@ def run_foreground(config: BridgeConfig) -> int:
     try:
         cmd_remote, cmd_branch = parse_git_ref(config.commands_ref)
         res_remote, _ = parse_git_ref(config.results_ref)
-        transport = GitCommandTransport(
+        git_transport = GitCommandTransport(
             config.control_repo_path,
             remote=cmd_remote or "origin",
             commands_branch=cmd_branch,
         )
-        ingestor = CommandIngestor(journal, transport, fault_hook=hook)
+        git_ingestor = CommandIngestor(journal, git_transport, source_id="commands")
+        if config.direct_spool_enabled:
+            local_transport = LocalSpoolTransport(config.direct_spool_dir)
+            local_ingestor = CommandIngestor(
+                journal,
+                local_transport,
+                source_id="local-spool",
+                backoff_base=0.1,
+                backoff_max=1.0,
+            )
+            ingestor = PriorityCommandIngestor(local_ingestor, git_ingestor)
+        else:
+            ingestor = git_ingestor
+
         scheduler = SingleQueueScheduler(journal)
         result_transport = GitResultTransport(config, remote_name=res_remote or "origin")
         outbox = OutboxProcessor(journal, result_transport, fault_hook=hook)
