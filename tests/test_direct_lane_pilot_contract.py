@@ -27,6 +27,14 @@ def test_checked_runner_executes_native_host_and_normalizes_only_known_stop_mess
     assert "return {\"message\": text}" in checked
 
 
+def test_checked_runner_emits_canonical_multi_file_patch_content() -> None:
+    checked = read("scripts/run_direct_lane_pilot_checked.py")
+    assert '"content_base64": base64.b64encode(content).decode("ascii")' in checked
+    assert '"content_sha256": pilot.sha256_value(content)' in checked
+    assert "pilot.content_fields = _canonical_content_fields" in checked
+    assert '"content_encoding"' not in checked
+
+
 def test_checked_runner_requires_exact_offline_to_published_transition() -> None:
     checked = read("scripts/run_direct_lane_pilot_checked.py")
     assert 'before.get("command_state") != "result_staged"' in checked
