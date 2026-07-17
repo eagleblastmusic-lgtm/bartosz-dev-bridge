@@ -29,6 +29,7 @@ class BridgeConfig:
     idle_poll_seconds: float = 1.0
     direct_spool_enabled: bool = True
     direct_spool_dir: Path | None = None
+    direct_result_dir: Path | None = None
 
     def __post_init__(self) -> None:
         c_repo = Path(self.control_repo_path).expanduser().resolve(strict=False)
@@ -59,6 +60,12 @@ class BridgeConfig:
         spool_dir = Path(spool_dir).expanduser().resolve(strict=False)
         object.__setattr__(self, "direct_spool_dir", spool_dir)
 
+        result_dir = self.direct_result_dir
+        if result_dir is None:
+            result_dir = r_dir / "direct_spool" / "results"
+        result_dir = Path(result_dir).expanduser().resolve(strict=False)
+        object.__setattr__(self, "direct_result_dir", result_dir)
+
         for name, val in [
             ("poll_interval_seconds", self.poll_interval_seconds),
             ("max_poll_seconds", self.max_poll_seconds),
@@ -88,13 +95,22 @@ class BridgeConfig:
                 "invalid_config",
                 f"runtime_dir ({r_dir}) cannot alias or overlap with control_repo ({c_repo}), fixture_repo ({f_repo}), or worktree_root ({w_root})",
             )
-        if not is_subpath(spool_dir, r_dir):
+        for name, path in (
+            ("direct_spool_dir", spool_dir),
+            ("direct_result_dir", result_dir),
+        ):
+            if not is_subpath(path, r_dir):
+                raise BridgeError(
+                    "invalid_config",
+                    f"{name} ({path}) must be contained within runtime_dir ({r_dir})",
+                )
+            if path == r_dir or path == j_path:
+                raise BridgeError("invalid_config", f"{name} must be a dedicated directory")
+        if spool_dir == result_dir or is_subpath(spool_dir, result_dir) or is_subpath(result_dir, spool_dir):
             raise BridgeError(
                 "invalid_config",
-                f"direct_spool_dir ({spool_dir}) must be contained within runtime_dir ({r_dir})",
+                "direct_spool_dir and direct_result_dir must not overlap",
             )
-        if spool_dir == r_dir or spool_dir == j_path:
-            raise BridgeError("invalid_config", "direct_spool_dir must be a dedicated directory")
 
     @classmethod
     def from_json(cls, path: Path) -> "BridgeConfig":
@@ -112,6 +128,11 @@ class BridgeConfig:
         direct_spool_dir = (
             Path(raw["direct_spool_dir"]).expanduser().resolve()
             if "direct_spool_dir" in raw
+            else None
+        )
+        direct_result_dir = (
+            Path(raw["direct_result_dir"]).expanduser().resolve()
+            if "direct_result_dir" in raw
             else None
         )
         direct_spool_enabled = raw.get("direct_spool_enabled", True)
@@ -138,4 +159,5 @@ class BridgeConfig:
             idle_poll_seconds=float(raw.get("idle_poll_seconds", 1.0)),
             direct_spool_enabled=direct_spool_enabled,
             direct_spool_dir=direct_spool_dir,
+            direct_result_dir=direct_result_dir,
         )
