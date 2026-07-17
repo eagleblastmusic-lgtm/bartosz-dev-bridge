@@ -19,7 +19,7 @@ class FakeJournal:
             command_id=COMMAND_ID,
             session_id=SESSION_ID,
             sequence=1,
-            state=CommandState.RESULT_STAGED,
+            state=CommandState.RESULT_PUBLISHED,
             command_json=json.dumps({"operation": "multi_file_patch"}),
         )
 
@@ -40,11 +40,51 @@ class FakeJournal:
     def get_multi_file_patch_profile_run(self, command_id: str):
         return SimpleNamespace(status="success", profile_id="poc_pytest")
 
+    def get_command_ingestion(self, command_id: str):
+        if command_id != COMMAND_ID:
+            return None
+        return SimpleNamespace(
+            created_remote_at="2026-07-15T12:00:00Z",
+            first_seen_at="2026-07-15T12:00:01Z",
+        )
+
+    def list_events(self, *, command_id: str):
+        if command_id != COMMAND_ID:
+            return []
+        return [
+            SimpleNamespace(
+                event_type="command.validated",
+                created_at="2026-07-15T12:00:02Z",
+                payload_json=None,
+            ),
+            SimpleNamespace(
+                event_type="command.claimed",
+                created_at="2026-07-15T12:00:03Z",
+                payload_json=None,
+            ),
+        ]
+
     def get_result(self, command_id: str):
-        return SimpleNamespace(status="success")
+        if command_id != COMMAND_ID:
+            return None
+        return SimpleNamespace(
+            status="success",
+            created_at="2026-07-15T12:00:06Z",
+            result_json=json.dumps(
+                {
+                    "started_at": "2026-07-15T12:00:04Z",
+                    "finished_at": "2026-07-15T12:00:05Z",
+                }
+            ),
+        )
 
     def get_outbox(self, command_id: str):
-        return SimpleNamespace(state=SimpleNamespace(value="pending"))
+        if command_id != COMMAND_ID:
+            return None
+        return SimpleNamespace(
+            state=SimpleNamespace(value="published"),
+            published_at="2026-07-15T12:00:08Z",
+        )
 
     def close(self) -> None:
         self.closed = True
@@ -69,7 +109,7 @@ def test_edit_status_parser_contract() -> None:
     assert args.json is True
 
 
-def test_edit_status_reports_durable_batch_state(monkeypatch, capsys) -> None:
+def test_edit_status_reports_durable_batch_state_and_timing(monkeypatch, capsys) -> None:
     fake = FakeJournal()
     monkeypatch.setattr(
         "bdb_bridge.multi_file_patch_cli.Journal.open",
@@ -81,14 +121,36 @@ def test_edit_status_reports_durable_batch_state(monkeypatch, capsys) -> None:
         "checkpoint_sha256": "sha256:" + "1" * 64,
         "checkpoint_state": "committed",
         "command_id": COMMAND_ID,
-        "command_state": "result_staged",
+        "command_state": "result_published",
         "last_error": None,
-        "outbox_state": "pending",
+        "outbox_state": "published",
         "profile_id": "poc_pytest",
         "profile_status": "success",
         "result_status": "success",
         "sequence": 1,
         "session_id": SESSION_ID,
+        "timing": {
+            "durations_ms": {
+                "end_to_end_ms": 8000.0,
+                "execution_ms": 1000.0,
+                "inbound_transport_ms": 1000.0,
+                "pre_execution_ms": 1000.0,
+                "result_publication_ms": 2000.0,
+                "result_staging_ms": 1000.0,
+                "scheduler_queue_ms": 1000.0,
+                "validation_ms": 1000.0,
+            },
+            "timestamps": {
+                "claimed_at": "2026-07-15T12:00:03Z",
+                "execution_finished_at": "2026-07-15T12:00:05Z",
+                "execution_started_at": "2026-07-15T12:00:04Z",
+                "first_seen_at": "2026-07-15T12:00:01Z",
+                "remote_created_at": "2026-07-15T12:00:00Z",
+                "result_published_at": "2026-07-15T12:00:08Z",
+                "result_staged_at": "2026-07-15T12:00:06Z",
+                "validated_at": "2026-07-15T12:00:02Z",
+            },
+        },
         "workspace_revision_after": 1,
         "workspace_revision_before": 0,
     }
