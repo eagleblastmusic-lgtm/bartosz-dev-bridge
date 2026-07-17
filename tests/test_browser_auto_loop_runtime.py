@@ -237,7 +237,11 @@ def test_auto_loop_state_survives_tab_change_and_worker_restart(tmp_path: Path) 
               assert.equal(shared.session[canonicalKey].lastIteration, 3);
               assert.equal(
                 Object.keys(shared.session).some(
-                  (key) => key.startsWith("bdbAuto:") && key.endsWith(`:${loopId}`)
+                  (key) => (
+                    key !== canonicalKey &&
+                    key.startsWith("bdbAuto:") &&
+                    key.endsWith(`:${loopId}`)
+                  )
                 ),
                 false,
                 JSON.stringify(shared.session)
