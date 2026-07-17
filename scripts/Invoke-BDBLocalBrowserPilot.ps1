@@ -52,16 +52,21 @@ function Read-State() {
     return Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
 }
 
-function Wait-ForRunning([string]$PythonExecutable, [string]$BridgeConfig) {
+function Wait-ForBridgeState(
+    [string]$PythonExecutable,
+    [string]$BridgeConfig,
+    [string]$ExpectedState,
+    [int]$Attempts = 120
+) {
     $last = $null
-    for ($attempt = 0; $attempt -lt 120; $attempt++) {
+    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
         try {
             $last = Invoke-Json $PythonExecutable @(
                 "-m", "bdb_bridge", "bridge", "status",
                 "--config", $BridgeConfig,
                 "--json"
             )
-            if ($last.status -eq "RUNNING") {
+            if ($last.status -eq $ExpectedState) {
                 return $last
             }
         }
@@ -70,7 +75,7 @@ function Wait-ForRunning([string]$PythonExecutable, [string]$BridgeConfig) {
         }
         Start-Sleep -Milliseconds 250
     }
-    throw "Bridge did not reach RUNNING; last=$last"
+    throw "Bridge did not reach $ExpectedState; last=$last"
 }
 
 if ($Action -eq "Setup") {
@@ -148,9 +153,6 @@ if ($Action -eq "Setup") {
         $installArguments.EdgeExtensionId = $ExtensionId
     }
     $installResult = & $installer @installArguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "Native Host installer failed with exit code $LASTEXITCODE"
-    }
     $install = ($installResult -join [Environment]::NewLine) | ConvertFrom-Json
 
     Invoke-Checked $venvPython @(
@@ -158,7 +160,7 @@ if ($Action -eq "Setup") {
         "--config", [string]$setup.bridge_config,
         "--background"
     ) | Out-Null
-    $bridge = Wait-ForRunning $venvPython ([string]$setup.bridge_config)
+    $bridge = Wait-ForBridgeState $venvPython ([string]$setup.bridge_config) "RUNNING"
     $arm = Invoke-Json $venvPython @(
         "-m", "bdb_bridge", "bridge", "native-host", "arm",
         "--config", $nativeConfigPath,
@@ -252,6 +254,7 @@ Invoke-Checked $pythonExecutable @(
     "-m", "bdb_bridge", "bridge", "stop",
     "--config", $bridgeConfig
 ) | Out-Null
+$bridge = Wait-ForBridgeState $pythonExecutable $bridgeConfig "OFFLINE"
 
 $state.status = "stopped"
 $state.stopped_at = [DateTime]::UtcNow.ToString("o")
@@ -263,9 +266,10 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 )
 
 [ordered]@{
-    status = "STOP_REQUESTED"
+    status = "OFFLINE"
     root = $rootPath
+    bridge = $bridge
     artifacts_preserved = $true
     native_registration_preserved = $true
     note = "No repository, worktree, Journal, configuration or registry key was deleted."
-} | ConvertTo-Json -Depth 5
+} | ConvertTo-Json -Depth 8
