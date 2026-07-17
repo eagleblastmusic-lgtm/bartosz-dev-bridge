@@ -20,10 +20,11 @@ def test_ci_runs_direct_lane_native_pilot_on_windows_314() -> None:
 
 def test_checked_runner_executes_native_host_and_normalizes_only_known_stop_messages() -> None:
     checked = read("scripts/run_direct_lane_pilot_checked.py")
-    assert 'from bdb_bridge.native_host import main' in checked
+    assert "bdb_bridge.native_host as nh" in checked
     assert "sys.argv = ['bdb-native-host', *sys.argv[1:]]" in checked
     assert "_STOP_MESSAGES = frozenset" in checked
     assert "Graceful stop request sent successfully." in checked
+    assert "except (RuntimeError, json.JSONDecodeError):" in checked
     assert "return {\"message\": text}" in checked
 
 
@@ -35,10 +36,20 @@ def test_checked_runner_emits_canonical_multi_file_patch_content() -> None:
     assert '"content_encoding"' not in checked
 
 
-def test_checked_runner_preserves_exact_fixture_bytes_on_windows() -> None:
+def test_checked_runner_builds_a_byte_stable_clean_fixture() -> None:
     checked = read("scripts/run_direct_lane_pilot_checked.py")
     assert 'pilot.git(fixture, "config", "core.autocrlf", "false")' in checked
+    assert 'status = pilot.git(fixture, "status", "--porcelain=v1")' in checked
+    assert "Direct pilot fixture is not clean after initialization" in checked
     assert "pilot.initialize_fixture = _checked_initialize_fixture" in checked
+
+
+def test_checked_runner_derives_workspace_from_trusted_config() -> None:
+    checked = read("scripts/run_direct_lane_pilot_checked.py")
+    assert 'config = json.loads(Path(bridge_config).read_text(encoding="utf-8"))' in checked
+    assert 'worktree_root = Path(str(config["worktree_root"]))' in checked
+    assert '"workspace_path": str(worktree_root / session_id)' in checked
+    assert "pilot.service_json = _checked_service_json" in checked
 
 
 def test_checked_runner_avoids_fresh_journal_status_race() -> None:
