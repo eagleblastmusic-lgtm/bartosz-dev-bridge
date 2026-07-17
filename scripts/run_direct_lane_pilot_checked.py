@@ -38,6 +38,7 @@ _STOP_MESSAGES = frozenset(
 _ORIGINAL_RUN = pilot.run
 _ORIGINAL_LOAD_JSON_OUTPUT = pilot.load_json_output
 _ORIGINAL_WAIT_UNTIL = pilot.wait_until
+_ORIGINAL_SERVICE_JSON = pilot.service_json
 
 
 def _canonical_content_fields(content: bytes) -> dict[str, str]:
@@ -104,7 +105,7 @@ def _checked_run(
 def _checked_load_json_output(completed: Any) -> dict[str, Any]:
     try:
         return _ORIGINAL_LOAD_JSON_OUTPUT(completed)
-    except RuntimeError:
+    except (RuntimeError, json.JSONDecodeError):
         stdout = completed.stdout
         if isinstance(stdout, bytes):
             text = stdout.decode("utf-8", errors="strict").strip()
@@ -113,6 +114,27 @@ def _checked_load_json_output(completed: Any) -> dict[str, Any]:
         if text in _STOP_MESSAGES:
             return {"message": text}
         raise
+
+
+def _checked_service_json(
+    python_executable: str,
+    repo_root: Path,
+    bridge_config: Path,
+    *command: str,
+) -> dict[str, Any]:
+    response = _ORIGINAL_SERVICE_JSON(
+        python_executable,
+        repo_root,
+        bridge_config,
+        *command,
+    )
+    if command[:2] == ("edit", "status") and "workspace_path" not in response:
+        session_id = response.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            config = json.loads(Path(bridge_config).read_text(encoding="utf-8"))
+            worktree_root = Path(str(config["worktree_root"]))
+            response = {**response, "workspace_path": str(worktree_root / session_id)}
+    return response
 
 
 def _checked_wait_until(description: str, *args: Any, **kwargs: Any) -> Any:
@@ -155,6 +177,7 @@ def _validate_report(root: Path) -> None:
 def main() -> int:
     pilot.run = _checked_run
     pilot.load_json_output = _checked_load_json_output
+    pilot.service_json = _checked_service_json
     pilot.wait_until = _checked_wait_until
     pilot.initialize_fixture = _checked_initialize_fixture
     pilot.content_fields = _canonical_content_fields
