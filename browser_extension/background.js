@@ -5,7 +5,25 @@ const REQUEST_SCHEMA = "bdb-native-request-v1";
 const ACTION_SCHEMA = "bdb-action-v1";
 const MAX_SERIALIZED_BYTES = 1024 * 1024;
 const DEFAULT_WAIT_SECONDS = 30;
+const DEFAULT_AUTO_SETTINGS = Object.freeze({
+  autoEnabled: false,
+  autoMaxIterations: 4,
+  autoMaxMinutes: 10
+});
+const AUTO_REPLAY_GUARD_KEY = "bdbAutoReplayGuard";
+const AUTO_REPLAY_GUARD_LIMIT = 512;
+const LOOP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+const TERMINAL_VALUES = new Set([
+  "done",
+  "needs_user",
+  "policy_denied",
+  "manual_reconciliation_required",
+  "failed",
+  "cancelled",
+  "aborted"
+]);
 const inFlightTabs = new Set();
+const replayClaimsInFlight = new Set();
 
 function requestId(prefix) {
   const bytes = new Uint8Array(12);
@@ -70,12 +88,175 @@ async function submitAction(action, tabId) {
   }
 }
 
+function normalizeAutoSettings(raw) {
+  const enabled = raw.autoEnabled === true;
+  const iterations = Number.isInteger(raw.autoMaxIterations) ? raw.autoMaxIterations : DEFAULT_AUTO_SETTINGS.autoMaxIterations;
+  const minutes = Number.isInteger(raw.autoMaxMinutes) ? raw.autoMaxMinutes : DEFAULT_AUTO_SETTINGS.autoMaxMinutes;
+  if (iterations < 1 || iterations > 8 || minutes < 1 || minutes > 30) {
+    throw new Error("AUTO limits are outside the allowed range");
+  }
+  return { autoEnabled: enabled, autoMaxIterations: iterations, autoMaxMinutes: minutes };
+}
+
+async function getAutoSettings() {
+  const stored = await chrome.storage.local.get(Object.keys(DEFAULT_AUTO_SETTINGS));
+  return normalizeAutoSettings({ ...DEFAULT_AUTO_SETTINGS, ...stored });
+}
+
+async function setAutoSettings(settings) {
+  const normalized = normalizeAutoSettings(settings);
+  await chrome.storage.local.set(normalized);
+  return normalized;
+}
+
+function automationMetadata(action) {
+  const metadata = action && action.automation;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata) || metadata.mode !== "auto") {
+    return null;
+  }
+  if (typeof metadata.loop_id !== "string" || !LOOP_ID_RE.test(metadata.loop_id)) {
+    throw new Error("AUTO loop_id has an unsafe format");
+  }
+  if (!Number.isInteger(metadata.iteration) || metadata.iteration < 1) {
+    throw new Error("AUTO iteration must be a positive integer");
+  }
+  return { loopId: metadata.loop_id, iteration: metadata.iteration };
+}
+
+function autoStateKey(tabId, loopId) {
+  return `bdbAuto:${tabId}:${loopId}`;
+}
+
+function autoReplayKey(loopId, iteration) {
+  return `${loopId}:${iteration}`;
+}
+
+async function claimAutoReplay(loopId, iteration) {
+  const key = autoReplayKey(loopId, iteration);
+  if (replayClaimsInFlight.has(key)) {
+    return false;
+  }
+  replayClaimsInFlight.add(key);
+  try {
+    const stored = await chrome.storage.local.get(AUTO_REPLAY_GUARD_KEY);
+    const raw = stored[AUTO_REPLAY_GUARD_KEY];
+    const guard = raw && typeof raw === "object" && !Array.isArray(raw) ? { ...raw } : {};
+    if (Object.prototype.hasOwnProperty.call(guard, key)) {
+      return false;
+    }
+    guard[key] = Date.now();
+    const entries = Object.entries(guard)
+      .filter(([entryKey, timestamp]) => typeof entryKey === "string" && Number.isFinite(timestamp))
+      .sort((left, right) => left[1] - right[1])
+      .slice(-AUTO_REPLAY_GUARD_LIMIT);
+    await chrome.storage.local.set({ [AUTO_REPLAY_GUARD_KEY]: Object.fromEntries(entries) });
+    return true;
+  } finally {
+    replayClaimsInFlight.delete(key);
+  }
+}
+
+function containsTerminalValue(value, depth = 0) {
+  if (depth > 8) {
+    return "needs_user";
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return TERMINAL_VALUES.has(normalized) ? normalized : null;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 100)) {
+      const terminal = containsTerminalValue(item, depth + 1);
+      if (terminal) {
+        return terminal;
+      }
+    }
+    return null;
+  }
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value).slice(0, 100)) {
+      const terminal = containsTerminalValue(item, depth + 1);
+      if (terminal) {
+        return terminal;
+      }
+    }
+  }
+  return null;
+}
+
+async function considerAuto(action, tabId) {
+  const metadata = automationMetadata(action);
+  if (!metadata) {
+    return { executed: false, reason: "action_not_auto" };
+  }
+  const settings = await getAutoSettings();
+  if (!settings.autoEnabled) {
+    return { executed: false, reason: "auto_disabled" };
+  }
+  if (!Number.isInteger(tabId) || tabId < 0) {
+    throw new Error("AUTO requires a concrete sender tab");
+  }
+  if (metadata.iteration > settings.autoMaxIterations) {
+    return { executed: false, reason: "iteration_limit" };
+  }
+
+  const key = autoStateKey(tabId, metadata.loopId);
+  const stored = await chrome.storage.session.get(key);
+  const now = Date.now();
+  const state = stored[key] || {
+    startedAt: now,
+    lastIteration: 0,
+    status: "running"
+  };
+  if (state.status !== "running") {
+    return { executed: false, reason: "loop_not_running", state };
+  }
+  if (now - state.startedAt > settings.autoMaxMinutes * 60 * 1000) {
+    state.status = "time_limit";
+    await chrome.storage.session.set({ [key]: state });
+    return { executed: false, reason: "time_limit", state };
+  }
+  if (metadata.iteration !== state.lastIteration + 1) {
+    return { executed: false, reason: "non_sequential_iteration", state };
+  }
+  if (!await claimAutoReplay(metadata.loopId, metadata.iteration)) {
+    return { executed: false, reason: "replay_guard", state };
+  }
+
+  const response = await submitAction(action, tabId);
+  const terminal = containsTerminalValue(response.result || response);
+  const completed = response.status === "completed";
+  state.lastIteration = metadata.iteration;
+  state.lastCommandId = response.command_id || null;
+  state.updatedAt = Date.now();
+  state.status = terminal || (completed ? "running" : "needs_user");
+  await chrome.storage.session.set({ [key]: state });
+
+  const shouldContinue = completed && !terminal && metadata.iteration < settings.autoMaxIterations;
+  return {
+    executed: true,
+    response,
+    loopId: metadata.loopId,
+    iteration: metadata.iteration,
+    shouldContinue,
+    stopReason: terminal || (completed ? null : "result_not_completed"),
+    state
+  };
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const handle = async () => {
     validateJsonObject(message, "extension message");
     switch (message.type) {
       case "BDB_SUBMIT_ACTION":
         return submitAction(message.action, sender.tab && sender.tab.id);
+      case "BDB_CONSIDER_AUTO":
+        return considerAuto(message.action, sender.tab && sender.tab.id);
+      case "BDB_GET_AUTO_SETTINGS":
+        return getAutoSettings();
+      case "BDB_SET_AUTO_SETTINGS":
+        validateJsonObject(message.settings, "AUTO settings");
+        return setAutoSettings(message.settings);
       case "BDB_STATUS":
         return sendNative({
           schema: REQUEST_SCHEMA,
