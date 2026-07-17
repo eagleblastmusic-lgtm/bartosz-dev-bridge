@@ -49,7 +49,7 @@ def test_local_result_sink_is_exact_idempotent_and_collision_safe(tmp_path: Path
 
 def test_local_result_is_durable_before_unavailable_git_retry(tmp_path: Path) -> None:
     journal = make_journal(tmp_path)
-    staged, remote_path, _ = stage(journal)
+    staged, _, outbox = stage(journal)
     sink = LocalResultSink(tmp_path / "local-results")
     processor = LocalMirroringOutboxProcessor(
         journal,
@@ -61,7 +61,7 @@ def test_local_result_is_durable_before_unavailable_git_retry(tmp_path: Path) ->
     outcome = processor.process_command(COMMAND_ID)
 
     assert outcome.state == OutboxProcessState.RETRY_SCHEDULED
-    assert sink.read(remote_path) == staged.result_bytes
+    assert sink.read(outbox.remote_path) == staged.result_bytes
     assert journal.get_outbox(COMMAND_ID).attempt_count == 1
     journal.close()
 
