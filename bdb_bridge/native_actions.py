@@ -21,6 +21,8 @@ from .protocol import (
     validate_base_sha,
     validate_session_id,
 )
+from .workspace_manager import Git
+from .workspace_state import clean_workspace_state_hash
 
 
 ACTION_SCHEMA = "bdb-action-v1"
@@ -33,8 +35,10 @@ _SUPPORTED_OPERATIONS = frozenset(
         "multi_file_patch",
     }
 )
+_MUTATING_OPERATIONS = frozenset({"replace_exact_and_test", "multi_file_patch"})
 _MAX_SESSION_RECORDS = 1000
 _DEFAULT_TTL_SECONDS = 300
+_MISSING = object()
 
 
 def _utc_now() -> datetime:
@@ -132,6 +136,13 @@ class NativeSessionStore:
         return raw
 
 
+@dataclass(frozen=True)
+class RepositoryContext:
+    base_sha: str
+    source_clean: bool
+    initial_state_hash: str | None
+
+
 class NativeActionComposer:
     def __init__(
         self,
@@ -148,13 +159,14 @@ class NativeActionComposer:
 
     def context(self, alias: str) -> dict[str, Any]:
         repository = self._repository(alias)
-        reader = GitObjectReader(repository.bridge_config.fixture_repo_path)
-        reader.ensure_repository()
-        base_sha = reader.resolve_commit("HEAD")
+        context = self._repository_context(repository)
         return {
             "repo_alias": alias,
             "repository_id": repository.bridge_config.repository_id,
-            "base_sha": base_sha,
+            "base_sha": context.base_sha,
+            "source_clean": context.source_clean,
+            "initial_revision": 0,
+            "initial_state_hash": context.initial_state_hash,
             "allowed_paths": list(repository.bridge_config.allowed_paths),
             "max_sequence": repository.bridge_config.max_sequence,
         }
@@ -189,32 +201,42 @@ class NativeActionComposer:
         expected_revision = action.get("expected_revision", 0)
         if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
             raise BridgeError("invalid_payload", "expected_revision must be a non-negative integer")
-        expected_state_hash = action.get("expected_state_hash")
-        if expected_state_hash is not None and not isinstance(expected_state_hash, str):
+        supplied_state_hash = action.get("expected_state_hash", _MISSING)
+        if supplied_state_hash is not _MISSING and supplied_state_hash is not None and not isinstance(supplied_state_hash, str):
             raise BridgeError("invalid_payload", "expected_state_hash must be a string or null")
 
         existing = self.session_store.get(session_id)
         if existing is None:
             if sequence != 1:
                 raise BridgeError("invalid_payload", "A new native session must begin at sequence 1")
-            reader = GitObjectReader(repository.bridge_config.fixture_repo_path)
-            reader.ensure_repository()
-            base_sha = reader.resolve_commit("HEAD")
+            repository_context = self._repository_context(repository)
+            if not repository_context.source_clean or repository_context.initial_state_hash is None:
+                raise BridgeError("dirty_source_checkout", "Trusted repository checkout must be clean")
             created_at = _utc_text(self.now_fn())
             session_record = self.session_store.bind(
                 NativeSessionRecord(
                     session_id=session_id,
                     repo_alias=repo_alias,
                     repository_id=repository.bridge_config.repository_id,
-                    base_sha=base_sha,
+                    base_sha=repository_context.base_sha,
                     created_at=created_at,
                 )
             )
+            if supplied_state_hash is _MISSING and operation in _MUTATING_OPERATIONS:
+                expected_state_hash: str | None = repository_context.initial_state_hash
+            else:
+                expected_state_hash = None if supplied_state_hash is _MISSING else supplied_state_hash
         else:
             if existing.repo_alias != repo_alias or existing.repository_id != repository.bridge_config.repository_id:
                 raise BridgeError("policy_denied", "Session is bound to a different repository alias")
             session_record = existing
             created_at = _utc_text(self.now_fn())
+            expected_state_hash = None if supplied_state_hash is _MISSING else supplied_state_hash
+            if sequence > 1 and operation in _MUTATING_OPERATIONS and expected_state_hash is None:
+                raise BridgeError(
+                    "invalid_payload",
+                    "A later mutating action requires the expected_state_hash from the previous result",
+                )
 
         expires_at = _utc_text(self.now_fn() + timedelta(seconds=_DEFAULT_TTL_SECONDS))
         command = {
@@ -245,6 +267,19 @@ class NativeActionComposer:
             "command": command,
         }
         return repository, envelope
+
+    def _repository_context(self, repository: RepositoryAlias) -> RepositoryContext:
+        reader = GitObjectReader(repository.bridge_config.fixture_repo_path)
+        reader.ensure_repository()
+        base_sha = reader.resolve_commit("HEAD")
+        source_clean = not Git(repository.bridge_config.fixture_repo_path).run(
+            ["status", "--porcelain=v1"]
+        ).stdout.strip()
+        return RepositoryContext(
+            base_sha=base_sha,
+            source_clean=source_clean,
+            initial_state_hash=clean_workspace_state_hash(base_sha) if source_clean else None,
+        )
 
     def _repository(self, alias: str) -> RepositoryAlias:
         if _ALIAS_RE.fullmatch(alias) is None:
