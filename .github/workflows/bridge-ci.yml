@@ -49,6 +49,7 @@ jobs:
             "scripts/Invoke-BDBPersistentPilot.ps1",
             "scripts/Invoke-BDBGitHubPilot.ps1",
             "scripts/Invoke-BDBDirectLanePilot.ps1",
+            "scripts/Invoke-BDBLocalBrowserPilot.ps1",
             "scripts/Install-BDBNativeHost.ps1"
           )
           foreach ($script in $scripts) {
@@ -71,10 +72,38 @@ jobs:
           python -m py_compile scripts/prepare_github_pilot.py
           python -m py_compile scripts/run_direct_lane_pilot.py
           python -m py_compile scripts/run_direct_lane_pilot_checked.py
+          python -m py_compile scripts/prepare_local_browser_pilot.py
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
       - name: Run tests
         run: python -m pytest -q
+      - name: Run local browser pilot lifecycle
+        if: runner.os == 'Windows' && matrix.python-version == '3.14'
+        shell: powershell
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "bdb-local-browser-pilot"
+          $extensionId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          $setup = .\scripts\Invoke-BDBLocalBrowserPilot.ps1 `
+            -Action Setup `
+            -Browser Chrome `
+            -ExtensionId $extensionId `
+            -Python (Get-Command python).Source `
+            -Root $root | ConvertFrom-Json
+          if ($setup.status -ne "RUNNING" -or $setup.repo_alias -ne "pilot") {
+            throw "Local browser pilot setup did not reach RUNNING"
+          }
+          $status = .\scripts\Invoke-BDBLocalBrowserPilot.ps1 `
+            -Action Status `
+            -Root $root | ConvertFrom-Json
+          if ($status.bridge.status -ne "RUNNING" -or $status.native_host.armed -ne $true) {
+            throw "Local browser pilot status is not RUNNING and ARMED"
+          }
+          $stop = .\scripts\Invoke-BDBLocalBrowserPilot.ps1 `
+            -Action Stop `
+            -Root $root | ConvertFrom-Json
+          if ($stop.status -ne "OFFLINE" -or $stop.artifacts_preserved -ne $true) {
+            throw "Local browser pilot did not stop safely"
+          }
       - name: Run local E2E POC gate
         if: runner.os == 'Windows' && matrix.python-version == '3.14'
         shell: powershell
