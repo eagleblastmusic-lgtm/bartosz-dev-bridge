@@ -229,7 +229,17 @@ function automationMetadata(action) {
   if (!Number.isInteger(metadata.iteration) || metadata.iteration < 1) {
     throw new Error("AUTO iteration must be a positive integer");
   }
-  return { loopId: metadata.loop_id, iteration: metadata.iteration };
+  if (
+    metadata.continue_on_failure !== undefined &&
+    typeof metadata.continue_on_failure !== "boolean"
+  ) {
+    throw new Error("AUTO continue_on_failure must be boolean when present");
+  }
+  return {
+    loopId: metadata.loop_id,
+    iteration: metadata.iteration,
+    continueOnFailure: metadata.continue_on_failure === true
+  };
 }
 
 function autoStateKey(tabId, loopId) {
@@ -293,6 +303,22 @@ function containsTerminalValue(value, depth = 0) {
   return null;
 }
 
+function isRecoverableProfileFailure(metadata, response) {
+  const result = response && response.result;
+  const data = result && result.data;
+  return Boolean(
+    metadata.continueOnFailure &&
+    response &&
+    response.status === "completed" &&
+    result &&
+    (result.status === "failed" || result.status === "timeout") &&
+    data &&
+    data.operation === "multi_file_patch" &&
+    data.rollback_performed === true &&
+    data.checkpoint_state === "rolled_back"
+  );
+}
+
 async function considerAuto(action, tabId) {
   const metadata = automationMetadata(action);
   if (!metadata) {
@@ -333,7 +359,8 @@ async function considerAuto(action, tabId) {
   }
 
   const response = await submitAction(action, tabId);
-  const terminal = containsTerminalValue(response.result || response);
+  const recoverableFailure = isRecoverableProfileFailure(metadata, response);
+  const terminal = recoverableFailure ? null : containsTerminalValue(response.result || response);
   const completed = response.status === "completed";
   state.lastIteration = metadata.iteration;
   state.lastCommandId = response.command_id || null;
@@ -347,6 +374,7 @@ async function considerAuto(action, tabId) {
     response,
     loopId: metadata.loopId,
     iteration: metadata.iteration,
+    recoverableFailure,
     shouldContinue,
     stopReason: terminal || (completed ? null : "result_not_completed"),
     state
