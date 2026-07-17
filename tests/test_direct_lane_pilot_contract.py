@@ -43,4 +43,4 @@ def test_pilot_takes_git_offline_before_native_submission() -> None:
     restore = pilot.index("offline_remote.rename(remote)")
     assert offline < native < restore
     assert 'report["local_result_before_git_restore"] = True' in pilot
-    assert 'report["git_fallback_published_without_reexecution"] = True' in pilot
+    assert '"git_fallback_published_without_reexecution": True' in pilot
