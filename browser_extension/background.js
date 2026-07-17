@@ -6,6 +6,8 @@ const ACTION_SCHEMA = "bdb-action-v1";
 const WORKSPACE_CONTEXT_OPERATION = "workspace_context";
 const MAX_SERIALIZED_BYTES = 1024 * 1024;
 const DEFAULT_WAIT_SECONDS = 30;
+const PROMOTION_WAIT_ATTEMPTS = 60;
+const PROMOTION_WAIT_MILLISECONDS = 100;
 const DEFAULT_AUTO_SETTINGS = Object.freeze({
   autoEnabled: false,
   autoMaxIterations: 4,
@@ -72,14 +74,22 @@ function sendNative(request) {
   });
 }
 
-async function workspaceContext(action) {
-  const repoAlias = validateRepoAlias(action.repo_alias);
-  const native = await sendNative({
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function nativeContext(repoAlias) {
+  return sendNative({
     schema: REQUEST_SCHEMA,
     request_id: requestId("workspace-context"),
     action: "context",
-    repo_alias: repoAlias
+    repo_alias: validateRepoAlias(repoAlias)
   });
+}
+
+async function workspaceContext(action) {
+  const repoAlias = validateRepoAlias(action.repo_alias);
+  const native = await nativeContext(repoAlias);
   return {
     schema: native.schema,
     request_id: native.request_id,
@@ -92,6 +102,70 @@ async function workspaceContext(action) {
       arm: native.arm
     }
   };
+}
+
+function requiresPromotion(action) {
+  const promotion = action && action.promotion;
+  return Boolean(
+    promotion &&
+    typeof promotion === "object" &&
+    !Array.isArray(promotion) &&
+    promotion.mode === "required"
+  );
+}
+
+function withPromotion(response, promotion) {
+  const result = response && response.result && typeof response.result === "object"
+    ? response.result
+    : {};
+  return { ...response, result: { ...result, promotion } };
+}
+
+async function waitForRequiredPromotion(action, response) {
+  if (!requiresPromotion(action)) {
+    return response;
+  }
+  const result = response && response.result;
+  const successfulPatch = Boolean(
+    response &&
+    response.status === "completed" &&
+    result &&
+    result.status === "success" &&
+    result.data &&
+    result.data.operation === "multi_file_patch"
+  );
+  if (!successfulPatch) {
+    return response;
+  }
+
+  const commandId = response.command_id || result.command_id;
+  if (typeof commandId !== "string" || commandId.length === 0) {
+    return withPromotion(response, {
+      status: "needs_user",
+      reason: "completed_result_has_no_command_id"
+    });
+  }
+
+  for (let attempt = 0; attempt < PROMOTION_WAIT_ATTEMPTS; attempt += 1) {
+    const contextResponse = await nativeContext(action.repo_alias);
+    const context = contextResponse && contextResponse.context;
+    const receipt = context && context.latest_promotion;
+    if (
+      receipt &&
+      receipt.status === "promoted" &&
+      receipt.command_id === commandId &&
+      context.source_clean === true
+    ) {
+      return withPromotion(response, receipt);
+    }
+    await sleep(PROMOTION_WAIT_MILLISECONDS);
+  }
+
+  return withPromotion(response, {
+    status: "needs_user",
+    reason: "promotion_not_observed",
+    command_id: commandId
+  });
 }
 
 async function submitAction(action, tabId) {
@@ -110,13 +184,14 @@ async function submitAction(action, tabId) {
     if (action.operation === WORKSPACE_CONTEXT_OPERATION) {
       return await workspaceContext(action);
     }
-    return await sendNative({
+    const response = await sendNative({
       schema: REQUEST_SCHEMA,
       request_id: requestId("submit"),
       action: "submit_action",
       wait_seconds: DEFAULT_WAIT_SECONDS,
       bdb_action: action
     });
+    return await waitForRequiredPromotion(action, response);
   } finally {
     inFlightTabs.delete(tabId);
   }
@@ -298,12 +373,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           action: "status"
         });
       case "BDB_CONTEXT":
-        return sendNative({
-          schema: REQUEST_SCHEMA,
-          request_id: requestId("context"),
-          action: "context",
-          repo_alias: validateRepoAlias(message.repoAlias)
-        });
+        return nativeContext(message.repoAlias);
       default:
         throw new Error("Unsupported extension message");
     }
