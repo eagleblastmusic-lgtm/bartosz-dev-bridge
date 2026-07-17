@@ -47,7 +47,8 @@ jobs:
             "scripts/Invoke-GHB0RecoveryGate.ps1",
             "scripts/Invoke-BDBLocalE2E.ps1",
             "scripts/Invoke-BDBPersistentPilot.ps1",
-            "scripts/Invoke-BDBGitHubPilot.ps1"
+            "scripts/Invoke-BDBGitHubPilot.ps1",
+            "scripts/Install-BDBNativeHost.ps1"
           )
           foreach ($script in $scripts) {
             $tokens = $null

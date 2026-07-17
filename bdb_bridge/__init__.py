@@ -172,3 +172,5 @@ from .multi_file_patch_cli import install_multi_file_patch_cli
 install_multi_file_patch_cli()
 from .local_spool_cli import install_local_spool_cli
 install_local_spool_cli()
+from .native_host_cli import install_native_host_cli
+install_native_host_cli()
