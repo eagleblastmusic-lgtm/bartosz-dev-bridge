@@ -26,6 +26,16 @@ The bootstrap:
 - preserves the fixture, worktree, Journal, logs and registration when stopped;
 - never runs `git reset`, `git clean`, recursive deletion or automatic cleanup.
 
+## Validated checkpoint
+
+The reviewed bootstrap was validated by Bridge CI on Windows/Python 3.14 with the exact lifecycle:
+
+```text
+Setup → RUNNING → ARMED → Status → DISARM → graceful Stop → OFFLINE
+```
+
+The same exact-head run also passed the existing local E2E, persistent operator, Direct Lane Native and private GitHub smoke gates. The operator must still verify the real browser extension ID and local machine state before setup.
+
 ## Prerequisites
 
 - Windows 10 or Windows 11;
