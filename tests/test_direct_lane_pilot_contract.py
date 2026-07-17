@@ -20,7 +20,7 @@ def test_ci_runs_direct_lane_native_pilot_on_windows_314() -> None:
 
 def test_checked_runner_executes_native_host_and_normalizes_only_known_stop_messages() -> None:
     checked = read("scripts/run_direct_lane_pilot_checked.py")
-    assert "bdb_bridge.native_host as nh" in checked
+    assert "from bdb_bridge.native_host import main" in checked
     assert "sys.argv = ['bdb-native-host', *sys.argv[1:]]" in checked
     assert "_STOP_MESSAGES = frozenset" in checked
     assert "Graceful stop request sent successfully." in checked
