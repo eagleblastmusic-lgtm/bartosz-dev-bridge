@@ -86,6 +86,18 @@ def test_required_promotion_blocks_auto_until_receipt_matches_command() -> None:
     assert "PROMOTION_WAIT_ATTEMPTS" in background
 
 
+def test_auto_continues_only_after_verified_rollback_profile_failure() -> None:
+    background = read("background.js")
+    assert "continue_on_failure" in background
+    assert "isRecoverableProfileFailure" in background
+    assert 'result.status === "failed" || result.status === "timeout"' in background
+    assert 'data.operation === "multi_file_patch"' in background
+    assert "data.rollback_performed === true" in background
+    assert 'data.checkpoint_state === "rolled_back"' in background
+    assert "const terminal = recoverableFailure ? null" in background
+    assert "recoverableFailure," in background
+
+
 def test_auto_remains_bounded_and_explicitly_opt_in() -> None:
     background = read("background.js")
     content = read("content.js")
