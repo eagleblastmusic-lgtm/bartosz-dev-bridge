@@ -1,0 +1,33 @@
+.bdb-assisted {
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 10px;
+  margin-top: 8px;
+  padding: 10px;
+  font: 13px/1.45 system-ui, sans-serif;
+}
+
+.bdb-execute,
+.bdb-controls button {
+  border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+  border-radius: 8px;
+  cursor: pointer;
+  padding: 7px 11px;
+}
+
+.bdb-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.bdb-result {
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.bdb-status {
+  font-weight: 650;
+  margin-top: 8px;
+}
