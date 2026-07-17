@@ -13,7 +13,10 @@ from .git_command_transport import GitCommandTransport
 from .ingestion import CommandIngestor
 from .instance_lock import InstanceLock
 from .journal import Journal
+from .local_mirroring_outbox import LocalMirroringOutboxProcessor
+from .local_result_sink import LocalResultSink
 from .local_spool_transport import LocalSpoolTransport
+from .local_wake import BridgeWakeWaiter
 from .migrations import map_sqlite_error
 from .models import BridgeErrorCode
 from .priority_ingestion import PriorityCommandIngestor
@@ -62,9 +65,12 @@ def run_foreground(config: BridgeConfig) -> int:
         legacy._write_controlled_error(f"Failed to create runtime directory {runtime}", exc)
         return 1
     lock = InstanceLock(runtime / "bridge.instance.lock")
+    wake_waiter = BridgeWakeWaiter(runtime) if config.direct_spool_enabled else None
     try:
         lock.acquire()
     except BridgeError as exc:
+        if wake_waiter is not None:
+            wake_waiter.close()
         if exc.code == BridgeErrorCode.INSTANCE_ALREADY_RUNNING.value:
             sys.stderr.write("Error: Another bridge instance is already running\n")
         else:
@@ -76,12 +82,16 @@ def run_foreground(config: BridgeConfig) -> int:
             hook("AFTER_INSTANCE_LOCK_BEFORE_DB_START")
     except SystemCrash as exc:
         lock.release()
+        if wake_waiter is not None:
+            wake_waiter.close()
         legacy._write_controlled_error("Controlled lifecycle fault", exc)
         return 2
     try:
         journal = Journal.open(config.journal_path)
     except Exception as exc:
         lock.release()
+        if wake_waiter is not None:
+            wake_waiter.close()
         legacy._write_controlled_error("Failed to open journal", exc)
         return 1
     try:
@@ -108,7 +118,15 @@ def run_foreground(config: BridgeConfig) -> int:
 
         scheduler = SingleQueueScheduler(journal)
         result_transport = GitResultTransport(config, remote_name=res_remote or "origin")
-        outbox = OutboxProcessor(journal, result_transport, fault_hook=hook)
+        if config.direct_spool_enabled:
+            outbox = LocalMirroringOutboxProcessor(
+                journal,
+                result_transport,
+                fault_hook=hook,
+                result_sink=LocalResultSink(config.direct_result_dir),
+            )
+        else:
+            outbox = OutboxProcessor(journal, result_transport, fault_hook=hook)
         reconcile_staged_result_after_restart(journal, outbox)
         coordinator = ResultCoordinator(
             config,
@@ -117,6 +135,9 @@ def run_foreground(config: BridgeConfig) -> int:
             fault_hook=hook,
             instance_lock=lock,
         )
+        service_kwargs: dict[str, object] = {}
+        if wake_waiter is not None:
+            service_kwargs["waiter"] = wake_waiter
         service = BridgeService(
             config=config,
             journal=journal,
@@ -126,10 +147,13 @@ def run_foreground(config: BridgeConfig) -> int:
             outbox_processor=outbox,
             instance_lock=lock,
             fault_hook=hook,
+            **service_kwargs,
         )
     except Exception as exc:
         journal.close()
         lock.release()
+        if wake_waiter is not None:
+            wake_waiter.close()
         legacy._write_controlled_error("Failed to initialize service dependencies", exc)
         return 1
 
@@ -156,3 +180,5 @@ def run_foreground(config: BridgeConfig) -> int:
     finally:
         journal.close()
         lock.release()
+        if wake_waiter is not None:
+            wake_waiter.close()
