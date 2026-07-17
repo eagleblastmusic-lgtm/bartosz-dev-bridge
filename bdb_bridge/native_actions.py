@@ -256,6 +256,7 @@ class NativeActionComposer:
             "session_id": session_id,
             "repository_id": session_record.repository_id,
             "base_sha": session_record.base_sha,
+            "allowed_paths": list(repository.bridge_config.allowed_paths),
             "created_at": session_record.created_at,
             "expires_at": expires_at,
         }
