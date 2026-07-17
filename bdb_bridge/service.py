@@ -90,8 +90,12 @@ class BridgeService:
 
     @staticmethod
     def _cycle_made_progress(report: BridgeCycleReport) -> bool:
-        if report.recovery_outcome and report.recovery_outcome.startswith("recovered:"):
-            return not report.recovery_outcome.endswith(":result_staged")
+        if (
+            report.recovery_outcome
+            and report.recovery_outcome.startswith("recovered:")
+            and not report.recovery_outcome.endswith(":result_staged")
+        ):
+            return True
         if report.outbox_outcome in {
             f"processed:{OutboxProcessState.PUBLISHED.value}",
             f"processed:{OutboxProcessState.ALREADY_PUBLISHED.value}",
@@ -100,8 +104,12 @@ class BridgeService:
             return True
         if report.ingest_outcome and report.ingest_outcome.startswith("ingested:"):
             return True
-        if report.execute_outcome and report.execute_outcome.startswith("executed:"):
-            return not report.execute_outcome.endswith(":result_staged")
+        if (
+            report.execute_outcome
+            and report.execute_outcome.startswith("executed:")
+            and not report.execute_outcome.endswith(":result_staged")
+        ):
+            return True
         return False
 
     def run_cycle(self, instance_id: str) -> BridgeCycleReport:
@@ -203,6 +211,8 @@ class BridgeService:
             execute_outcome = "skipped"
         self._fault("AFTER_EXECUTE_PHASE")
 
+        # Execution is a safe phase boundary: observe a durable STOPPING request
+        # immediately after it finishes, before the service can enter another idle wait.
         if self._should_stop(instance_id):
             dt = (time.perf_counter() - t0) * 1000.0
             return BridgeCycleReport(
@@ -254,6 +264,8 @@ class BridgeService:
 
                 report = self.run_cycle(instance_id)
 
+                # A stop requested during execution must not incur a complete
+                # idle_poll_seconds delay after that safe phase has finished.
                 if self._should_stop(instance_id):
                     continue
                 if self._cycle_made_progress(report):
