@@ -14,18 +14,10 @@ import run_direct_lane_pilot as pilot
 
 _NATIVE_MODULE = "bdb_bridge.native_host"
 _NATIVE_SHIM = (
-    "import sys, traceback; "
-    "import bdb_bridge.native_host as nh; "
-    "namespace = {'original': nh.NativeHostService.handle, 'traceback': traceback, 'sys': sys}; "
-    "exec(\"def diagnostic(self, request):\\n"
-    "    try:\\n"
-    "        return original(self, request)\\n"
-    "    except Exception:\\n"
-    "        traceback.print_exc(file=sys.stderr)\\n"
-    "        raise\", namespace); "
-    "nh.NativeHostService.handle = namespace['diagnostic']; "
+    "import sys; "
+    "from bdb_bridge.native_host import main; "
     "sys.argv = ['bdb-native-host', *sys.argv[1:]]; "
-    "nh.main()"
+    "main()"
 )
 _STOP_MESSAGES = frozenset(
     {
@@ -91,15 +83,9 @@ def _checked_run(
     input_bytes: bytes | None = None,
 ):
     argv = list(args)
-    is_native = len(argv) >= 3 and argv[1:3] == ["-m", _NATIVE_MODULE]
-    if is_native:
+    if len(argv) >= 3 and argv[1:3] == ["-m", _NATIVE_MODULE]:
         argv = [argv[0], "-c", _NATIVE_SHIM, *argv[3:]]
-    completed = _ORIGINAL_RUN(argv, cwd=cwd, check=check, input_bytes=input_bytes)
-    if is_native and completed.stderr:
-        stderr = completed.stderr.decode("utf-8", errors="replace") if isinstance(completed.stderr, bytes) else str(completed.stderr)
-        if "Traceback (most recent call last)" in stderr:
-            raise RuntimeError(f"Native Host diagnostic traceback:\n{stderr[-8000:]}")
-    return completed
+    return _ORIGINAL_RUN(argv, cwd=cwd, check=check, input_bytes=input_bytes)
 
 
 def _checked_load_json_output(completed: Any) -> dict[str, Any]:
