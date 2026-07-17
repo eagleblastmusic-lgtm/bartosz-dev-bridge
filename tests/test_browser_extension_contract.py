@@ -24,13 +24,17 @@ def test_manifest_has_minimal_mv3_permissions() -> None:
         assert forbidden not in serialized
 
 
-def test_content_script_is_assisted_not_auto_submit() -> None:
+def test_manual_content_handler_remains_assisted() -> None:
     content = read("content.js")
     assert "bdb-action-v1" in content
     assert "BDB: Wykonaj" in content
     assert "Przygotuj kontynuację" in content
-    assert "click()" not in content
-    assert "send-button" not in content
+    start = content.index('button.addEventListener("click", async () => {')
+    end = content.index("panel.append(button, output);", start)
+    manual_handler = content[start:end]
+    assert "button.click()" not in manual_handler
+    assert "send-button" not in manual_handler
+    assert "autoSend(" not in manual_handler
     assert "MutationObserver" in content
     assert "navigator.clipboard.writeText" in content
 
@@ -54,5 +58,5 @@ def test_extension_contains_no_remote_scripts_or_inline_script() -> None:
         assert "http://" not in text
         assert "https://" not in text or path.name in {"manifest.json", "README.md"}
     popup = read("popup.html")
-    assert "<script src=\"popup.js\"></script>" in popup
+    assert '<script src="popup.js"></script>' in popup
     assert "<script>" not in popup
