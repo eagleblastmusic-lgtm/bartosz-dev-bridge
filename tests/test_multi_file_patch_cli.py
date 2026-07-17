@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from bdb_bridge import CommandState
@@ -44,6 +45,7 @@ class FakeJournal:
         if command_id != COMMAND_ID:
             return None
         return SimpleNamespace(
+            document_commit_sha="a" * 40,
             created_remote_at="2026-07-15T12:00:00Z",
             first_seen_at="2026-07-15T12:00:01Z",
         )
@@ -115,7 +117,15 @@ def test_edit_status_reports_durable_batch_state_and_timing(monkeypatch, capsys)
         "bdb_bridge.multi_file_patch_cli.Journal.open",
         lambda path: fake,
     )
-    assert _edit_status(SimpleNamespace(journal_path="journal.db"), COMMAND_ID, True) == 0
+    monkeypatch.setattr(
+        "bdb_bridge.multi_file_patch_cli.read_commit_timestamp",
+        lambda repo, sha: "2026-07-15T12:00:00.500000Z",
+    )
+    config = SimpleNamespace(
+        journal_path="journal.db",
+        control_repo_path=Path("control"),
+    )
+    assert _edit_status(config, COMMAND_ID, True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
         "checkpoint_sha256": "sha256:" + "1" * 64,
@@ -131,6 +141,8 @@ def test_edit_status_reports_durable_batch_state_and_timing(monkeypatch, capsys)
         "session_id": SESSION_ID,
         "timing": {
             "durations_ms": {
+                "document_age_at_first_seen_ms": 1000.0,
+                "document_to_result_ms": 8000.0,
                 "end_to_end_ms": 8000.0,
                 "execution_ms": 1000.0,
                 "inbound_transport_ms": 1000.0,
@@ -138,16 +150,20 @@ def test_edit_status_reports_durable_batch_state_and_timing(monkeypatch, capsys)
                 "result_publication_ms": 2000.0,
                 "result_staging_ms": 1000.0,
                 "scheduler_queue_ms": 1000.0,
+                "source_commit_to_first_seen_ms": 500.0,
+                "source_commit_to_result_ms": 7500.0,
                 "validation_ms": 1000.0,
             },
             "timestamps": {
                 "claimed_at": "2026-07-15T12:00:03Z",
+                "document_created_at": "2026-07-15T12:00:00Z",
                 "execution_finished_at": "2026-07-15T12:00:05Z",
                 "execution_started_at": "2026-07-15T12:00:04Z",
                 "first_seen_at": "2026-07-15T12:00:01Z",
                 "remote_created_at": "2026-07-15T12:00:00Z",
                 "result_published_at": "2026-07-15T12:00:08Z",
                 "result_staged_at": "2026-07-15T12:00:06Z",
+                "source_commit_at": "2026-07-15T12:00:00.500000Z",
                 "validated_at": "2026-07-15T12:00:02Z",
             },
         },
@@ -155,3 +171,29 @@ def test_edit_status_reports_durable_batch_state_and_timing(monkeypatch, capsys)
         "workspace_revision_before": 0,
     }
     assert fake.closed is True
+
+
+def test_source_commit_lookup_failure_keeps_status_available(monkeypatch, capsys) -> None:
+    fake = FakeJournal()
+    monkeypatch.setattr(
+        "bdb_bridge.multi_file_patch_cli.Journal.open",
+        lambda path: fake,
+    )
+
+    from bdb_bridge import BridgeError, BridgeErrorCode
+
+    def fail(repo, sha):
+        raise BridgeError(BridgeErrorCode.TRANSPORT_UNAVAILABLE, "missing object")
+
+    monkeypatch.setattr(
+        "bdb_bridge.multi_file_patch_cli.read_commit_timestamp",
+        fail,
+    )
+    config = SimpleNamespace(
+        journal_path="journal.db",
+        control_repo_path=Path("control"),
+    )
+    assert _edit_status(config, COMMAND_ID, True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["timing"]["timestamps"]["source_commit_at"] is None
+    assert payload["timing"]["durations_ms"]["source_commit_to_result_ms"] is None
