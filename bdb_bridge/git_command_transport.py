@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -95,6 +94,21 @@ class Git:
                 f"git {' '.join(args)} failed with exit code {completed.returncode}: {detail}",
             )
         return completed
+
+
+def read_commit_timestamp(repo_path: Path, commit_sha: str) -> str:
+    validate_sha40("document commit SHA", commit_sha)
+    completed = Git(repo_path).run_bytes(
+        ["show", "-s", "--format=%cI", commit_sha],
+        check=True,
+    )
+    value = completed.stdout.decode("utf-8", errors="strict").strip()
+    if not value:
+        raise BridgeError(
+            BridgeErrorCode.TRANSPORT_UNAVAILABLE,
+            f"Missing timestamp for document commit {commit_sha}",
+        )
+    return _canonical_git_timestamp(value)
 
 
 class GitCommandTransport:
