@@ -50,6 +50,7 @@ jobs:
             "scripts/Invoke-BDBGitHubPilot.ps1",
             "scripts/Invoke-BDBDirectLanePilot.ps1",
             "scripts/Invoke-BDBLocalBrowserPilot.ps1",
+            "scripts/Invoke-BDBWorkspaceLoop.ps1",
             "scripts/Install-BDBNativeHost.ps1"
           )
           foreach ($script in $scripts) {
@@ -73,6 +74,8 @@ jobs:
           python -m py_compile scripts/run_direct_lane_pilot.py
           python -m py_compile scripts/run_direct_lane_pilot_checked.py
           python -m py_compile scripts/prepare_local_browser_pilot.py
+          python -m py_compile scripts/prepare_workspace_loop.py
+          python -m py_compile scripts/run_workspace_promoter.py
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
       - name: Run tests
@@ -103,6 +106,51 @@ jobs:
             -Root $root | ConvertFrom-Json
           if ($stop.status -ne "OFFLINE" -or $stop.artifacts_preserved -ne $true) {
             throw "Local browser pilot did not stop safely"
+          }
+      - name: Run local workspace loop lifecycle
+        if: runner.os == 'Windows' && matrix.python-version == '3.14'
+        shell: powershell
+        run: |
+          $source = Join-Path $env:RUNNER_TEMP "bdb-workspace-loop-source"
+          $root = Join-Path $env:RUNNER_TEMP "bdb-workspace-loop"
+          git init $source
+          git -C $source config user.name "Workspace Loop CI"
+          git -C $source config user.email "workspace-loop-ci@example.invalid"
+          "VALUE = 1" | Set-Content -LiteralPath (Join-Path $source "app.py") -Encoding utf8
+          git -C $source add -- app.py
+          git -C $source commit -m "baseline"
+
+          $prepare = .\scripts\Invoke-BDBWorkspaceLoop.ps1 `
+            -Action Prepare `
+            -Root $root `
+            -Repo $source `
+            -Alias "workspace-ci" `
+            -AllowedPath @("app.py") `
+            -Python (Get-Command python).Source | ConvertFrom-Json
+          if ($prepare.status -ne "PREPARED" -or $prepare.alias -ne "workspace-ci") {
+            throw "Workspace loop preparation failed"
+          }
+
+          $start = .\scripts\Invoke-BDBWorkspaceLoop.ps1 `
+            -Action Start `
+            -Root $root `
+            -ArmMinutes 5 | ConvertFrom-Json
+          if ($start.status -ne "RUNNING" -or $start.promoter.running -ne $true) {
+            throw "Workspace loop did not start"
+          }
+
+          $status = .\scripts\Invoke-BDBWorkspaceLoop.ps1 `
+            -Action Status `
+            -Root $root | ConvertFrom-Json
+          if ($status.status -ne "READY" -or $status.source_clean -ne $true) {
+            throw "Workspace loop is not ready"
+          }
+
+          $stop = .\scripts\Invoke-BDBWorkspaceLoop.ps1 `
+            -Action Stop `
+            -Root $root | ConvertFrom-Json
+          if ($stop.status -ne "OFFLINE" -or $stop.artifacts_preserved -ne $true) {
+            throw "Workspace loop did not stop safely"
           }
       - name: Run local E2E POC gate
         if: runner.os == 'Windows' && matrix.python-version == '3.14'
