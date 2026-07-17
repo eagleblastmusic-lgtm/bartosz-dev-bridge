@@ -35,6 +35,13 @@ def test_checked_runner_emits_canonical_multi_file_patch_content() -> None:
     assert '"content_encoding"' not in checked
 
 
+def test_checked_runner_avoids_fresh_journal_status_race() -> None:
+    checked = read("scripts/run_direct_lane_pilot_checked.py")
+    assert 'if description == "Bridge RUNNING":' in checked
+    assert "time.sleep(1.0)" in checked
+    assert "pilot.wait_until = _checked_wait_until" in checked
+
+
 def test_checked_runner_requires_exact_offline_to_published_transition() -> None:
     checked = read("scripts/run_direct_lane_pilot_checked.py")
     assert 'before.get("command_state") != "result_staged"' in checked
