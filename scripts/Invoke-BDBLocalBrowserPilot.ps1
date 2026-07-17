@@ -258,7 +258,7 @@ Invoke-Checked $pythonExecutable @(
 $bridge = Wait-ForBridgeState $pythonExecutable $bridgeConfig "OFFLINE"
 
 $state.status = "stopped"
-$state.stopped_at = [DateTime]::UtcNow.ToString("o")
+$state | Add-Member -NotePropertyName stopped_at -NotePropertyValue ([DateTime]::UtcNow.ToString("o")) -Force
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText(
     $statePath,
