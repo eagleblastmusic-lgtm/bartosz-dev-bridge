@@ -1,11 +1,11 @@
 # Bartosz Dev Bridge
 
-Lokalny Bridge dla ChatGPT Plus i GitHuba, rozwinięty od POC-0 do trwałego, pojedynczego runtime’u z procesową bramką recovery.
+Lokalny Bridge dla ChatGPT Plus i GitHuba, rozwinięty od POC-0 do trwałego runtime’u z bezpieczną pętlą lokalnego workspace.
 
 Aktualna faza:
 
 ```text
-GHB2-D — final multi-file editing gate implemented
+Local Workspace Loop — bounded context, tested edits, rollback repair and verified local promotion
 ```
 
 ## Działający zakres
@@ -31,7 +31,13 @@ GHB2-D — final multi-file editing gate implemented
 - trwały Journal v9, crash-recoverable batch apply/rollback i session-scoped recovery;
 - finalna bramka `multi_file_patch` z bounded profilem, commitem przy sukcesie i pełnym rollbackiem przy failure;
 - trwały Journal v10 dla immutable profile outcome;
-- osobny, walidowany wynik batchu publikowany przez wspólny durable outbox.
+- osobny, walidowany wynik batchu publikowany przez wspólny durable outbox;
+- bounded lokalny snapshot dla Native Hosta bez ujawniania ścieżek absolutnych;
+- kompaktowe karty akcji oraz bounded, opt-in AUTO w rozszerzeniu;
+- automatyczna pętla naprawcza wyłącznie po potwierdzonym rollbacku;
+- idempotentny promoter: dokładny commit i wyłącznie `git merge --ff-only` do czystego checkoutu;
+- trwałe receipts promocji z commitem, plikami i hashami;
+- operator Windows `Prepare`, `Start`, `Status`, `Stop` dla trwałych aliasów projektów.
 
 ## CLI
 
@@ -71,6 +77,31 @@ Context pack i końcowa bramka większego repozytorium (GHB1-C) są opisane w [d
 Trwały checkpoint, fizyczny batch apply, rollback, commit CAS i recovery są opisane w [docs/GHB2C_DURABLE_BATCH_RECOVERY.md](docs/GHB2C_DURABLE_BATCH_RECOVERY.md).
 
 Finalna aktywacja `multi_file_patch`, durable profile outcome, wynik batchu i operator status są opisane w [docs/GHB2D_FINAL_EDITING_GATE.md](docs/GHB2D_FINAL_EDITING_GATE.md).
+
+## Local Workspace Loop
+
+Jednorazowe podłączenie czystego lokalnego repo:
+
+```powershell
+.\scripts\Invoke-BDBWorkspaceLoop.ps1 `
+  -Action Prepare `
+  -Root "$env:LOCALAPPDATA\BartoszDevBridge\workspaces\calculator" `
+  -Repo "C:\Projekty\Kalkulator test" `
+  -Alias "calculator" `
+  -AllowedPath @("*.py", "tests/*.py", "README.md", ".gitignore")
+```
+
+Codzienny lifecycle:
+
+```powershell
+.\scripts\Invoke-BDBWorkspaceLoop.ps1 -Action Start  -Root <workspace-loop-root>
+.\scripts\Invoke-BDBWorkspaceLoop.ps1 -Action Status -Root <workspace-loop-root>
+.\scripts\Invoke-BDBWorkspaceLoop.ps1 -Action Stop   -Root <workspace-loop-root>
+```
+
+Po `READY` ChatGPT może w jednej bounded pętli pobrać lokalny kontekst, wykonać dokładny odczyt, zmienić kilka plików, uruchomić allowlistowany profil, przeanalizować bezpiecznie wycofaną porażkę, ponowić poprawkę i zakończyć dopiero po receipt potwierdzającym fast-forward właściwego lokalnego checkoutu.
+
+Pełny kontrakt, przykłady akcji, reguły AUTO, promocji i bezpieczeństwa: [docs/LOCAL_WORKSPACE_LOOP.md](docs/LOCAL_WORKSPACE_LOOP.md).
 
 ## Lokalny end-to-end POC
 
@@ -178,31 +209,3 @@ git -C <fixture_repo> worktree remove --force <exact_workspace_path>
 ```
 
 Bridge nie używa `shutil.rmtree`, `Remove-Item -Recurse`, `rmdir /s`, `git reset`, `git clean` ani `git worktree prune`. Cleanup jest odzyskiwany po awarii przed startem, po `removing` oraz po fizycznym remove przed local DB ACK.
-
-## Granice bezpieczeństwa
-
-GHB-0/GHB-1/GHB2-D nadal nie dodają:
-
-- protocol ACK ani automatycznego `ACKNOWLEDGED`;
-- automatic cleanup lub retention;
-- cleanupu aktywnych/manual sessions;
-- Windows Service, Scheduled Task, GUI, tray, installer lub autostart;
-- arbitrary shell lub `shell=True`;
-- arbitralnego wyboru profilu testowego;
-- wielu workerów i równoległych sesji;
-- HTTP/WebSocket remote control;
-- wykonywania lub importowania kodu analizowanego repozytorium poza bounded profilem `poc_pytest`;
-- Hermesa, GicleeApp, Browser Lab, Playwright, LSP ani embeddings;
-- zależności runtime `bdb_bridge → bdb_poc`.
-
-Legacy POC-0A i POC-0B pozostają regresjami przez `poc_bridge.py` oraz `bdb_poc.PocBridge`.
-
-Dokumentacja operatorska:
-
-- `docs/GHB0_WINDOWS_RUNBOOK.md`;
-- `docs/GHB0_RECOVERY_GATE.md`;
-- `docs/GHB2C_DURABLE_BATCH_RECOVERY.md`;
-- `docs/GHB2D_FINAL_EDITING_GATE.md`;
-- `docs/LOCAL_E2E_POC.md`;
-- `docs/PERSISTENT_OPERATOR_PILOT.md`;
-- `docs/GITHUB_REMOTE_PILOT.md`.
