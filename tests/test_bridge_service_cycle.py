@@ -115,6 +115,42 @@ def test_cycle_order_and_stop(tmp_path: Path, make_config) -> None:
     assert report.execute_outcome is None
 
 
+def test_malformed_ingest_report_is_not_counted_as_progress(make_config) -> None:
+    journal = MagicMock(spec=Journal)
+    journal._now_fn = lambda: "2026-07-15T12:00:00Z"
+    journal.get_recoverable_command.return_value = None
+    journal.has_blocking_ingestion_issues.return_value = False
+
+    ingestor = MagicMock(spec=CommandIngestor)
+    ingestor.poll_once.return_value = MagicMock()
+
+    scheduler = MagicMock(spec=SingleQueueScheduler)
+    scheduler.claim_next.return_value = None
+
+    outbox_processor = MagicMock(spec=OutboxProcessor)
+    outbox_processor.process_one_due.return_value = OutboxProcessOutcome(
+        OutboxProcessState.NO_DUE,
+        None,
+        None,
+        None,
+    )
+
+    service = BridgeService(
+        config=make_config,
+        journal=journal,
+        ingestor=ingestor,
+        scheduler=scheduler,
+        result_coordinator=MagicMock(spec=ResultCoordinator),
+        outbox_processor=outbox_processor,
+        instance_lock=MagicMock(spec=InstanceLock),
+    )
+
+    report = service.run_cycle("inst-1")
+
+    assert report.ingest_outcome == "none"
+    assert service._cycle_made_progress(report) is False
+
+
 @pytest.mark.parametrize(
     ("report", "expected"),
     [
