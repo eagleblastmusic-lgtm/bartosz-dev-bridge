@@ -2,11 +2,20 @@
 
 const aliasInput = document.getElementById("alias");
 const output = document.getElementById("output");
+const autoEnabled = document.getElementById("auto-enabled");
+const autoIterations = document.getElementById("auto-iterations");
+const autoMinutes = document.getElementById("auto-minutes");
 
-async function loadAlias() {
-  const stored = await chrome.storage.local.get("repoAlias");
-  if (typeof stored.repoAlias === "string" && /^[a-z][a-z0-9-]{0,31}$/.test(stored.repoAlias)) {
-    aliasInput.value = stored.repoAlias;
+async function loadSettings() {
+  const aliasStored = await chrome.storage.local.get("repoAlias");
+  if (typeof aliasStored.repoAlias === "string" && /^[a-z][a-z0-9-]{0,31}$/.test(aliasStored.repoAlias)) {
+    aliasInput.value = aliasStored.repoAlias;
+  }
+  const result = await chrome.runtime.sendMessage({ type: "BDB_GET_AUTO_SETTINGS" });
+  if (result && result.ok === true) {
+    autoEnabled.checked = result.response.autoEnabled === true;
+    autoIterations.value = String(result.response.autoMaxIterations);
+    autoMinutes.value = String(result.response.autoMaxMinutes);
   }
 }
 
@@ -30,5 +39,13 @@ document.getElementById("context").addEventListener("click", async () => {
   await chrome.storage.local.set({ repoAlias });
   await run({ type: "BDB_CONTEXT", repoAlias });
 });
+document.getElementById("save-auto").addEventListener("click", async () => {
+  const settings = {
+    autoEnabled: autoEnabled.checked,
+    autoMaxIterations: Number(autoIterations.value),
+    autoMaxMinutes: Number(autoMinutes.value)
+  };
+  await run({ type: "BDB_SET_AUTO_SETTINGS", settings });
+});
 
-loadAlias();
+loadSettings();

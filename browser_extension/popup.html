@@ -15,6 +15,15 @@
         <button id="status" type="button">Status hosta</button>
         <button id="context" type="button">Kontekst repo</button>
       </div>
+      <fieldset>
+        <legend>AUTO — jawne opt-in</legend>
+        <label class="check"><input id="auto-enabled" type="checkbox"> Włącz AUTO dla akcji z `automation.mode=auto`</label>
+        <label for="auto-iterations">Maks. iteracji (1–8)</label>
+        <input id="auto-iterations" type="number" min="1" max="8" value="4">
+        <label for="auto-minutes">Maks. minut (1–30)</label>
+        <input id="auto-minutes" type="number" min="1" max="30" value="10">
+        <button id="save-auto" type="button">Zapisz ustawienia AUTO</button>
+      </fieldset>
       <pre id="output" aria-live="polite">Gotowy.</pre>
     </main>
     <script src="popup.js"></script>

@@ -1,6 +1,6 @@
 body {
   margin: 0;
-  min-width: 340px;
+  min-width: 360px;
   font: 13px/1.45 system-ui, sans-serif;
 }
 
@@ -16,10 +16,14 @@ h1 {
 label {
   display: block;
   font-weight: 650;
-  margin-bottom: 5px;
+  margin: 7px 0 5px;
 }
 
-input {
+label.check {
+  font-weight: 500;
+}
+
+input:not([type='checkbox']) {
   box-sizing: border-box;
   width: 100%;
   padding: 8px;
@@ -31,8 +35,15 @@ input {
   margin: 10px 0;
 }
 
+fieldset {
+  border: 1px solid currentColor;
+  margin: 12px 0;
+  padding: 10px;
+}
+
 button {
   cursor: pointer;
+  margin-top: 8px;
   padding: 7px 10px;
 }
 

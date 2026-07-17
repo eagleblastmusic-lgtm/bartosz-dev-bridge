@@ -20,9 +20,10 @@ function parseAction(codeBlock) {
   }
 }
 
-function resultText(response) {
+function resultText(response, marker = null) {
   const payload = response && response.result ? response.result : response;
-  return `BDB_RESULT:\n${JSON.stringify(payload, null, 2)}`;
+  const prefix = marker ? `${marker}\n` : "";
+  return `${prefix}BDB_RESULT:\n${JSON.stringify(payload, null, 2)}`;
 }
 
 async function writeClipboard(text) {
@@ -52,32 +53,73 @@ function findComposer() {
   return null;
 }
 
-function prepareContinuation(text) {
+function composerText(composer) {
+  if (composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement) {
+    return composer.value;
+  }
+  return composer.innerText || composer.textContent || "";
+}
+
+function prepareContinuation(text, { requireEmpty = false } = {}) {
   const composer = findComposer();
   if (!composer) {
-    return false;
+    return null;
+  }
+  if (requireEmpty && composerText(composer).trim() !== "") {
+    return null;
   }
   composer.focus();
   if (composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement) {
     const prefix = composer.value ? `${composer.value}\n\n` : "";
     composer.value = `${prefix}${text}`;
     composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
-    return true;
+    return composer;
   }
   if (composer.isContentEditable) {
+    if (requireEmpty) {
+      composer.textContent = "";
+    }
     const selection = window.getSelection();
     if (selection) {
       selection.selectAllChildren(composer);
       selection.collapseToEnd();
     }
-    const inserted = typeof document.execCommand === "function" && document.execCommand("insertText", false, `\n\n${text}`);
+    const insertion = requireEmpty ? text : `\n\n${text}`;
+    const inserted = typeof document.execCommand === "function" && document.execCommand("insertText", false, insertion);
     if (!inserted) {
-      composer.append(document.createTextNode(`\n\n${text}`));
+      composer.append(document.createTextNode(insertion));
       composer.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
     }
-    return true;
+    return composer;
   }
-  return false;
+  return null;
+}
+
+async function autoSend(response, loopId, iteration) {
+  const marker = `BDB_AUTO_RESULT:${loopId}:${iteration}`;
+  const text = resultText(response, marker);
+  const composer = prepareContinuation(text, { requireEmpty: true });
+  if (!composer || !composerText(composer).includes(marker)) {
+    return { sent: false, reason: "composer_unavailable_or_not_empty" };
+  }
+  const form = composer.closest("form");
+  if (!form) {
+    return { sent: false, reason: "composer_form_missing" };
+  }
+  let button = null;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const candidate = form.querySelector("button[data-testid='send-button']");
+    if (candidate instanceof HTMLButtonElement && !candidate.disabled) {
+      button = candidate;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (!button || !composerText(composer).includes(marker)) {
+    return { sent: false, reason: "exact_send_button_unavailable" };
+  }
+  button.click();
+  return { sent: true, reason: null };
 }
 
 function renderResult(container, response) {
@@ -118,6 +160,42 @@ function renderResult(container, response) {
   container.append(status, pre, controls);
 }
 
+async function maybeAuto(action, button, output) {
+  const automation = action && action.automation;
+  if (!automation || automation.mode !== "auto") {
+    return;
+  }
+  button.disabled = true;
+  button.textContent = "BDB AUTO: sprawdzanie…";
+  try {
+    const decision = await chrome.runtime.sendMessage({ type: "BDB_CONSIDER_AUTO", action });
+    if (!decision || decision.ok !== true) {
+      throw new Error(decision && decision.error ? decision.error : "Brak decyzji AUTO");
+    }
+    const auto = decision.response;
+    if (!auto.executed) {
+      button.textContent = `BDB: Wykonaj (${auto.reason || "ASSISTED"})`;
+      return;
+    }
+    renderResult(output, auto.response);
+    if (!auto.shouldContinue) {
+      button.textContent = `BDB AUTO: zatrzymano (${auto.stopReason || "limit"})`;
+      return;
+    }
+    const sent = await autoSend(auto.response, auto.loopId, auto.iteration);
+    if (sent.sent) {
+      button.textContent = `BDB AUTO: wysłano ${auto.iteration}`;
+      return;
+    }
+    button.textContent = `BDB AUTO → ASSISTED (${sent.reason})`;
+  } catch (error) {
+    output.textContent = `BDB AUTO error: ${String(error && error.message ? error.message : error)}`;
+    button.textContent = "BDB AUTO → ASSISTED";
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function enhance(codeBlock, action) {
   const host = codeBlock.closest("pre") || codeBlock.parentElement;
   if (!(host instanceof HTMLElement) || host.querySelector(":scope > .bdb-assisted")) {
@@ -155,6 +233,7 @@ function enhance(codeBlock, action) {
 
   panel.append(button, output);
   host.append(panel);
+  maybeAuto(action, button, output);
 }
 
 function scan(root) {
