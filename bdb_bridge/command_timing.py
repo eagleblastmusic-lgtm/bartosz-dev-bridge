@@ -62,7 +62,12 @@ def _duration_ms(start: str | None, finish: str | None) -> float | None:
     return round((finish_dt - start_dt).total_seconds() * 1000.0, 3)
 
 
-def build_command_timing(journal: Journal, command_id: str) -> dict[str, Any]:
+def build_command_timing(
+    journal: Journal,
+    command_id: str,
+    *,
+    source_commit_at: str | None = None,
+) -> dict[str, Any]:
     ingestion = journal.get_command_ingestion(command_id)
     result = journal.get_result(command_id)
     outbox = journal.get_outbox(command_id)
@@ -71,7 +76,7 @@ def build_command_timing(journal: Journal, command_id: str) -> dict[str, Any]:
         result.result_json if result is not None else None
     )
 
-    remote_created_at = ingestion.created_remote_at if ingestion is not None else None
+    document_created_at = ingestion.created_remote_at if ingestion is not None else None
     first_seen_at = ingestion.first_seen_at if ingestion is not None else event_times.get("command.discovered")
     validated_at = event_times.get("command.validated")
     claimed_at = event_times.get("command.claimed") or state_times.get(CommandState.CLAIMED.value)
@@ -81,7 +86,9 @@ def build_command_timing(journal: Journal, command_id: str) -> dict[str, Any]:
     result_published_at = outbox.published_at if outbox is not None else event_times.get("result.published")
 
     timestamps = {
-        "remote_created_at": remote_created_at,
+        "document_created_at": document_created_at,
+        "remote_created_at": document_created_at,
+        "source_commit_at": source_commit_at,
         "first_seen_at": first_seen_at,
         "validated_at": validated_at,
         "claimed_at": claimed_at,
@@ -90,15 +97,21 @@ def build_command_timing(journal: Journal, command_id: str) -> dict[str, Any]:
         "result_staged_at": result_staged_at,
         "result_published_at": result_published_at,
     }
+    document_age_at_first_seen_ms = _duration_ms(document_created_at, first_seen_at)
+    document_to_result_ms = _duration_ms(document_created_at, result_published_at)
     durations = {
-        "inbound_transport_ms": _duration_ms(remote_created_at, first_seen_at),
+        "document_age_at_first_seen_ms": document_age_at_first_seen_ms,
+        "source_commit_to_first_seen_ms": _duration_ms(source_commit_at, first_seen_at),
         "validation_ms": _duration_ms(first_seen_at, validated_at),
         "scheduler_queue_ms": _duration_ms(validated_at, claimed_at),
         "pre_execution_ms": _duration_ms(claimed_at, execution_started_at),
         "execution_ms": _duration_ms(execution_started_at, execution_finished_at),
         "result_staging_ms": _duration_ms(execution_finished_at, result_staged_at),
         "result_publication_ms": _duration_ms(result_staged_at, result_published_at),
-        "end_to_end_ms": _duration_ms(remote_created_at, result_published_at),
+        "source_commit_to_result_ms": _duration_ms(source_commit_at, result_published_at),
+        "document_to_result_ms": document_to_result_ms,
+        "inbound_transport_ms": document_age_at_first_seen_ms,
+        "end_to_end_ms": document_to_result_ms,
     }
 
     return {
