@@ -64,6 +64,8 @@ def test_powershell_bootstrap_never_deletes_or_broadens_scope() -> None:
         assert token not in source
     assert 'artifacts_preserved = $true' in source
     assert 'native_registration_preserved = $true' in source
+    assert 'Add-Member -NotePropertyName stopped_at' in source
+    assert 'Wait-ForBridgeState $pythonExecutable $bridgeConfig "OFFLINE"' in source
 
 
 def test_runbook_requires_assisted_read_only_before_mutation() -> None:
