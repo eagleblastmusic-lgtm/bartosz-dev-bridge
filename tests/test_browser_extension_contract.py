@@ -74,6 +74,18 @@ def test_workspace_context_uses_native_context_without_new_permissions() -> None
     assert 'operation: WORKSPACE_CONTEXT_OPERATION' in background
 
 
+def test_required_promotion_blocks_auto_until_receipt_matches_command() -> None:
+    background = read("background.js")
+    assert 'promotion.mode === "required"' in background
+    assert "waitForRequiredPromotion(action, response)" in background
+    assert "context.latest_promotion" in background
+    assert "receipt.command_id === commandId" in background
+    assert "context.source_clean === true" in background
+    assert 'reason: "promotion_not_observed"' in background
+    assert 'status: "needs_user"' in background
+    assert "PROMOTION_WAIT_ATTEMPTS" in background
+
+
 def test_auto_remains_bounded_and_explicitly_opt_in() -> None:
     background = read("background.js")
     content = read("content.js")
