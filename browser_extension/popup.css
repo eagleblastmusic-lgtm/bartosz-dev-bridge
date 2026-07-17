@@ -1,0 +1,43 @@
+body {
+  margin: 0;
+  min-width: 340px;
+  font: 13px/1.45 system-ui, sans-serif;
+}
+
+main {
+  padding: 14px;
+}
+
+h1 {
+  font-size: 16px;
+  margin: 0 0 12px;
+}
+
+label {
+  display: block;
+  font-weight: 650;
+  margin-bottom: 5px;
+}
+
+input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+button {
+  cursor: pointer;
+  padding: 7px 10px;
+}
+
+pre {
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
