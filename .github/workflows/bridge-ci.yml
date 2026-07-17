@@ -94,13 +94,6 @@ jobs:
             -Python (Get-Command python).Source `
             -Root $root `
             -TimeoutSeconds 120
-      - name: Upload temporary Direct Lane pilot diagnostics
-        if: failure() && runner.os == 'Windows' && matrix.python-version == '3.14'
-        uses: actions/upload-artifact@v4
-        with:
-          name: direct-lane-pilot-diagnostics
-          path: ${{ runner.temp }}/bdb-direct-lane-pilot
-          if-no-files-found: error
       - name: Prepare private GitHub pilot smoke
         if: runner.os == 'Windows' && matrix.python-version == '3.14'
         shell: powershell
