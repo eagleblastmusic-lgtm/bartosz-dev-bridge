@@ -55,6 +55,7 @@ def initialize_repo(path: Path) -> tuple[str, str]:
     run_git(path, "init")
     run_git(path, "config", "user.name", "Open Read Test")
     run_git(path, "config", "user.email", "open-read@example.invalid")
+    run_git(path, "config", "core.autocrlf", "false")
     content = "def clamp(value, low, high):\n    return max(low, min(value, high))\n"
     (path / "src").mkdir()
     (path / "src" / "clamp.py").write_text(content, encoding="utf-8", newline="\n")
