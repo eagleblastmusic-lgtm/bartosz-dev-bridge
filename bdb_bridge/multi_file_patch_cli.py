@@ -7,6 +7,7 @@ from typing import Any
 from . import cli as _legacy
 from . import ghb07_cli as _base
 from .command_timing import build_command_timing
+from .git_command_transport import read_commit_timestamp
 from .journal import Journal
 from .models import BridgeErrorCode
 from .multi_file_patch_gate import MULTI_FILE_PATCH_OPERATION
@@ -46,6 +47,19 @@ def _parser():
     return parser
 
 
+def _source_commit_at(config: Any, journal: Journal, command_id: str) -> str | None:
+    ingestion = journal.get_command_ingestion(command_id)
+    if ingestion is None:
+        return None
+    try:
+        return read_commit_timestamp(
+            config.control_repo_path,
+            ingestion.document_commit_sha,
+        )
+    except BridgeError:
+        return None
+
+
 def _edit_status(config: Any, command_id: str, output_json: bool) -> int:
     journal = None
     try:
@@ -62,7 +76,11 @@ def _edit_status(config: Any, command_id: str, output_json: bool) -> int:
         profile = journal.get_multi_file_patch_profile_run(command_id)
         result = journal.get_result(command_id)
         outbox = journal.get_outbox(command_id)
-        timing = build_command_timing(journal, command_id)
+        timing = build_command_timing(
+            journal,
+            command_id,
+            source_commit_at=_source_commit_at(config, journal, command_id),
+        )
         payload: dict[str, object] = {
             "command_id": command.command_id,
             "session_id": command.session_id,
@@ -93,9 +111,12 @@ def _edit_status(config: Any, command_id: str, output_json: bool) -> int:
                 f"profile={payload['profile_status']} "
                 f"outbox={payload['outbox_state']}"
             )
-            end_to_end_ms = timing["durations_ms"]["end_to_end_ms"]
-            if end_to_end_ms is not None:
-                print(f"- end_to_end_ms={end_to_end_ms}")
+            durations = timing["durations_ms"]
+            source_commit_to_result_ms = durations["source_commit_to_result_ms"]
+            if source_commit_to_result_ms is not None:
+                print(f"- source_commit_to_result_ms={source_commit_to_result_ms}")
+            elif durations["end_to_end_ms"] is not None:
+                print(f"- end_to_end_ms={durations['end_to_end_ms']}")
             if payload["last_error"]:
                 print(f"- {payload['last_error']}")
         return 0
