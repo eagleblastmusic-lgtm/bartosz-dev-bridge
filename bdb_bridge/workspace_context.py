@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -15,6 +16,7 @@ _MAX_SNAPSHOT_BYTES = 256 * 1024
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_SYMBOLS = 500
 _MAX_STATUS_PATHS = 200
+_MAX_RECEIPTS_TO_INSPECT = 200
 _TEXT_SUFFIXES = frozenset(
     {
         ".c",
@@ -154,6 +156,7 @@ class WorkspaceContextBuilder:
             "symbols": symbols[:_MAX_SYMBOLS],
             "symbols_truncated": len(symbols) >= _MAX_SYMBOLS,
             "skipped_files": skipped[:100],
+            "latest_promotion": self._latest_promotion(),
             "capabilities": {
                 "workspace_context": True,
                 "open_read": True,
@@ -194,6 +197,51 @@ class WorkspaceContextBuilder:
         except ValueError as exc:
             raise BridgeError("unsafe_path", f"Workspace path escaped configured root: {normalized}") from exc
         return resolved
+
+    def _latest_promotion(self) -> dict[str, Any] | None:
+        root = Path(self.config.runtime_dir).expanduser().resolve(strict=False) / "promotions"
+        if not root.exists() or root.is_symlink() or not root.is_dir():
+            return None
+        candidates = sorted(
+            (path for path in root.glob("*.json") if path.is_file() and not path.is_symlink()),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )[:_MAX_RECEIPTS_TO_INSPECT]
+        for path in candidates:
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError, UnicodeError):
+                continue
+            if not isinstance(raw, dict) or raw.get("schema") != "bdb-workspace-promotion-v1":
+                continue
+            changed = raw.get("changed_files")
+            hashes = raw.get("file_sha256")
+            if (
+                raw.get("status") != "promoted"
+                or not isinstance(raw.get("command_id"), str)
+                or not isinstance(raw.get("source_commit"), str)
+                or not isinstance(raw.get("promoted_at"), str)
+                or not isinstance(changed, list)
+                or not all(isinstance(value, str) for value in changed)
+                or not isinstance(hashes, dict)
+            ):
+                continue
+            allowed_changed = [
+                value
+                for value in changed
+                if path_matches(value, self.config.allowed_paths)
+            ]
+            if allowed_changed != changed:
+                continue
+            return {
+                "status": "promoted",
+                "command_id": raw["command_id"],
+                "source_commit": raw["source_commit"],
+                "changed_files": changed,
+                "file_sha256": hashes,
+                "promoted_at": raw["promoted_at"],
+            }
+        return None
 
     @staticmethod
     def _looks_textual(path: Path) -> bool:
