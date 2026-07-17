@@ -49,12 +49,17 @@ def repository(tmp_path: Path) -> Path:
     return root
 
 
+def context_config(tmp_path: Path, root: Path, patterns: tuple[str, ...]) -> SimpleNamespace:
+    return SimpleNamespace(
+        fixture_repo_path=root,
+        runtime_dir=tmp_path / "runtime",
+        allowed_paths=patterns,
+    )
+
+
 def test_snapshot_returns_only_allowed_text_files_and_symbols(tmp_path: Path) -> None:
     root = repository(tmp_path)
-    config = SimpleNamespace(
-        fixture_repo_path=root,
-        allowed_paths=("src/*.py", "tests/*.py"),
-    )
+    config = context_config(tmp_path, root, ("src/*.py", "tests/*.py"))
 
     snapshot = WorkspaceContextBuilder(config).build()
 
@@ -71,16 +76,14 @@ def test_snapshot_returns_only_allowed_text_files_and_symbols(tmp_path: Path) ->
     assert str(root) not in serialized
     assert snapshot["capabilities"]["workspace_context"] is True
     assert snapshot["capabilities"]["promotion_receipts"] is True
+    assert snapshot["latest_promotion"] is None
 
 
 def test_snapshot_reports_only_allowed_dirty_path_names(tmp_path: Path) -> None:
     root = repository(tmp_path)
     (root / "src" / "app.py").write_text("def changed() -> bool:\n    return True\n", encoding="utf-8")
     (root / "private" / "secret.txt").write_text("new private value\n", encoding="utf-8")
-    config = SimpleNamespace(
-        fixture_repo_path=root,
-        allowed_paths=("src/*.py",),
-    )
+    config = context_config(tmp_path, root, ("src/*.py",))
 
     snapshot = WorkspaceContextBuilder(config).build()
 
@@ -91,3 +94,31 @@ def test_snapshot_reports_only_allowed_dirty_path_names(tmp_path: Path) -> None:
     serialized = json.dumps(snapshot, ensure_ascii=False)
     assert "new private value" not in serialized
     assert "private/secret.txt" not in serialized
+
+
+def test_snapshot_exposes_only_valid_allowed_promotion_receipt(tmp_path: Path) -> None:
+    root = repository(tmp_path)
+    config = context_config(tmp_path, root, ("src/*.py",))
+    promotions = Path(config.runtime_dir) / "promotions"
+    promotions.mkdir(parents=True)
+    receipt = {
+        "schema": "bdb-workspace-promotion-v1",
+        "status": "promoted",
+        "command_id": "795545ec-2d28-46af-a4c4-c40877e9cf2a:000001",
+        "source_commit": "a" * 40,
+        "changed_files": ["src/app.py"],
+        "file_sha256": {"src/app.py": "sha256:" + "b" * 64},
+        "promoted_at": "2026-07-17T22:00:00.000000Z",
+    }
+    (promotions / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+    snapshot = WorkspaceContextBuilder(config).build()
+
+    assert snapshot["latest_promotion"] == {
+        "status": "promoted",
+        "command_id": receipt["command_id"],
+        "source_commit": "a" * 40,
+        "changed_files": ["src/app.py"],
+        "file_sha256": receipt["file_sha256"],
+        "promoted_at": receipt["promoted_at"],
+    }
