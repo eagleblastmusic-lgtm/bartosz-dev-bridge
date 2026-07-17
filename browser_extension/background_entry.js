@@ -5,7 +5,6 @@
 importScripts("background.js");
 
 const BDB_AUTO_STATE_PREFIX = "bdbAuto:";
-const legacyAutoStateKey = autoStateKey;
 const legacyConsiderAuto = considerAuto;
 
 function canonicalAutoStateKey(_tabId, loopId) {
@@ -31,13 +30,24 @@ function autoStateTimestamp(state) {
   return Number.isFinite(state.startedAt) ? state.startedAt : 0;
 }
 
+function isLegacyAutoStateKey(key, loopId, canonicalKey) {
+  if (key === canonicalKey || !key.startsWith(BDB_AUTO_STATE_PREFIX)) {
+    return false;
+  }
+  const remainder = key.slice(BDB_AUTO_STATE_PREFIX.length);
+  const separator = remainder.indexOf(":");
+  if (separator <= 0) {
+    return false;
+  }
+  const tabIdPart = remainder.slice(0, separator);
+  const storedLoopId = remainder.slice(separator + 1);
+  return /^\d+$/.test(tabIdPart) && storedLoopId === loopId;
+}
+
 function legacyAutoStateEntries(snapshot, loopId, canonicalKey) {
-  const suffix = `:${loopId}`;
   return Object.entries(snapshot)
     .filter(([key, value]) => (
-      key !== canonicalKey &&
-      key.startsWith(BDB_AUTO_STATE_PREFIX) &&
-      key.endsWith(suffix) &&
+      isLegacyAutoStateKey(key, loopId, canonicalKey) &&
       isStoredAutoState(value)
     ));
 }
