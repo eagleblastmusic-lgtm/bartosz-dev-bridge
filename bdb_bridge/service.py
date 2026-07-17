@@ -12,6 +12,8 @@ from .models import (
     ServiceStatus,
     ServiceStatusSnapshot,
     BridgeErrorCode,
+    IngestionReport,
+    PollReport,
 )
 from .protocol import BridgeError
 from .journal import Journal
@@ -88,6 +90,30 @@ class BridgeService:
                 raise
             return self.scheduler.claim_next()
 
+    @staticmethod
+    def _cycle_made_progress(report: BridgeCycleReport) -> bool:
+        if (
+            report.recovery_outcome
+            and report.recovery_outcome.startswith("recovered:")
+            and not report.recovery_outcome.endswith(":result_staged")
+        ):
+            return True
+        if report.outbox_outcome in {
+            f"processed:{OutboxProcessState.PUBLISHED.value}",
+            f"processed:{OutboxProcessState.ALREADY_PUBLISHED.value}",
+            f"processed:{OutboxProcessState.COLLISION.value}",
+        }:
+            return True
+        if report.ingest_outcome and report.ingest_outcome.startswith("ingested:"):
+            return True
+        if (
+            report.execute_outcome
+            and report.execute_outcome.startswith("executed:")
+            and not report.execute_outcome.endswith(":result_staged")
+        ):
+            return True
+        return False
+
     def run_cycle(self, instance_id: str) -> BridgeCycleReport:
         t0 = time.perf_counter()
 
@@ -137,8 +163,26 @@ class BridgeService:
         # Faza 3: Ingest
         try:
             poll_report = self.ingestor.poll_once()
-            if poll_report.ingestion:
-                ingest_outcome = f"ingested:{poll_report.ingestion.commands_discovered}"
+            if not isinstance(poll_report, PollReport):
+                # Fail closed for malformed test doubles or connector adapters:
+                # unknown objects must not be interpreted as durable progress.
+                ingest_outcome = "none"
+            elif isinstance(poll_report.ingestion, IngestionReport):
+                ingestion = poll_report.ingestion
+                work_count = (
+                    ingestion.manifests_recorded
+                    + ingestion.commands_discovered
+                    + ingestion.commands_validated
+                    + ingestion.commands_rejected
+                    + ingestion.commands_expired
+                    + ingestion.issues_recorded
+                )
+                if work_count > 0:
+                    ingest_outcome = f"ingested:{work_count}"
+                elif poll_report.error_code:
+                    ingest_outcome = f"error:{poll_report.error_code}"
+                else:
+                    ingest_outcome = "none"
             elif poll_report.error_code:
                 ingest_outcome = f"error:{poll_report.error_code}"
             else:
@@ -173,8 +217,6 @@ class BridgeService:
             execute_outcome = "skipped"
         self._fault("AFTER_EXECUTE_PHASE")
 
-        # Execution is a safe phase boundary: observe a durable STOPPING request
-        # immediately after it finishes, before the service can enter another idle wait.
         if self._should_stop(instance_id):
             dt = (time.perf_counter() - t0) * 1000.0
             return BridgeCycleReport(
@@ -224,11 +266,11 @@ class BridgeService:
                         f"Heartbeat worker encountered error: {hb_err}",
                     )
 
-                self.run_cycle(instance_id)
+                report = self.run_cycle(instance_id)
 
-                # A stop requested during execution must not incur a complete
-                # idle_poll_seconds delay after that safe phase has finished.
                 if self._should_stop(instance_id):
+                    continue
+                if self._cycle_made_progress(report):
                     continue
 
                 self._fault("BEFORE_IDLE_WAIT")

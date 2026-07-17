@@ -6,6 +6,7 @@ from typing import Any
 
 from . import cli as _legacy
 from . import ghb07_cli as _base
+from .command_timing import build_command_timing
 from .journal import Journal
 from .models import BridgeErrorCode
 from .multi_file_patch_gate import MULTI_FILE_PATCH_OPERATION
@@ -61,6 +62,7 @@ def _edit_status(config: Any, command_id: str, output_json: bool) -> int:
         profile = journal.get_multi_file_patch_profile_run(command_id)
         result = journal.get_result(command_id)
         outbox = journal.get_outbox(command_id)
+        timing = build_command_timing(journal, command_id)
         payload: dict[str, object] = {
             "command_id": command.command_id,
             "session_id": command.session_id,
@@ -79,6 +81,7 @@ def _edit_status(config: Any, command_id: str, output_json: bool) -> int:
             "result_status": result.status if result is not None else None,
             "outbox_state": outbox.state.value if outbox is not None else None,
             "last_error": checkpoint.last_error if checkpoint is not None else None,
+            "timing": timing,
         }
         if output_json:
             _base._print_json(payload)
@@ -90,6 +93,9 @@ def _edit_status(config: Any, command_id: str, output_json: bool) -> int:
                 f"profile={payload['profile_status']} "
                 f"outbox={payload['outbox_state']}"
             )
+            end_to_end_ms = timing["durations_ms"]["end_to_end_ms"]
+            if end_to_end_ms is not None:
+                print(f"- end_to_end_ms={end_to_end_ms}")
             if payload["last_error"]:
                 print(f"- {payload['last_error']}")
         return 0

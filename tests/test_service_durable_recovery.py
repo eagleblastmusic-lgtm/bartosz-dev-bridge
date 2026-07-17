@@ -145,8 +145,6 @@ def test_service_reopens_and_recovers_all_durable_states(
     cfg, db = prepare_state(root, durable_state, monkeypatch, profile_calls)
     profiles_before_reopen = len(profile_calls)
 
-    # All preparation objects are closed above. Recovery starts from a new
-    # Journal and new service/coordinator objects only.
     journal = Journal.open(db, now_fn=lambda: NOW)
     order: list[str] = []
     transport = FakeTransport()
@@ -206,7 +204,7 @@ def test_service_reopens_and_recovers_all_durable_states(
         assert coordinator.calls == 1
         assert order[:3] == ["recovery", "outbox", "ingest"]
         assert len(profile_calls) == 1
-        assert report.recovery_outcome == "recovered:result_staged"
+        assert report.recovery_outcome == "recovered:result_published"
 
     assert scheduler.calls == (1 if durable_state == CommandState.RESULT_STAGED else 0)
     journal.close()
@@ -257,7 +255,6 @@ def test_after_execute_claim_reopens_without_second_claim_or_duplicate_effect(
     assert profile_calls == []
     journal.close()
 
-    # A completely new Journal/service graph resumes the durable CLAIMED row.
     reopened = Journal.open(db, now_fn=lambda: NOW)
     order: list[str] = []
     resumed_processor = RecordingOutboxProcessor(
@@ -291,7 +288,7 @@ def test_after_execute_claim_reopens_without_second_claim_or_duplicate_effect(
     assert counts(reopened)[:2] == (1, 1)
     assert profile_calls == ["poc_pytest"]
     assert transport.pushes == 1
-    assert report.recovery_outcome == "recovered:result_staged"
+    assert report.recovery_outcome == "recovered:result_published"
 
     claim_events = reopened._connection.execute(
         """

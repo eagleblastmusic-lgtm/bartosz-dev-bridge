@@ -25,7 +25,7 @@ class FakeExecution:
         return self.outcome
 
 
-def test_effect_to_stage_then_staged_never_executes_again(tmp_path: Path) -> None:
+def test_effect_to_stage_publishes_immediately_and_never_executes_again(tmp_path: Path) -> None:
     journal = make_journal(tmp_path)
     transport = FakeTransport()
     processor = OutboxProcessor(journal, transport, now_fn=lambda: NOW)
@@ -38,10 +38,44 @@ def test_effect_to_stage_then_staged_never_executes_again(tmp_path: Path) -> Non
         execution_factory=lambda _config, _journal, _hook: FakeExecution(make_outcome(), calls),
     )
     first = coordinator.process(COMMAND_ID)
-    assert first.command_state == CommandState.RESULT_STAGED
+    assert first.command_state == CommandState.RESULT_PUBLISHED
+    assert first.publication is not None
+    assert first.publication.state == OutboxProcessState.PUBLISHED
     assert calls == [COMMAND_ID]
+    assert transport.pushes == 1
+
     second = coordinator.process(COMMAND_ID)
     assert second.command_state == CommandState.RESULT_PUBLISHED
+    assert calls == [COMMAND_ID]
+    assert transport.pushes == 1
+    journal.close()
+
+
+def test_immediate_publication_failure_remains_durable_and_does_not_reexecute(tmp_path: Path) -> None:
+    journal = make_journal(tmp_path)
+    transport = FakeTransport(unavailable=True)
+    processor = OutboxProcessor(journal, transport, now_fn=lambda: NOW)
+    calls: list[str] = []
+    coordinator = ResultCoordinator(
+        object(),
+        journal,
+        processor,
+        now_fn=lambda: NOW,
+        execution_factory=lambda _config, _journal, _hook: FakeExecution(make_outcome(), calls),
+    )
+
+    first = coordinator.process(COMMAND_ID)
+    assert first.command_state == CommandState.RESULT_STAGED
+    assert first.publication is not None
+    assert first.publication.state == OutboxProcessState.RETRY_SCHEDULED
+    assert journal.get_outbox(COMMAND_ID).attempt_count == 1
+    assert calls == [COMMAND_ID]
+
+    second = coordinator.process(COMMAND_ID)
+    assert second.command_state == CommandState.RESULT_STAGED
+    assert second.publication is not None
+    assert second.publication.state == OutboxProcessState.RETRY_SCHEDULED
+    assert journal.get_outbox(COMMAND_ID).attempt_count == 1
     assert calls == [COMMAND_ID]
     journal.close()
 
@@ -50,9 +84,11 @@ def test_crash_after_result_built_rolls_back_to_effect_recorded(tmp_path: Path) 
     journal = make_journal(tmp_path)
     transport = FakeTransport()
     calls: list[str] = []
+
     def crash(point: str) -> None:
         if point == "AFTER_RESULT_BUILT_BEFORE_STAGE":
             raise SystemCrash(point)
+
     coordinator = ResultCoordinator(
         object(), journal, OutboxProcessor(journal, transport, now_fn=lambda: NOW),
         now_fn=lambda: NOW, fault_hook=crash,
@@ -71,9 +107,11 @@ def test_push_success_crash_before_ack_reconciles_without_second_push(tmp_path: 
     journal = make_journal(tmp_path)
     staged, _, _ = stage(journal)
     transport = FakeTransport()
+
     def crash(point: str) -> None:
         if point == "AFTER_REMOTE_PUSH_BEFORE_LOCAL_ACK":
             raise SystemCrash(point)
+
     with pytest.raises(SystemCrash):
         OutboxProcessor(journal, transport, now_fn=lambda: NOW, fault_hook=crash).process_command(COMMAND_ID)
     assert transport.remote == staged.result_bytes
@@ -82,6 +120,7 @@ def test_push_success_crash_before_ack_reconciles_without_second_push(tmp_path: 
     journal.close()
 
     from bdb_bridge import Journal
+
     reopened = Journal.open(path, now_fn=lambda: NOW)
     outcome = OutboxProcessor(reopened, transport, now_fn=lambda: NOW).process_command(COMMAND_ID)
     assert outcome.state == OutboxProcessState.PUBLISHED
@@ -95,9 +134,11 @@ def test_crash_after_stage_restarts_as_publish_only(tmp_path: Path) -> None:
     journal = make_journal(tmp_path)
     transport = FakeTransport()
     calls: list[str] = []
+
     def crash(point: str) -> None:
         if point == "AFTER_STAGE_COMMIT_BEFORE_PUBLISH":
             raise SystemCrash(point)
+
     coordinator = ResultCoordinator(
         object(), journal, OutboxProcessor(journal, transport, now_fn=lambda: NOW),
         now_fn=lambda: NOW, fault_hook=crash,
@@ -111,6 +152,7 @@ def test_crash_after_stage_restarts_as_publish_only(tmp_path: Path) -> None:
     journal.close()
 
     from bdb_bridge import Journal
+
     reopened = Journal.open(path, now_fn=lambda: NOW)
     second_calls: list[str] = []
     resumed = ResultCoordinator(

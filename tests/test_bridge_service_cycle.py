@@ -16,6 +16,7 @@ from bdb_bridge import (
     InstanceLock,
 )
 from bdb_bridge.models import (
+    BridgeCycleReport,
     CommandRecord,
     PollReport,
     OutboxProcessOutcome,
@@ -37,50 +38,46 @@ def make_config(tmp_path: Path):
 
 
 def test_cycle_order_and_stop(tmp_path: Path, make_config) -> None:
-    # Set up mocks for all dependencies to record call order and return mock data
     call_order = []
 
-    # 1. Mock Journal
     journal = MagicMock(spec=Journal)
     journal._now_fn = lambda: "2026-07-15T12:00:00Z"
-    
-    # Simulate no active/recoverable command
+
     def get_rec():
         call_order.append("recovery_query")
         return None
+
     journal.get_recoverable_command.side_effect = get_rec
-    
-    # Simulate no blocking ingestion issues
     journal.has_blocking_ingestion_issues.return_value = False
 
-    # 2. Mock Ingestor
     ingestor = MagicMock(spec=CommandIngestor)
+
     def poll():
         call_order.append("ingest")
         return PollReport(False, True, False, None, None, None, None)
+
     ingestor.poll_once.side_effect = poll
 
-    # 3. Mock Scheduler
     scheduler = MagicMock(spec=SingleQueueScheduler)
+
     def claim():
         call_order.append("execute_claim")
         return None
+
     scheduler.claim_next.side_effect = claim
 
-    # 4. Mock ResultCoordinator
     result_coordinator = MagicMock(spec=ResultCoordinator)
 
-    # 5. Mock OutboxProcessor
     outbox_processor = MagicMock(spec=OutboxProcessor)
+
     def process_outbox():
         call_order.append("outbox")
         return OutboxProcessOutcome(OutboxProcessState.NO_DUE, None, None, None)
+
     outbox_processor.process_one_due.side_effect = process_outbox
 
-    # 6. Mock InstanceLock
     lock = MagicMock(spec=InstanceLock)
 
-    # Instantiate BridgeService
     waiter = threading.Event()
     service = BridgeService(
         config=make_config,
@@ -93,29 +90,81 @@ def test_cycle_order_and_stop(tmp_path: Path, make_config) -> None:
         waiter=waiter,
     )
 
-    # Run cycle once
     report = service.run_cycle("inst-1")
-    
-    # Assert exact order: recovery_query -> outbox -> ingest -> execute_claim
+
     assert call_order == ["recovery_query", "outbox", "ingest", "execute_claim"]
     assert report.recovery_outcome == "none"
     assert report.outbox_outcome == "none"
     assert report.ingest_outcome == "none"
     assert report.execute_outcome == "none"
+    assert service._cycle_made_progress(report) is False
 
-    # Reset call order and test stop request after recovery
     call_order.clear()
-    
-    # Mock journal.get_recoverable_command to trigger a stop request during the run
+
     def get_rec_stop():
         call_order.append("recovery_query")
         service.request_stop()
         return None
+
     journal.get_recoverable_command.side_effect = get_rec_stop
 
     report = service.run_cycle("inst-1")
-    # Should stop after recovery and not enter outbox, ingest, or execute
     assert call_order == ["recovery_query"]
     assert report.outbox_outcome is None
     assert report.ingest_outcome is None
     assert report.execute_outcome is None
+
+
+def test_malformed_ingest_report_is_not_counted_as_progress(make_config) -> None:
+    journal = MagicMock(spec=Journal)
+    journal._now_fn = lambda: "2026-07-15T12:00:00Z"
+    journal.get_recoverable_command.return_value = None
+    journal.has_blocking_ingestion_issues.return_value = False
+
+    ingestor = MagicMock(spec=CommandIngestor)
+    ingestor.poll_once.return_value = MagicMock()
+
+    scheduler = MagicMock(spec=SingleQueueScheduler)
+    scheduler.claim_next.return_value = None
+
+    outbox_processor = MagicMock(spec=OutboxProcessor)
+    outbox_processor.process_one_due.return_value = OutboxProcessOutcome(
+        OutboxProcessState.NO_DUE,
+        None,
+        None,
+        None,
+    )
+
+    service = BridgeService(
+        config=make_config,
+        journal=journal,
+        ingestor=ingestor,
+        scheduler=scheduler,
+        result_coordinator=MagicMock(spec=ResultCoordinator),
+        outbox_processor=outbox_processor,
+        instance_lock=MagicMock(spec=InstanceLock),
+    )
+
+    report = service.run_cycle("inst-1")
+
+    assert report.ingest_outcome == "none"
+    assert service._cycle_made_progress(report) is False
+
+
+@pytest.mark.parametrize(
+    ("report", "expected"),
+    [
+        (BridgeCycleReport("none", "none", "none", "none", 1.0), False),
+        (BridgeCycleReport("recovered:result_staged", "none", "none", "skipped", 1.0), False),
+        (BridgeCycleReport("recovered:result_staged", "none", "ingested:1", "skipped", 1.0), True),
+        (BridgeCycleReport("recovered:result_published", "none", "none", "skipped", 1.0), True),
+        (BridgeCycleReport("none", "processed:retry_scheduled", "none", "none", 1.0), False),
+        (BridgeCycleReport("none", "processed:published", "none", "none", 1.0), True),
+        (BridgeCycleReport("none", "none", "ingested:1", "none", 1.0), True),
+        (BridgeCycleReport("none", "none", "error:transport_unavailable", "none", 1.0), False),
+        (BridgeCycleReport("none", "none", "none", "executed:result_staged", 1.0), False),
+        (BridgeCycleReport("none", "none", "none", "executed:result_published", 1.0), True),
+    ],
+)
+def test_cycle_progress_classification(report: BridgeCycleReport, expected: bool) -> None:
+    assert BridgeService._cycle_made_progress(report) is expected

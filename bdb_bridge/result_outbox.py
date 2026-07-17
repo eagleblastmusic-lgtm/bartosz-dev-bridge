@@ -253,7 +253,6 @@ class ResultCoordinator:
         command = self.journal.get_command(command_id)
         if command is None:
             raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Execution recovery did not preserve command/session/plan/effect")
-        # Divergence / policy / stale paths are terminal without a durable effect+result.
         if command.state in {
             CommandState.MANUAL_RECONCILIATION_REQUIRED,
             CommandState.POLICY_DENIED,
@@ -271,8 +270,19 @@ class ResultCoordinator:
         value = ResultBuildInput(session, command, plan, effect, outcome, started_at, finished_at)
         staged = self.stager.build(value)
         self._fault("AFTER_RESULT_BUILT_BEFORE_STAGE")
-        self.journal.stage_result_and_enqueue(command_id=command_id, result_json=staged.result_json, remote_path=staged.remote_path, fault_hook=self.fault_hook)
+        self.journal.stage_result_and_enqueue(
+            command_id=command_id,
+            result_json=staged.result_json,
+            remote_path=staged.remote_path,
+            fault_hook=self.fault_hook,
+        )
         self._fault("AFTER_STAGE_COMMIT_BEFORE_PUBLISH")
+        publication = self.outbox_processor.process_command(command_id)
         updated = self.journal.get_command(command_id)
         assert updated is not None
-        return ResultCoordinationOutcome(command_id, updated.state, staged=True)
+        return ResultCoordinationOutcome(
+            command_id,
+            updated.state,
+            staged=True,
+            publication=publication,
+        )
