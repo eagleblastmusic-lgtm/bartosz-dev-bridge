@@ -11,7 +11,7 @@ $pythonPath = (Get-Command $Python).Source
 $rootPath = [System.IO.Path]::GetFullPath($Root)
 
 & $pythonPath `
-    (Join-Path $PSScriptRoot "run_direct_lane_pilot.py") `
+    (Join-Path $PSScriptRoot "run_direct_lane_pilot_checked.py") `
     --python $pythonPath `
     --root $rootPath `
     --timeout $TimeoutSeconds
