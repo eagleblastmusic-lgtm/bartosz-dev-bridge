@@ -30,6 +30,7 @@ _STOP_MESSAGES = frozenset(
 _ORIGINAL_RUN = pilot.run
 _ORIGINAL_LOAD_JSON_OUTPUT = pilot.load_json_output
 _ORIGINAL_WAIT_UNTIL = pilot.wait_until
+_ORIGINAL_INITIALIZE_FIXTURE = pilot.initialize_fixture
 
 
 def _canonical_content_fields(content: bytes) -> dict[str, str]:
@@ -37,6 +38,12 @@ def _canonical_content_fields(content: bytes) -> dict[str, str]:
         "content_base64": base64.b64encode(content).decode("ascii"),
         "content_sha256": pilot.sha256_value(content),
     }
+
+
+def _checked_initialize_fixture(root: Path) -> tuple[Path, str, bytes, bytes]:
+    fixture, base_sha, before, after = _ORIGINAL_INITIALIZE_FIXTURE(root)
+    pilot.git(fixture, "config", "core.autocrlf", "false")
+    return fixture, base_sha, before, after
 
 
 def _checked_run(
@@ -107,6 +114,7 @@ def main() -> int:
     pilot.run = _checked_run
     pilot.load_json_output = _checked_load_json_output
     pilot.wait_until = _checked_wait_until
+    pilot.initialize_fixture = _checked_initialize_fixture
     pilot.content_fields = _canonical_content_fields
     code = pilot.main()
     if code == 0:
