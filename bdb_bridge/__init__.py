@@ -108,6 +108,7 @@ from .multi_file_patch_runtime_models import (
 )
 from .multi_file_patch_runtime import MultiFilePatchRuntimeCoordinator
 from .multi_file_patch_result import install_multi_file_patch_result_support
+from .open_read_result import install_open_read_result_support
 from .multi_file_patch_checkpoint_hook import (
     install_multi_file_patch_checkpoint_hook_boundary,
 )
@@ -120,6 +121,7 @@ install_multi_file_patch_temp_identity(MultiFilePatchExecutor)
 install_multi_file_patch_checkpoint_hook_boundary(MultiFilePatchExecutor)
 install_multi_file_patch_lifecycle_bootstrap(MultiFilePatchRuntimeCoordinator)
 install_multi_file_patch_result_support(ResultCoordinator)
+install_open_read_result_support(ResultCoordinator, Journal)
 install_workspace_lifecycle_error_mapping(WorkspaceLifecycleCoordinator)
 
 __all__ = [
@@ -159,7 +161,8 @@ __all__ = [
     "install_multi_file_patch_checkpoint_hook_boundary",
     "install_multi_file_patch_lifecycle_bootstrap",
     "install_journal_multi_file_patch_runtime_api", "install_multi_file_patch_command_gate",
-    "install_multi_file_patch_result_support", "install_workspace_lifecycle_migration",
+    "install_multi_file_patch_result_support", "install_open_read_result_support",
+    "install_workspace_lifecycle_migration",
     "manifest_path_for", "parse_command_path", "parse_manifest_path", "path_matches",
     "require_int", "require_string", "result_path_for", "sha256_bytes", "sha256_text",
     "tail", "validate_base_sha", "validate_path_pattern", "validate_repo_relative_path",
