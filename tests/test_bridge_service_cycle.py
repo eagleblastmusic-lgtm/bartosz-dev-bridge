@@ -120,6 +120,7 @@ def test_cycle_order_and_stop(tmp_path: Path, make_config) -> None:
     [
         (BridgeCycleReport("none", "none", "none", "none", 1.0), False),
         (BridgeCycleReport("recovered:result_staged", "none", "none", "skipped", 1.0), False),
+        (BridgeCycleReport("recovered:result_staged", "none", "ingested:1", "skipped", 1.0), True),
         (BridgeCycleReport("recovered:result_published", "none", "none", "skipped", 1.0), True),
         (BridgeCycleReport("none", "processed:retry_scheduled", "none", "none", 1.0), False),
         (BridgeCycleReport("none", "processed:published", "none", "none", 1.0), True),
