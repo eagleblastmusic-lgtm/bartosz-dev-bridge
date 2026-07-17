@@ -209,3 +209,32 @@ git -C <fixture_repo> worktree remove --force <exact_workspace_path>
 ```
 
 Bridge nie używa `shutil.rmtree`, `Remove-Item -Recurse`, `rmdir /s`, `git reset`, `git clean` ani `git worktree prune`. Cleanup jest odzyskiwany po awarii przed startem, po `removing` oraz po fizycznym remove przed local DB ACK.
+
+## Granice bezpieczeństwa
+
+Local Workspace Loop nadal nie dodaje:
+
+- protocol ACK ani automatycznego `ACKNOWLEDGED`;
+- automatycznego cleanupu lub retention;
+- cleanupu aktywnych albo manual sessions;
+- Windows Service, Scheduled Task, tray, installera ani autostartu;
+- arbitrary shell ani `shell=True` z rozmowy;
+- arbitralnego wyboru profilu testowego;
+- wielu workerów i równoległych mutacji tego samego checkoutu;
+- HTTP/WebSocket remote control;
+- wykonywania lub importowania kodu analizowanego repozytorium poza bounded profilem `poc_pytest`;
+- Hermesa, GicleeApp, Browser Lab, Playwright, LSP ani embeddings;
+- zależności runtime `bdb_bridge → bdb_poc`.
+
+Legacy POC-0A i POC-0B pozostają regresjami przez `poc_bridge.py` oraz `bdb_poc.PocBridge`.
+
+Dokumentacja operatorska:
+
+- `docs/GHB0_WINDOWS_RUNBOOK.md`;
+- `docs/GHB0_RECOVERY_GATE.md`;
+- `docs/GHB2C_DURABLE_BATCH_RECOVERY.md`;
+- `docs/GHB2D_FINAL_EDITING_GATE.md`;
+- `docs/LOCAL_E2E_POC.md`;
+- `docs/PERSISTENT_OPERATOR_PILOT.md`;
+- `docs/GITHUB_REMOTE_PILOT.md`;
+- `docs/LOCAL_WORKSPACE_LOOP.md`.
