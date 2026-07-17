@@ -121,8 +121,9 @@ if ($Action -eq "Setup") {
         Invoke-Checked $bootstrapPython @("-m", "venv", $venvRoot) | Out-Null
     }
     $venvPython = (Resolve-Path -LiteralPath $venvPython).Path
+    $editableDev = "${repoRoot}[dev]"
     Invoke-Checked $venvPython @(
-        "-m", "pip", "install", "--disable-pip-version-check", "-e", $repoRoot
+        "-m", "pip", "install", "--disable-pip-version-check", "-e", $editableDev
     ) | Out-Null
 
     $preparer = Join-Path $PSScriptRoot "prepare_local_browser_pilot.py"
