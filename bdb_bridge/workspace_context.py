@@ -78,9 +78,15 @@ class WorkspaceContextBuilder:
 
         tracked, tracked_truncated = self._tracked_paths()
         status_text = self.git.run(["status", "--porcelain=v1"]).stdout
-        source_changes = changed_paths(status_text)
-        status_truncated = len(source_changes) > _MAX_STATUS_PATHS
-        source_changes = source_changes[:_MAX_STATUS_PATHS]
+        all_changes = changed_paths(status_text)
+        allowed_changes = [
+            value
+            for value in all_changes
+            if path_matches(value, self.config.allowed_paths)
+        ]
+        outside_scope_count = len(all_changes) - len(allowed_changes)
+        status_truncated = len(allowed_changes) > _MAX_STATUS_PATHS
+        source_changes = allowed_changes[:_MAX_STATUS_PATHS]
 
         snapshots: list[dict[str, Any]] = []
         symbols: list[dict[str, Any]] = []
@@ -139,6 +145,7 @@ class WorkspaceContextBuilder:
             "source_clean": not status_text.strip(),
             "source_changes": source_changes,
             "source_changes_truncated": status_truncated,
+            "source_changes_outside_scope": outside_scope_count,
             "tracked_paths": tracked,
             "tracked_paths_truncated": tracked_truncated,
             "snapshot_files": snapshots,
