@@ -39,6 +39,17 @@ def test_manual_content_handler_remains_assisted() -> None:
     assert "navigator.clipboard.writeText" in content
 
 
+def test_manual_click_reparses_current_code_block_before_submission() -> None:
+    content = read("content.js")
+    start = content.index('button.addEventListener("click", async () => {')
+    end = content.index("panel.append(button, output);", start)
+    manual_handler = content[start:end]
+    assert "const currentAction = parseAction(codeBlock);" in manual_handler
+    assert 'type: "BDB_SUBMIT_ACTION", action: currentAction' in manual_handler
+    assert 'type: "BDB_SUBMIT_ACTION", action }' not in manual_handler
+    assert "Blok BDB zmienił się" in manual_handler
+
+
 def test_background_accepts_only_versioned_actions_and_native_host() -> None:
     background = read("background.js")
     assert 'const HOST_NAME = "com.bartosz.dev_bridge"' in background
