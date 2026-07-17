@@ -1,1 +1,0 @@
-Synthetic Direct Lane example.
