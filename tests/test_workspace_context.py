@@ -73,7 +73,7 @@ def test_snapshot_returns_only_allowed_text_files_and_symbols(tmp_path: Path) ->
     assert snapshot["capabilities"]["promotion_receipts"] is True
 
 
-def test_snapshot_reports_dirty_allowed_file_without_reading_unallowed_file(tmp_path: Path) -> None:
+def test_snapshot_reports_only_allowed_dirty_path_names(tmp_path: Path) -> None:
     root = repository(tmp_path)
     (root / "src" / "app.py").write_text("def changed() -> bool:\n    return True\n", encoding="utf-8")
     (root / "private" / "secret.txt").write_text("new private value\n", encoding="utf-8")
@@ -85,7 +85,9 @@ def test_snapshot_reports_dirty_allowed_file_without_reading_unallowed_file(tmp_
     snapshot = WorkspaceContextBuilder(config).build()
 
     assert snapshot["source_clean"] is False
-    assert snapshot["source_changes"] == ["private/secret.txt", "src/app.py"]
+    assert snapshot["source_changes"] == ["src/app.py"]
+    assert snapshot["source_changes_outside_scope"] == 1
     assert snapshot["tracked_paths"] == ["src/app.py"]
     serialized = json.dumps(snapshot, ensure_ascii=False)
     assert "new private value" not in serialized
+    assert "private/secret.txt" not in serialized
