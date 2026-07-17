@@ -3,6 +3,7 @@
 const HOST_NAME = "com.bartosz.dev_bridge";
 const REQUEST_SCHEMA = "bdb-native-request-v1";
 const ACTION_SCHEMA = "bdb-action-v1";
+const WORKSPACE_CONTEXT_OPERATION = "workspace_context";
 const MAX_SERIALIZED_BYTES = 1024 * 1024;
 const DEFAULT_WAIT_SECONDS = 30;
 const DEFAULT_AUTO_SETTINGS = Object.freeze({
@@ -13,6 +14,7 @@ const DEFAULT_AUTO_SETTINGS = Object.freeze({
 const AUTO_REPLAY_GUARD_KEY = "bdbAutoReplayGuard";
 const AUTO_REPLAY_GUARD_LIMIT = 512;
 const LOOP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+const REPO_ALIAS_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const TERMINAL_VALUES = new Set([
   "done",
   "needs_user",
@@ -44,6 +46,13 @@ function validateJsonObject(value, field) {
   }
 }
 
+function validateRepoAlias(value) {
+  if (typeof value !== "string" || !REPO_ALIAS_RE.test(value)) {
+    throw new Error("Repository alias has an unsafe format");
+  }
+  return value;
+}
+
 function sendNative(request) {
   validateJsonObject(request, "native request");
   return new Promise((resolve, reject) => {
@@ -63,6 +72,28 @@ function sendNative(request) {
   });
 }
 
+async function workspaceContext(action) {
+  const repoAlias = validateRepoAlias(action.repo_alias);
+  const native = await sendNative({
+    schema: REQUEST_SCHEMA,
+    request_id: requestId("workspace-context"),
+    action: "context",
+    repo_alias: repoAlias
+  });
+  return {
+    schema: native.schema,
+    request_id: native.request_id,
+    status: "completed",
+    repo_alias: repoAlias,
+    result: {
+      status: "success",
+      operation: WORKSPACE_CONTEXT_OPERATION,
+      context: native.context,
+      arm: native.arm
+    }
+  };
+}
+
 async function submitAction(action, tabId) {
   validateJsonObject(action, "BDB action");
   if (action.schema !== ACTION_SCHEMA) {
@@ -76,6 +107,9 @@ async function submitAction(action, tabId) {
   }
   inFlightTabs.add(tabId);
   try {
+    if (action.operation === WORKSPACE_CONTEXT_OPERATION) {
+      return await workspaceContext(action);
+    }
     return await sendNative({
       schema: REQUEST_SCHEMA,
       request_id: requestId("submit"),
@@ -264,14 +298,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           action: "status"
         });
       case "BDB_CONTEXT":
-        if (typeof message.repoAlias !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(message.repoAlias)) {
-          throw new Error("Repository alias has an unsafe format");
-        }
         return sendNative({
           schema: REQUEST_SCHEMA,
           request_id: requestId("context"),
           action: "context",
-          repo_alias: message.repoAlias
+          repo_alias: validateRepoAlias(message.repoAlias)
         });
       default:
         throw new Error("Unsupported extension message");
