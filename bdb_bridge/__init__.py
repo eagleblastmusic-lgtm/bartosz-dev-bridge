@@ -83,6 +83,8 @@ from .scheduler import SingleQueueScheduler
 from .serializers import MAX_RESULT_BYTES, MAX_TAIL_CHARS, canonical_json, finalize_result, sha256_text, tail
 from .transport import CommandSnapshot, CommandTransport, RemoteDocument
 from .git_command_transport import GitCommandTransport
+from .local_spool_transport import LOCAL_ENVELOPE_SCHEMA, LocalSpoolTransport, LocalSpoolWriter
+from .priority_ingestion import PriorityCommandIngestor
 from .workspace_types import (
     WorkspaceCleanupOutcome, WorkspaceDisposition, WorkspaceEligibility,
     WorkspaceLifecycleRecord, WorkspaceLifecycleState, WorkspaceStatusSnapshot,
@@ -128,6 +130,7 @@ __all__ = [
     "ExecutionCoordinator", "ExecutionOutcome", "EXECUTOR_VERSION", "GitResultTransport",
     "ImportKind", "IngestionIssue", "IngestionReport", "GitCommandTransport", "InstanceLock",
     "Journal", "JournalEvent", "MANIFEST_PATH_RE", "MAX_RESULT_BYTES", "MAX_TAIL_CHARS",
+    "LOCAL_ENVELOPE_SCHEMA", "LocalSpoolTransport", "LocalSpoolWriter", "PriorityCommandIngestor",
     "MultiFileCheckpointBundle", "MultiFileCheckpointPath", "MultiFileCheckpointRecord",
     "MultiFileCheckpointState", "MultiFilePatchExecutor", "MultiFileRecoveryOutcome",
     "MultiFilePatchProfileRecord", "MultiFilePatchRuntimeResult",
@@ -167,3 +170,5 @@ from .ghb07_cli import install_cli
 install_cli()
 from .multi_file_patch_cli import install_multi_file_patch_cli
 install_multi_file_patch_cli()
+from .local_spool_cli import install_local_spool_cli
+install_local_spool_cli()

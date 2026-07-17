@@ -317,6 +317,8 @@ class CommandIngestor:
                     BridgeErrorCode.JOURNAL_CONFLICT,
                     f"Command ingestion metadata missing for discovered command {command.command_id}",
                 )
+            if ingestion_meta.source_id != self._source_id:
+                continue
 
             source_id = ingestion_meta.source_id
             source_path = ingestion_meta.source_path
