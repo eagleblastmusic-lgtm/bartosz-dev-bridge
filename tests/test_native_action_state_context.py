@@ -89,9 +89,10 @@ def test_context_exposes_exact_clean_initial_state_hash(tmp_path: Path) -> None:
     assert context["source_clean"] is True
     assert context["initial_revision"] == 0
     assert context["initial_state_hash"] == clean_workspace_state_hash(base_sha)
+    assert context["allowed_paths"] == ["src/clamp.py"]
 
 
-def test_first_mutating_action_receives_initial_hash_automatically(tmp_path: Path) -> None:
+def test_first_mutating_action_receives_initial_hash_and_trusted_scope(tmp_path: Path) -> None:
     _, composer, base_sha = setup(tmp_path)
 
     _, envelope = composer.compose(
@@ -107,6 +108,7 @@ def test_first_mutating_action_receives_initial_hash_automatically(tmp_path: Pat
     )
 
     assert envelope["manifest"]["base_sha"] == base_sha
+    assert envelope["manifest"]["allowed_paths"] == ["src/clamp.py"]
     assert envelope["command"]["expected_state_hash"] == clean_workspace_state_hash(base_sha)
 
 
