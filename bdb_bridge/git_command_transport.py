@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import re
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -25,6 +25,27 @@ def validate_sha40(name: str, val: str) -> None:
             BridgeErrorCode.TRANSPORT_UNAVAILABLE,
             f"Invalid {name}: must be a 40-character hex string, got {val!r}",
         )
+
+
+def _canonical_git_timestamp(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise BridgeError(
+            BridgeErrorCode.TRANSPORT_UNAVAILABLE,
+            f"Invalid git commit timestamp: {value!r}",
+        ) from exc
+    if parsed.tzinfo is None:
+        raise BridgeError(
+            BridgeErrorCode.TRANSPORT_UNAVAILABLE,
+            f"Git commit timestamp has no timezone: {value!r}",
+        )
+    return (
+        parsed.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 class Git:
@@ -75,6 +96,21 @@ class Git:
         return completed
 
 
+def read_commit_timestamp(repo_path: Path, commit_sha: str) -> str:
+    validate_sha40("document commit SHA", commit_sha)
+    completed = Git(repo_path).run_bytes(
+        ["show", "-s", "--format=%cI", commit_sha],
+        check=True,
+    )
+    value = completed.stdout.decode("utf-8", errors="strict").strip()
+    if not value:
+        raise BridgeError(
+            BridgeErrorCode.TRANSPORT_UNAVAILABLE,
+            f"Missing timestamp for document commit {commit_sha}",
+        )
+    return _canonical_git_timestamp(value)
+
+
 class GitCommandTransport:
     def __init__(
         self,
@@ -86,10 +122,11 @@ class GitCommandTransport:
         self._git = Git(repo_path)
         self._remote = remote
         self._commands_branch = commands_branch
+        self._cached_snapshot: CommandSnapshot | None = None
+        self._cached_documents: dict[str, RemoteDocument] = {}
 
     def fetch_snapshot(self) -> CommandSnapshot:
         try:
-            # 1. Read-only fetch
             self._git.run_bytes(
                 [
                     "fetch",
@@ -100,58 +137,35 @@ class GitCommandTransport:
                 check=True,
             )
 
-            # 2. Resolve snapshot SHA
             ref = f"refs/remotes/{self._remote}/{self._commands_branch}"
             completed = self._git.run_bytes(["rev-parse", ref], check=True)
             snapshot_sha = completed.stdout.decode("utf-8", errors="strict").strip()
             validate_sha40("snapshot SHA", snapshot_sha)
 
-            # 3. List tree with null-terminated output
-            completed_tree = self._git.run_bytes(
-                ["ls-tree", "-rz", "--name-only", snapshot_sha, "--", "sessions"],
-                check=False,
-            )
+            if self._cached_snapshot is not None and self._cached_snapshot.snapshot_sha == snapshot_sha:
+                return self._cached_snapshot
 
-            # exit code 128 means path "sessions" doesn't exist yet, which is fine (empty snapshot)
-            if completed_tree.returncode not in (0, 128):
-                detail = completed_tree.stderr.decode("utf-8", errors="replace").strip()
-                raise BridgeError(
-                    BridgeErrorCode.TRANSPORT_UNAVAILABLE,
-                    f"ls-tree failed: {detail}",
-                )
-
-            stdout_bytes = completed_tree.stdout
-            manifest_paths: list[str] = []
-            command_paths: list[str] = []
-
-            for path_bytes in stdout_bytes.split(b"\x00"):
-                if not path_bytes:
-                    continue
+            snapshot: CommandSnapshot
+            if self._cached_snapshot is not None and self._is_fast_forward(
+                self._cached_snapshot.snapshot_sha,
+                snapshot_sha,
+            ):
                 try:
-                    path = path_bytes.decode("utf-8", errors="strict")
-                except UnicodeDecodeError:
-                    continue
-                try:
-                    validate_repo_relative_path(path)
+                    snapshot = self._incremental_snapshot(
+                        self._cached_snapshot.snapshot_sha,
+                        snapshot_sha,
+                    )
                 except BridgeError:
-                    continue
-                if MANIFEST_PATH_RE.fullmatch(path):
-                    manifest_paths.append(path)
-                elif COMMAND_PATH_RE.fullmatch(path):
-                    command_paths.append(path)
+                    snapshot = self._full_snapshot(snapshot_sha)
+            else:
+                snapshot = self._full_snapshot(snapshot_sha)
 
-            manifests = tuple(
-                self._read_document(snapshot_sha, path) for path in sorted(manifest_paths)
-            )
-            commands = tuple(
-                self._read_document(snapshot_sha, path) for path in sorted(command_paths)
-            )
-
-            return CommandSnapshot(
-                snapshot_sha=snapshot_sha,
-                manifests=manifests,
-                commands=commands,
-            )
+            self._cached_snapshot = snapshot
+            self._cached_documents = {
+                document.path: document
+                for document in snapshot.manifests + snapshot.commands
+            }
+            return snapshot
         except BridgeError:
             raise
         except Exception as exc:
@@ -159,6 +173,113 @@ class GitCommandTransport:
                 BridgeErrorCode.TRANSPORT_UNAVAILABLE,
                 f"Git snapshot fetch failed: {exc}",
             ) from exc
+
+    def _is_fast_forward(self, previous_sha: str, snapshot_sha: str) -> bool:
+        completed = self._git.run_bytes(
+            ["merge-base", "--is-ancestor", previous_sha, snapshot_sha],
+            check=False,
+        )
+        return completed.returncode == 0
+
+    def _incremental_snapshot(self, previous_sha: str, snapshot_sha: str) -> CommandSnapshot:
+        completed = self._git.run_bytes(
+            [
+                "diff",
+                "--name-status",
+                "-z",
+                "--no-renames",
+                previous_sha,
+                snapshot_sha,
+                "--",
+                "sessions",
+            ],
+            check=True,
+        )
+        parts = completed.stdout.split(b"\x00")
+        if parts and parts[-1] == b"":
+            parts.pop()
+        if len(parts) % 2 != 0:
+            raise BridgeError(
+                BridgeErrorCode.TRANSPORT_UNAVAILABLE,
+                "Incremental command diff has an invalid shape",
+            )
+
+        documents = dict(self._cached_documents)
+        for index in range(0, len(parts), 2):
+            status = parts[index].decode("ascii", errors="strict")
+            path = parts[index + 1].decode("utf-8", errors="strict")
+            kind = self._document_kind(path)
+            if kind is None:
+                continue
+            if status == "D":
+                documents.pop(path, None)
+                continue
+            if status not in {"A", "M", "T"}:
+                raise BridgeError(
+                    BridgeErrorCode.TRANSPORT_UNAVAILABLE,
+                    f"Unsupported incremental command diff status: {status}",
+                )
+            documents[path] = self._read_document(snapshot_sha, path)
+
+        return self._snapshot_from_documents(snapshot_sha, documents)
+
+    def _full_snapshot(self, snapshot_sha: str) -> CommandSnapshot:
+        completed_tree = self._git.run_bytes(
+            ["ls-tree", "-rz", "--name-only", snapshot_sha, "--", "sessions"],
+            check=False,
+        )
+        if completed_tree.returncode not in (0, 128):
+            detail = completed_tree.stderr.decode("utf-8", errors="replace").strip()
+            raise BridgeError(
+                BridgeErrorCode.TRANSPORT_UNAVAILABLE,
+                f"ls-tree failed: {detail}",
+            )
+
+        documents: dict[str, RemoteDocument] = {}
+        for path_bytes in completed_tree.stdout.split(b"\x00"):
+            if not path_bytes:
+                continue
+            try:
+                path = path_bytes.decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                continue
+            if self._document_kind(path) is None:
+                continue
+            documents[path] = self._read_document(snapshot_sha, path)
+        return self._snapshot_from_documents(snapshot_sha, documents)
+
+    def _snapshot_from_documents(
+        self,
+        snapshot_sha: str,
+        documents: dict[str, RemoteDocument],
+    ) -> CommandSnapshot:
+        manifests = tuple(
+            documents[path]
+            for path in sorted(documents)
+            if MANIFEST_PATH_RE.fullmatch(path)
+        )
+        commands = tuple(
+            documents[path]
+            for path in sorted(documents)
+            if COMMAND_PATH_RE.fullmatch(path)
+        )
+        return CommandSnapshot(
+            snapshot_sha=snapshot_sha,
+            manifests=manifests,
+            commands=commands,
+        )
+
+    @staticmethod
+    def _document_kind(path: str) -> str | None:
+        try:
+            validate_repo_relative_path(path)
+        except BridgeError:
+            return None
+        if MANIFEST_PATH_RE.fullmatch(path):
+            return "manifest"
+        if COMMAND_PATH_RE.fullmatch(path):
+            return "command"
+        return None
 
     def _read_document(self, snapshot_sha: str, path: str) -> RemoteDocument:
         try:
@@ -172,16 +293,27 @@ class GitCommandTransport:
             content = completed.stdout
 
             completed_log = self._git.run_bytes(
-                ["log", "-1", "--format=%H", snapshot_sha, "--", path],
+                ["log", "-1", "--format=%H%x00%cI", snapshot_sha, "--", path],
                 check=True,
             )
-            document_commit_sha = completed_log.stdout.decode("utf-8", errors="strict").strip()
+            raw_log = completed_log.stdout.rstrip(b"\r\n")
+            commit_sha_bytes, separator, committed_at_bytes = raw_log.partition(b"\x00")
+            if not separator:
+                raise BridgeError(
+                    BridgeErrorCode.TRANSPORT_UNAVAILABLE,
+                    f"Missing commit metadata for document {path}",
+                )
+            document_commit_sha = commit_sha_bytes.decode("ascii", errors="strict")
             validate_sha40("document commit SHA", document_commit_sha)
+            document_committed_at = _canonical_git_timestamp(
+                committed_at_bytes.decode("utf-8", errors="strict")
+            )
 
             return RemoteDocument(
                 path=path,
                 content=content,
                 document_commit_sha=document_commit_sha,
+                document_committed_at=document_committed_at,
             )
         except BridgeError:
             raise

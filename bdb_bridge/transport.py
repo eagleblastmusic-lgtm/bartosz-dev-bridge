@@ -9,6 +9,7 @@ class RemoteDocument:
     path: str
     content: bytes
     document_commit_sha: str
+    document_committed_at: str | None = None
 
 
 @dataclass(frozen=True)
