@@ -38,7 +38,6 @@ _STOP_MESSAGES = frozenset(
 _ORIGINAL_RUN = pilot.run
 _ORIGINAL_LOAD_JSON_OUTPUT = pilot.load_json_output
 _ORIGINAL_WAIT_UNTIL = pilot.wait_until
-_ORIGINAL_INITIALIZE_FIXTURE = pilot.initialize_fixture
 
 
 def _canonical_content_fields(content: bytes) -> dict[str, str]:
@@ -49,9 +48,38 @@ def _canonical_content_fields(content: bytes) -> dict[str, str]:
 
 
 def _checked_initialize_fixture(root: Path) -> tuple[Path, str, bytes, bytes]:
-    fixture, base_sha, before, after = _ORIGINAL_INITIALIZE_FIXTURE(root)
+    fixture = root / "fixture"
+    fixture.mkdir()
+    pilot.git(fixture, "init")
     pilot.git(fixture, "config", "core.autocrlf", "false")
-    return fixture, base_sha, before, after
+    pilot.git(fixture, "config", "user.name", "BDB Direct Pilot")
+    pilot.git(fixture, "config", "user.email", "direct-pilot@example.invalid")
+    (fixture / "src").mkdir()
+    (fixture / "tests").mkdir()
+    before = (
+        b"def clamp_percent(value: int) -> int:\n"
+        b"    return value\n"
+    )
+    after = (
+        b"def clamp_percent(value: int) -> int:\n"
+        b"    return max(0, min(value, 100))\n"
+    )
+    (fixture / "src" / "clamp.py").write_bytes(before)
+    (fixture / "tests" / "test_clamp.py").write_text(
+        "from src.clamp import clamp_percent\n\n"
+        "def test_clamp_percent() -> None:\n"
+        "    assert clamp_percent(-1) == 0\n"
+        "    assert clamp_percent(50) == 50\n"
+        "    assert clamp_percent(120) == 100\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    pilot.git(fixture, "add", "--", "src/clamp.py", "tests/test_clamp.py")
+    pilot.git(fixture, "commit", "-m", "initialize direct pilot fixture")
+    status = pilot.git(fixture, "status", "--porcelain=v1")
+    if status:
+        raise RuntimeError(f"Direct pilot fixture is not clean after initialization: {status}")
+    return fixture, pilot.git(fixture, "rev-parse", "HEAD"), before, after
 
 
 def _checked_run(
