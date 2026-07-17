@@ -48,6 +48,7 @@ jobs:
             "scripts/Invoke-BDBLocalE2E.ps1",
             "scripts/Invoke-BDBPersistentPilot.ps1",
             "scripts/Invoke-BDBGitHubPilot.ps1",
+            "scripts/Invoke-BDBDirectLanePilot.ps1",
             "scripts/Install-BDBNativeHost.ps1"
           )
           foreach ($script in $scripts) {
@@ -68,6 +69,8 @@ jobs:
           python -m py_compile poc_bridge.py
           python -m py_compile scripts/run_persistent_pilot.py
           python -m py_compile scripts/prepare_github_pilot.py
+          python -m py_compile scripts/run_direct_lane_pilot.py
+          python -m py_compile scripts/run_direct_lane_pilot_checked.py
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
       - name: Run tests
@@ -82,6 +85,15 @@ jobs:
         run: |
           $root = Join-Path $env:RUNNER_TEMP "bdb-persistent-pilot"
           .\scripts\Invoke-BDBPersistentPilot.ps1 -Python (Get-Command python).Source -Root $root
+      - name: Run Direct Lane Native pilot
+        if: runner.os == 'Windows' && matrix.python-version == '3.14'
+        shell: powershell
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "bdb-direct-lane-pilot"
+          .\scripts\Invoke-BDBDirectLanePilot.ps1 `
+            -Python (Get-Command python).Source `
+            -Root $root `
+            -TimeoutSeconds 120
       - name: Prepare private GitHub pilot smoke
         if: runner.os == 'Windows' && matrix.python-version == '3.14'
         shell: powershell
