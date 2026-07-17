@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ _STOP_MESSAGES = frozenset(
 )
 _ORIGINAL_RUN = pilot.run
 _ORIGINAL_LOAD_JSON_OUTPUT = pilot.load_json_output
+_ORIGINAL_WAIT_UNTIL = pilot.wait_until
 
 
 def _canonical_content_fields(content: bytes) -> dict[str, str]:
@@ -64,6 +66,12 @@ def _checked_load_json_output(completed: Any) -> dict[str, Any]:
         raise
 
 
+def _checked_wait_until(description: str, *args: Any, **kwargs: Any) -> Any:
+    if description == "Bridge RUNNING":
+        time.sleep(1.0)
+    return _ORIGINAL_WAIT_UNTIL(description, *args, **kwargs)
+
+
 def _pilot_root() -> Path:
     try:
         index = sys.argv.index("--root")
@@ -98,6 +106,7 @@ def _validate_report(root: Path) -> None:
 def main() -> int:
     pilot.run = _checked_run
     pilot.load_json_output = _checked_load_json_output
+    pilot.wait_until = _checked_wait_until
     pilot.content_fields = _canonical_content_fields
     code = pilot.main()
     if code == 0:
