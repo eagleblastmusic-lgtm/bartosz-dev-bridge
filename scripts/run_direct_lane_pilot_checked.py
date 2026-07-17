@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import sys
 from pathlib import Path
@@ -27,6 +28,13 @@ _STOP_MESSAGES = frozenset(
 )
 _ORIGINAL_RUN = pilot.run
 _ORIGINAL_LOAD_JSON_OUTPUT = pilot.load_json_output
+
+
+def _canonical_content_fields(content: bytes) -> dict[str, str]:
+    return {
+        "content_base64": base64.b64encode(content).decode("ascii"),
+        "content_sha256": pilot.sha256_value(content),
+    }
 
 
 def _checked_run(
@@ -90,6 +98,7 @@ def _validate_report(root: Path) -> None:
 def main() -> int:
     pilot.run = _checked_run
     pilot.load_json_output = _checked_load_json_output
+    pilot.content_fields = _canonical_content_fields
     code = pilot.main()
     if code == 0:
         _validate_report(_pilot_root())
