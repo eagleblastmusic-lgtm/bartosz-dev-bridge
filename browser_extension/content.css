@@ -6,12 +6,34 @@
   font: 13px/1.45 system-ui, sans-serif;
 }
 
+.bdb-compact-host {
+  background: transparent !important;
+  border: 0 !important;
+  margin: 8px 0 !important;
+  padding: 0 !important;
+  white-space: normal !important;
+}
+
+.bdb-action-source-hidden {
+  display: none !important;
+}
+
+.bdb-compact {
+  background: color-mix(in srgb, currentColor 5%, transparent);
+}
+
 .bdb-execute,
 .bdb-controls button {
   border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
   border-radius: 8px;
   cursor: pointer;
   padding: 7px 11px;
+}
+
+.bdb-execute:disabled,
+.bdb-controls button:disabled {
+  cursor: progress;
+  opacity: 0.72;
 }
 
 .bdb-controls {
@@ -25,6 +47,15 @@
   max-height: 320px;
   overflow: auto;
   white-space: pre-wrap;
+}
+
+.bdb-details {
+  margin-top: 8px;
+}
+
+.bdb-details summary {
+  cursor: pointer;
+  opacity: 0.75;
 }
 
 .bdb-status {

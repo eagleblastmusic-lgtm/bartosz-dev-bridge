@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Bartosz Dev Bridge",
-  "version": "0.1.0",
-  "description": "Assisted Direct Lane controls for explicit BDB actions in ChatGPT.",
+  "version": "0.2.0",
+  "description": "Bounded local workspace context, tested edits, AUTO continuation, and verified fast-forward promotion for ChatGPT.",
   "permissions": [
     "nativeMessaging",
     "storage"

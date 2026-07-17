@@ -20,10 +20,48 @@ function parseAction(codeBlock) {
   }
 }
 
+function compactAction(action) {
+  const presentation = action && action.presentation;
+  return Boolean(
+    presentation &&
+    typeof presentation === "object" &&
+    !Array.isArray(presentation) &&
+    presentation.mode === "compact"
+  );
+}
+
 function resultText(response, marker = null) {
   const payload = response && response.result ? response.result : response;
   const prefix = marker ? `${marker}\n` : "";
   return `${prefix}BDB_RESULT:\n${JSON.stringify(payload, null, 2)}`;
+}
+
+function resultSummary(response) {
+  const payload = response && response.result ? response.result : response;
+  if (payload && payload.operation === "workspace_context" && payload.context) {
+    const context = payload.context;
+    const files = Array.isArray(context.tracked_paths) ? context.tracked_paths.length : 0;
+    const snapshots = Array.isArray(context.snapshot_files) ? context.snapshot_files.length : 0;
+    const symbols = Array.isArray(context.symbols) ? context.symbols.length : 0;
+    return `Odczytano kontekst: ${files} plików, ${snapshots} treści, ${symbols} symboli.`;
+  }
+  if (payload && payload.status === "success") {
+    const changed = Array.isArray(payload.changed_files) ? payload.changed_files.length : 0;
+    const tests = payload.stdout_tail && typeof payload.stdout_tail === "string"
+      ? payload.stdout_tail.trim().split("\n").slice(-1)[0]
+      : null;
+    if (changed > 0 && tests) {
+      return `Zmieniono ${changed} plików. ${tests}`;
+    }
+    if (changed > 0) {
+      return `Zmieniono ${changed} plików.`;
+    }
+    return "Operacja zakończona powodzeniem.";
+  }
+  if (response && response.status === "pending") {
+    return "Operacja została przyjęta i nadal trwa.";
+  }
+  return `Stan: ${(response && response.status) || (payload && payload.status) || "wynik"}`;
 }
 
 async function writeClipboard(text) {
@@ -122,15 +160,24 @@ async function autoSend(response, loopId, iteration) {
   return { sent: true, reason: null };
 }
 
-function renderResult(container, response) {
+function renderResult(container, response, { compact = false } = {}) {
   container.textContent = "";
   const status = document.createElement("div");
   status.className = "bdb-status";
-  status.textContent = `BDB: ${response.status || "wynik"}`;
+  status.textContent = compact ? resultSummary(response) : `BDB: ${response.status || "wynik"}`;
 
   const pre = document.createElement("pre");
   pre.className = "bdb-result";
   pre.textContent = JSON.stringify(response, null, 2);
+
+  const details = document.createElement("details");
+  details.className = "bdb-details";
+  const detailsSummary = document.createElement("summary");
+  detailsSummary.textContent = "Szczegóły techniczne";
+  details.append(detailsSummary, pre);
+  if (!compact) {
+    details.open = true;
+  }
 
   const controls = document.createElement("div");
   controls.className = "bdb-controls";
@@ -157,10 +204,10 @@ function renderResult(container, response) {
   });
 
   controls.append(continueButton, copyButton);
-  container.append(status, pre, controls);
+  container.append(status, details, controls);
 }
 
-async function maybeAuto(action, button, output) {
+async function maybeAuto(action, button, output, compact) {
   const automation = action && action.automation;
   if (!automation || automation.mode !== "auto") {
     return;
@@ -177,7 +224,7 @@ async function maybeAuto(action, button, output) {
       button.textContent = `BDB: Wykonaj (${auto.reason || "ASSISTED"})`;
       return;
     }
-    renderResult(output, auto.response);
+    renderResult(output, auto.response, { compact });
     if (!auto.shouldContinue) {
       button.textContent = `BDB AUTO: zatrzymano (${auto.stopReason || "limit"})`;
       return;
@@ -201,13 +248,19 @@ function enhance(codeBlock, action) {
   if (!(host instanceof HTMLElement) || host.querySelector(":scope > .bdb-assisted")) {
     return;
   }
+  const compact = compactAction(action);
+  if (compact) {
+    codeBlock.classList.add("bdb-action-source-hidden");
+    host.classList.add("bdb-compact-host");
+  }
+
   const panel = document.createElement("div");
-  panel.className = "bdb-assisted";
+  panel.className = compact ? "bdb-assisted bdb-compact" : "bdb-assisted";
 
   const button = document.createElement("button");
   button.type = "button";
   button.className = "bdb-execute";
-  button.textContent = "BDB: Wykonaj";
+  button.textContent = compact ? "BDB: uruchom zadanie" : "BDB: Wykonaj";
 
   const output = document.createElement("div");
   output.className = "bdb-output";
@@ -225,7 +278,7 @@ function enhance(codeBlock, action) {
       if (!result || result.ok !== true) {
         throw new Error(result && result.error ? result.error : "Brak odpowiedzi rozszerzenia");
       }
-      renderResult(output, result.response);
+      renderResult(output, result.response, { compact });
       button.textContent = "BDB: wykonano";
     } catch (error) {
       output.textContent = `BDB error: ${String(error && error.message ? error.message : error)}`;
@@ -237,7 +290,7 @@ function enhance(codeBlock, action) {
 
   panel.append(button, output);
   host.append(panel);
-  maybeAuto(action, button, output);
+  maybeAuto(action, button, output, compact);
 }
 
 function scan(root) {

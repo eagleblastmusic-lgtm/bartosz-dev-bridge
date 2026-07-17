@@ -3,8 +3,11 @@
 const HOST_NAME = "com.bartosz.dev_bridge";
 const REQUEST_SCHEMA = "bdb-native-request-v1";
 const ACTION_SCHEMA = "bdb-action-v1";
+const WORKSPACE_CONTEXT_OPERATION = "workspace_context";
 const MAX_SERIALIZED_BYTES = 1024 * 1024;
 const DEFAULT_WAIT_SECONDS = 30;
+const PROMOTION_WAIT_ATTEMPTS = 60;
+const PROMOTION_WAIT_MILLISECONDS = 100;
 const DEFAULT_AUTO_SETTINGS = Object.freeze({
   autoEnabled: false,
   autoMaxIterations: 4,
@@ -13,6 +16,7 @@ const DEFAULT_AUTO_SETTINGS = Object.freeze({
 const AUTO_REPLAY_GUARD_KEY = "bdbAutoReplayGuard";
 const AUTO_REPLAY_GUARD_LIMIT = 512;
 const LOOP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+const REPO_ALIAS_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const TERMINAL_VALUES = new Set([
   "done",
   "needs_user",
@@ -44,6 +48,13 @@ function validateJsonObject(value, field) {
   }
 }
 
+function validateRepoAlias(value) {
+  if (typeof value !== "string" || !REPO_ALIAS_RE.test(value)) {
+    throw new Error("Repository alias has an unsafe format");
+  }
+  return value;
+}
+
 function sendNative(request) {
   validateJsonObject(request, "native request");
   return new Promise((resolve, reject) => {
@@ -63,6 +74,100 @@ function sendNative(request) {
   });
 }
 
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function nativeContext(repoAlias) {
+  return sendNative({
+    schema: REQUEST_SCHEMA,
+    request_id: requestId("workspace-context"),
+    action: "context",
+    repo_alias: validateRepoAlias(repoAlias)
+  });
+}
+
+async function workspaceContext(action) {
+  const repoAlias = validateRepoAlias(action.repo_alias);
+  const native = await nativeContext(repoAlias);
+  return {
+    schema: native.schema,
+    request_id: native.request_id,
+    status: "completed",
+    repo_alias: repoAlias,
+    result: {
+      status: "success",
+      operation: WORKSPACE_CONTEXT_OPERATION,
+      context: native.context,
+      arm: native.arm
+    }
+  };
+}
+
+function requiresPromotion(action) {
+  const promotion = action && action.promotion;
+  return Boolean(
+    promotion &&
+    typeof promotion === "object" &&
+    !Array.isArray(promotion) &&
+    promotion.mode === "required"
+  );
+}
+
+function withPromotion(response, promotion) {
+  const result = response && response.result && typeof response.result === "object"
+    ? response.result
+    : {};
+  return { ...response, result: { ...result, promotion } };
+}
+
+async function waitForRequiredPromotion(action, response) {
+  if (!requiresPromotion(action)) {
+    return response;
+  }
+  const result = response && response.result;
+  const successfulPatch = Boolean(
+    response &&
+    response.status === "completed" &&
+    result &&
+    result.status === "success" &&
+    result.data &&
+    result.data.operation === "multi_file_patch"
+  );
+  if (!successfulPatch) {
+    return response;
+  }
+
+  const commandId = response.command_id || result.command_id;
+  if (typeof commandId !== "string" || commandId.length === 0) {
+    return withPromotion(response, {
+      status: "needs_user",
+      reason: "completed_result_has_no_command_id"
+    });
+  }
+
+  for (let attempt = 0; attempt < PROMOTION_WAIT_ATTEMPTS; attempt += 1) {
+    const contextResponse = await nativeContext(action.repo_alias);
+    const context = contextResponse && contextResponse.context;
+    const receipt = context && context.latest_promotion;
+    if (
+      receipt &&
+      receipt.status === "promoted" &&
+      receipt.command_id === commandId &&
+      context.source_clean === true
+    ) {
+      return withPromotion(response, receipt);
+    }
+    await sleep(PROMOTION_WAIT_MILLISECONDS);
+  }
+
+  return withPromotion(response, {
+    status: "needs_user",
+    reason: "promotion_not_observed",
+    command_id: commandId
+  });
+}
+
 async function submitAction(action, tabId) {
   validateJsonObject(action, "BDB action");
   if (action.schema !== ACTION_SCHEMA) {
@@ -76,13 +181,17 @@ async function submitAction(action, tabId) {
   }
   inFlightTabs.add(tabId);
   try {
-    return await sendNative({
+    if (action.operation === WORKSPACE_CONTEXT_OPERATION) {
+      return await workspaceContext(action);
+    }
+    const response = await sendNative({
       schema: REQUEST_SCHEMA,
       request_id: requestId("submit"),
       action: "submit_action",
       wait_seconds: DEFAULT_WAIT_SECONDS,
       bdb_action: action
     });
+    return await waitForRequiredPromotion(action, response);
   } finally {
     inFlightTabs.delete(tabId);
   }
@@ -120,7 +229,17 @@ function automationMetadata(action) {
   if (!Number.isInteger(metadata.iteration) || metadata.iteration < 1) {
     throw new Error("AUTO iteration must be a positive integer");
   }
-  return { loopId: metadata.loop_id, iteration: metadata.iteration };
+  if (
+    metadata.continue_on_failure !== undefined &&
+    typeof metadata.continue_on_failure !== "boolean"
+  ) {
+    throw new Error("AUTO continue_on_failure must be boolean when present");
+  }
+  return {
+    loopId: metadata.loop_id,
+    iteration: metadata.iteration,
+    continueOnFailure: metadata.continue_on_failure === true
+  };
 }
 
 function autoStateKey(tabId, loopId) {
@@ -184,6 +303,22 @@ function containsTerminalValue(value, depth = 0) {
   return null;
 }
 
+function isRecoverableProfileFailure(metadata, response) {
+  const result = response && response.result;
+  const data = result && result.data;
+  return Boolean(
+    metadata.continueOnFailure &&
+    response &&
+    response.status === "completed" &&
+    result &&
+    (result.status === "failed" || result.status === "timeout") &&
+    data &&
+    data.operation === "multi_file_patch" &&
+    data.rollback_performed === true &&
+    data.checkpoint_state === "rolled_back"
+  );
+}
+
 async function considerAuto(action, tabId) {
   const metadata = automationMetadata(action);
   if (!metadata) {
@@ -224,7 +359,8 @@ async function considerAuto(action, tabId) {
   }
 
   const response = await submitAction(action, tabId);
-  const terminal = containsTerminalValue(response.result || response);
+  const recoverableFailure = isRecoverableProfileFailure(metadata, response);
+  const terminal = recoverableFailure ? null : containsTerminalValue(response.result || response);
   const completed = response.status === "completed";
   state.lastIteration = metadata.iteration;
   state.lastCommandId = response.command_id || null;
@@ -238,6 +374,7 @@ async function considerAuto(action, tabId) {
     response,
     loopId: metadata.loopId,
     iteration: metadata.iteration,
+    recoverableFailure,
     shouldContinue,
     stopReason: terminal || (completed ? null : "result_not_completed"),
     state
@@ -264,15 +401,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           action: "status"
         });
       case "BDB_CONTEXT":
-        if (typeof message.repoAlias !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(message.repoAlias)) {
-          throw new Error("Repository alias has an unsafe format");
-        }
-        return sendNative({
-          schema: REQUEST_SCHEMA,
-          request_id: requestId("context"),
-          action: "context",
-          repo_alias: message.repoAlias
-        });
+        return nativeContext(message.repoAlias);
       default:
         throw new Error("Unsupported extension message");
     }

@@ -21,6 +21,7 @@ from .protocol import (
     validate_base_sha,
     validate_session_id,
 )
+from .workspace_context import WorkspaceContextBuilder
 from .workspace_manager import Git
 from .workspace_state import clean_workspace_state_hash
 
@@ -160,6 +161,7 @@ class NativeActionComposer:
     def context(self, alias: str) -> dict[str, Any]:
         repository = self._repository(alias)
         context = self._repository_context(repository)
+        snapshot = WorkspaceContextBuilder(repository.bridge_config).build()
         return {
             "repo_alias": alias,
             "repository_id": repository.bridge_config.repository_id,
@@ -169,6 +171,7 @@ class NativeActionComposer:
             "initial_state_hash": context.initial_state_hash,
             "allowed_paths": list(repository.bridge_config.allowed_paths),
             "max_sequence": repository.bridge_config.max_sequence,
+            **snapshot,
         }
 
     def compose(self, action: dict[str, Any]) -> tuple[RepositoryAlias, dict[str, Any]]:
