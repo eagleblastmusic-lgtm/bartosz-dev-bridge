@@ -7,6 +7,7 @@ from pathlib import Path
 from . import cli as _legacy
 from . import ghb07_cli as _base
 from .local_spool_transport import LocalSpoolWriter
+from .local_wake import signal_running_bridge
 from .protocol import BridgeError
 
 
@@ -56,11 +57,13 @@ def _submit(config: object, envelope_path: str, filename: str) -> int:
             envelope,
             filename=filename,
         )
+        wake_signaled = signal_running_bridge(config.runtime_dir)
         _base._print_json(
             {
                 "accepted": True,
                 "filename": destination.name,
                 "spool": "direct-local",
+                "wake_signaled": wake_signaled,
             }
         )
         return 0
@@ -71,11 +74,19 @@ def _submit(config: object, envelope_path: str, filename: str) -> int:
 def _status(config: object, output_json: bool) -> int:
     try:
         inbox = Path(config.direct_spool_dir)
+        result_root = Path(config.direct_result_dir)
         files = sorted(path.name for path in inbox.glob("*.json")) if inbox.exists() else []
+        result_files = (
+            sorted(path.relative_to(result_root).as_posix() for path in result_root.rglob("*.json"))
+            if result_root.exists()
+            else []
+        )
         payload = {
             "enabled": bool(config.direct_spool_enabled),
             "pending_envelopes": len(files),
             "files": files,
+            "local_results": len(result_files),
+            "result_files": result_files,
         }
         if output_json:
             _base._print_json(payload)
@@ -83,7 +94,8 @@ def _status(config: object, output_json: bool) -> int:
             print(
                 "Direct local spool: "
                 f"enabled={str(payload['enabled']).lower()} "
-                f"pending_envelopes={payload['pending_envelopes']}"
+                f"pending_envelopes={payload['pending_envelopes']} "
+                f"local_results={payload['local_results']}"
             )
         return 0
     except Exception as exc:

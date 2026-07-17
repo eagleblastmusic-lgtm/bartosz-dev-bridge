@@ -48,7 +48,7 @@ A producer atomically publishes one UTF-8 JSON file using schema `bdb-local-enve
 
 The outer envelope is transport framing. The inner manifest and command continue through the canonical Bridge validators.
 
-## Atomic publication
+## Atomic command publication
 
 The supported writer performs:
 
@@ -67,6 +67,30 @@ The service polls `local-spool` before `commands`:
 2. an empty local snapshot falls through to the existing Git command transport;
 3. each source has an independent Journal retry row, so Git backoff cannot delay local commands.
 
+## Immediate wake
+
+On Windows the running service owns one manual-reset named event derived from the exact resolved `runtime_dir`. After a successful atomic submit, the operator or Native Host opens that existing event and signals it.
+
+- no TCP or HTTP listener is opened;
+- no public endpoint is created;
+- a submit made while Bridge is offline remains durable in the spool and normal polling recovers it later;
+- the existing `idle_poll_seconds` timeout remains a fallback;
+- the service keeps the single-worker invariant.
+
+Other platforms use the existing in-process waiter for tests and development. The production cross-process wake contract is Windows Native Event.
+
+## Durable local result
+
+Before the unchanged Git result publication path begins, the outbox mirrors exact staged result bytes to:
+
+```text
+<direct_result_dir>/sessions/<session_id>/results/<sequence>.json
+```
+
+The mirror uses exclusive temporary creation, file `fsync`, atomic replace, strict canonical path validation and exact-byte collision detection. If the local mirror cannot be made durable, publication fails closed and the command stays `RESULT_STAGED` for recovery.
+
+This means Native Messaging may return the local result without waiting for GitHub. GitHub publication continues as the existing audit/fallback path and retains its current retry, collision and reconciliation semantics.
+
 ## Configuration
 
 The lane is enabled by default:
@@ -77,13 +101,14 @@ The lane is enabled by default:
 }
 ```
 
-The default inbox is:
+Default directories:
 
 ```text
 <runtime_dir>/direct_spool/inbox
+<runtime_dir>/direct_spool/results
 ```
 
-A custom `direct_spool_dir` must remain inside `runtime_dir`.
+Custom `direct_spool_dir` and `direct_result_dir` values must be separate dedicated directories contained within `runtime_dir`.
 
 ## Operator commands
 
@@ -96,4 +121,6 @@ bdb bridge local submit `
 bdb bridge local status --config C:\path\to\config.json --json
 ```
 
-This stage does not yet automate browser integration. Native Messaging and the browser extension must consume this contract rather than introducing a second execution path.
+The submit response reports whether the running Windows named event was signaled. A false value does not invalidate the durable submit; it means polling or a later service start will process it.
+
+Native Messaging and the browser extension must consume this contract rather than introducing a second execution path.
