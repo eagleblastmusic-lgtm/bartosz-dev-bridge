@@ -49,6 +49,7 @@ jobs:
             "scripts/Invoke-BDBPersistentPilot.ps1",
             "scripts/Invoke-BDBGitHubPilot.ps1",
             "scripts/Invoke-BDBDirectLanePilot.ps1",
+            "scripts/Invoke-BDBLocalBrowserPilot.ps1",
             "scripts/Install-BDBNativeHost.ps1"
           )
           foreach ($script in $scripts) {
@@ -71,6 +72,7 @@ jobs:
           python -m py_compile scripts/prepare_github_pilot.py
           python -m py_compile scripts/run_direct_lane_pilot.py
           python -m py_compile scripts/run_direct_lane_pilot_checked.py
+          python -m py_compile scripts/prepare_local_browser_pilot.py
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_bridge').glob('*.py')]"
           python -c "import pathlib, py_compile; [py_compile.compile(str(p)) for p in pathlib.Path('bdb_poc').glob('*.py')]"
       - name: Run tests
