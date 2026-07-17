@@ -132,12 +132,14 @@ function Start-Promoter($State) {
         "--pid-file", ('"' + [string]$State.promoter_pid_file + '"'),
         "--stop-file", ('"' + [string]$State.promoter_stop_file + '"')
     )
-    Start-Process \
-        -FilePath ([string]$State.python_executable) \
-        -ArgumentList $arguments \
-        -RedirectStandardOutput ([string]$State.promoter_stdout) \
-        -RedirectStandardError ([string]$State.promoter_stderr) \
-        -WindowStyle Hidden | Out-Null
+    $startParameters = @{
+        FilePath = [string]$State.python_executable
+        ArgumentList = $arguments
+        RedirectStandardOutput = [string]$State.promoter_stdout
+        RedirectStandardError = [string]$State.promoter_stderr
+        WindowStyle = "Hidden"
+    }
+    Start-Process @startParameters | Out-Null
 
     for ($attempt = 0; $attempt -lt 100; $attempt++) {
         Start-Sleep -Milliseconds 100
