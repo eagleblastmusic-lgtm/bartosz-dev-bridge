@@ -14,6 +14,7 @@ dev = ["pytest>=8,<9"]
 
 [project.scripts]
 bdb = "bdb_bridge.cli:main"
+bdb-native-host = "bdb_bridge.native_host:main"
 
 [tool.setuptools.packages.find]
 include = ["bdb_bridge*", "bdb_poc*"]
