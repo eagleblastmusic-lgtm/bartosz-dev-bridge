@@ -158,27 +158,39 @@ function enhance(codeBlock, action) {
 }
 
 function scan(root) {
-  const blocks = root.querySelectorAll ? root.querySelectorAll("pre code, code") : [];
+  const blocks = [];
+  if (root instanceof HTMLElement && root.matches("code")) {
+    blocks.push(root);
+  }
+  if (root.querySelectorAll) {
+    blocks.push(...root.querySelectorAll("pre code, code"));
+  }
   for (const block of blocks) {
     if (!(block instanceof HTMLElement) || processedBlocks.has(block)) {
       continue;
     }
-    processedBlocks.add(block);
     const action = parseAction(block);
-    if (action) {
-      enhance(block, action);
+    if (!action) {
+      continue;
     }
+    processedBlocks.add(block);
+    enhance(block, action);
   }
 }
 
 scan(document);
 const observer = new MutationObserver((records) => {
   for (const record of records) {
+    if (record.type === "characterData" && record.target.parentElement) {
+      scan(record.target.parentElement);
+    }
     for (const node of record.addedNodes) {
       if (node instanceof HTMLElement) {
         scan(node);
+      } else if (node.parentElement) {
+        scan(node.parentElement);
       }
     }
   }
 });
-observer.observe(document.documentElement, { childList: true, subtree: true });
+observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
