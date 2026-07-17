@@ -12,6 +12,8 @@ from .models import (
     ServiceStatus,
     ServiceStatusSnapshot,
     BridgeErrorCode,
+    IngestionReport,
+    PollReport,
 )
 from .protocol import BridgeError
 from .journal import Journal
@@ -161,7 +163,11 @@ class BridgeService:
         # Faza 3: Ingest
         try:
             poll_report = self.ingestor.poll_once()
-            if poll_report.ingestion:
+            if not isinstance(poll_report, PollReport):
+                # Fail closed for malformed test doubles or connector adapters:
+                # unknown objects must not be interpreted as durable progress.
+                ingest_outcome = "none"
+            elif isinstance(poll_report.ingestion, IngestionReport):
                 ingestion = poll_report.ingestion
                 work_count = (
                     ingestion.manifests_recorded
@@ -211,8 +217,6 @@ class BridgeService:
             execute_outcome = "skipped"
         self._fault("AFTER_EXECUTE_PHASE")
 
-        # Execution is a safe phase boundary: observe a durable STOPPING request
-        # immediately after it finishes, before the service can enter another idle wait.
         if self._should_stop(instance_id):
             dt = (time.perf_counter() - t0) * 1000.0
             return BridgeCycleReport(
@@ -264,8 +268,6 @@ class BridgeService:
 
                 report = self.run_cycle(instance_id)
 
-                # A stop requested during execution must not incur a complete
-                # idle_poll_seconds delay after that safe phase has finished.
                 if self._should_stop(instance_id):
                     continue
                 if self._cycle_made_progress(report):
