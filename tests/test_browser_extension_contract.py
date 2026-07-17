@@ -60,6 +60,33 @@ def test_background_accepts_only_versioned_actions_and_native_host() -> None:
     assert "new Function" not in background
 
 
+def test_workspace_context_uses_native_context_without_new_permissions() -> None:
+    background = read("background.js")
+    content = read("content.js")
+    css = read("content.css")
+    assert 'const WORKSPACE_CONTEXT_OPERATION = "workspace_context"' in background
+    assert 'action: "context"' in background
+    assert "return await workspaceContext(action);" in background
+    assert 'presentation.mode === "compact"' in content
+    assert 'codeBlock.classList.add("bdb-action-source-hidden")' in content
+    assert ".bdb-action-source-hidden" in css
+    assert 'status: "completed"' in background
+    assert 'operation: WORKSPACE_CONTEXT_OPERATION' in background
+
+
+def test_auto_remains_bounded_and_explicitly_opt_in() -> None:
+    background = read("background.js")
+    content = read("content.js")
+    assert "autoEnabled: false" in background
+    assert "autoMaxIterations: 4" in background
+    assert "autoMaxMinutes: 10" in background
+    assert "metadata.iteration > settings.autoMaxIterations" in background
+    assert "now - state.startedAt > settings.autoMaxMinutes" in background
+    assert 'automation.mode !== "auto"' in content
+    assert "BDB_CONSIDER_AUTO" in content
+    assert "BDB_AUTO_RESULT" in content
+
+
 def test_extension_contains_no_remote_scripts_or_inline_script() -> None:
     manifest = json.loads(read("manifest.json"))
     files = [path for path in EXTENSION.rglob("*") if path.is_file()]
