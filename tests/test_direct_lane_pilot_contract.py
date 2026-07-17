@@ -35,6 +35,12 @@ def test_checked_runner_emits_canonical_multi_file_patch_content() -> None:
     assert '"content_encoding"' not in checked
 
 
+def test_checked_runner_preserves_exact_fixture_bytes_on_windows() -> None:
+    checked = read("scripts/run_direct_lane_pilot_checked.py")
+    assert 'pilot.git(fixture, "config", "core.autocrlf", "false")' in checked
+    assert "pilot.initialize_fixture = _checked_initialize_fixture" in checked
+
+
 def test_checked_runner_avoids_fresh_journal_status_race() -> None:
     checked = read("scripts/run_direct_lane_pilot_checked.py")
     assert 'if description == "Bridge RUNNING":' in checked
