@@ -36,10 +36,19 @@ class FakeJournal:
             workspace_revision_before=0,
             workspace_revision_after=1,
             last_error=None,
+            created_at="2026-07-15T12:00:03.200000Z",
         )
 
     def get_multi_file_patch_profile_run(self, command_id: str):
-        return SimpleNamespace(status="success", profile_id="poc_pytest")
+        if command_id != COMMAND_ID:
+            return None
+        return SimpleNamespace(
+            status="success",
+            profile_id="poc_pytest",
+            started_at="2026-07-15T12:00:04Z",
+            finished_at="2026-07-15T12:00:05Z",
+            created_at="2026-07-15T12:00:05.200000Z",
+        )
 
     def get_command_ingestion(self, command_id: str):
         if command_id != COMMAND_ID:
@@ -62,6 +71,31 @@ class FakeJournal:
             SimpleNamespace(
                 event_type="command.claimed",
                 created_at="2026-07-15T12:00:03Z",
+                payload_json=None,
+            ),
+            SimpleNamespace(
+                event_type="multi_file_patch.checkpoint_recorded",
+                created_at="2026-07-15T12:00:03.200000Z",
+                payload_json=None,
+            ),
+            SimpleNamespace(
+                event_type="multi_file_patch.applying",
+                created_at="2026-07-15T12:00:03.300000Z",
+                payload_json=None,
+            ),
+            SimpleNamespace(
+                event_type="multi_file_patch.applied",
+                created_at="2026-07-15T12:00:03.600000Z",
+                payload_json=None,
+            ),
+            SimpleNamespace(
+                event_type="multi_file_patch.profile_recorded",
+                created_at="2026-07-15T12:00:05.200000Z",
+                payload_json=None,
+            ),
+            SimpleNamespace(
+                event_type="multi_file_patch.execution_recorded",
+                created_at="2026-07-15T12:00:05.400000Z",
                 payload_json=None,
             ),
         ]
@@ -141,25 +175,38 @@ def test_edit_status_reports_durable_batch_state_and_timing(monkeypatch, capsys)
         "session_id": SESSION_ID,
         "timing": {
             "durations_ms": {
+                "checkpoint_activation_ms": 100.0,
+                "checkpoint_finalize_ms": 200.0,
                 "document_age_at_first_seen_ms": 1000.0,
                 "document_to_result_ms": 8000.0,
                 "end_to_end_ms": 8000.0,
                 "execution_ms": 1000.0,
                 "inbound_transport_ms": 1000.0,
+                "patch_apply_ms": 300.0,
                 "pre_execution_ms": 1000.0,
+                "profile_recording_ms": 200.0,
+                "profile_startup_ms": 400.0,
+                "result_build_and_stage_ms": 600.0,
                 "result_publication_ms": 2000.0,
                 "result_staging_ms": 1000.0,
+                "runtime_to_stage_ms": 3000.0,
                 "scheduler_queue_ms": 1000.0,
                 "source_commit_to_first_seen_ms": 500.0,
                 "source_commit_to_result_ms": 7500.0,
                 "validation_ms": 1000.0,
+                "workspace_and_plan_checkpoint_ms": 200.0,
             },
             "timestamps": {
+                "checkpoint_recorded_at": "2026-07-15T12:00:03.200000Z",
                 "claimed_at": "2026-07-15T12:00:03Z",
                 "document_created_at": "2026-07-15T12:00:00Z",
                 "execution_finished_at": "2026-07-15T12:00:05Z",
+                "execution_recorded_at": "2026-07-15T12:00:05.400000Z",
                 "execution_started_at": "2026-07-15T12:00:04Z",
                 "first_seen_at": "2026-07-15T12:00:01Z",
+                "patch_applied_at": "2026-07-15T12:00:03.600000Z",
+                "patch_applying_at": "2026-07-15T12:00:03.300000Z",
+                "profile_recorded_at": "2026-07-15T12:00:05.200000Z",
                 "remote_created_at": "2026-07-15T12:00:00Z",
                 "result_published_at": "2026-07-15T12:00:08Z",
                 "result_staged_at": "2026-07-15T12:00:06Z",
