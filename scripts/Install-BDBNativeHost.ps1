@@ -5,6 +5,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$BridgeConfig,
 
+    [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')]
+    [string]$RepositoryAlias = "default",
+
     [string]$ChromeExtensionId,
 
     [string]$EdgeExtensionId,
@@ -49,12 +52,17 @@ New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
 
 $nativeConfigPath = Join-Path $installRoot "native-host.json"
 $hostManifestPath = Join-Path $installRoot "$hostName.json"
+$repositories = [ordered]@{}
+$repositories[$RepositoryAlias] = [ordered]@{
+    bridge_config_path = $bridgeConfigPath
+}
 
 $nativeConfig = [ordered]@{
     schema = "bdb-native-host-config-v1"
-    bridge_config_path = $bridgeConfigPath
+    repositories = $repositories
     allowed_origins = $allowedOrigins
     state_path = (Join-Path $installRoot "native-host-arm.json")
+    session_store_path = (Join-Path $installRoot "native-host-sessions.json")
     max_wait_seconds = $MaxWaitSeconds
     max_message_bytes = 1048576
 }
@@ -70,7 +78,7 @@ $hostManifest = [ordered]@{
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText(
     $nativeConfigPath,
-    ($nativeConfig | ConvertTo-Json -Depth 6),
+    ($nativeConfig | ConvertTo-Json -Depth 8),
     $utf8NoBom
 )
 [System.IO.File]::WriteAllText(
@@ -91,6 +99,7 @@ foreach ($key in $registryKeys) {
 $result = [ordered]@{
     installed = $true
     host_name = $hostName
+    repository_alias = $RepositoryAlias
     browsers = @("chrome", "edge")
     allowed_origin_count = $allowedOrigins.Count
     config = $nativeConfigPath
