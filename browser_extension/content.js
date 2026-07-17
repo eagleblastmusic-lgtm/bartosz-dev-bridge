@@ -217,7 +217,11 @@ function enhance(codeBlock, action) {
     button.textContent = "BDB: wykonywanie…";
     output.textContent = "";
     try {
-      const result = await chrome.runtime.sendMessage({ type: "BDB_SUBMIT_ACTION", action });
+      const currentAction = parseAction(codeBlock);
+      if (!currentAction) {
+        throw new Error("Blok BDB zmienił się lub nie jest już prawidłowym bdb-action-v1 JSON");
+      }
+      const result = await chrome.runtime.sendMessage({ type: "BDB_SUBMIT_ACTION", action: currentAction });
       if (!result || result.ok !== true) {
         throw new Error(result && result.error ? result.error : "Brak odpowiedzi rozszerzenia");
       }
