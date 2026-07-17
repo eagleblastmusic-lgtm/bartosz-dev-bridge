@@ -92,7 +92,12 @@ def run_foreground(config: BridgeConfig) -> int:
             remote=cmd_remote or "origin",
             commands_branch=cmd_branch,
         )
-        git_ingestor = CommandIngestor(journal, git_transport, source_id="commands")
+        git_ingestor = CommandIngestor(
+            journal,
+            git_transport,
+            source_id="commands",
+            fault_hook=hook,
+        )
         if config.direct_spool_enabled:
             local_transport = LocalSpoolTransport(config.direct_spool_dir)
             local_ingestor = CommandIngestor(
@@ -101,6 +106,7 @@ def run_foreground(config: BridgeConfig) -> int:
                 source_id="local-spool",
                 backoff_base=0.1,
                 backoff_max=1.0,
+                fault_hook=hook,
             )
             ingestor = PriorityCommandIngestor(local_ingestor, git_ingestor)
         else:
