@@ -17,7 +17,7 @@ def test_manifest_has_minimal_mv3_permissions() -> None:
     assert manifest["manifest_version"] == 3
     assert manifest["permissions"] == ["nativeMessaging", "storage"]
     assert manifest["host_permissions"] == ["https://chatgpt.com/*"]
-    assert manifest["background"] == {"service_worker": "background.js"}
+    assert manifest["background"] == {"service_worker": "background_entry.js"}
     assert manifest["content_scripts"][0]["world"] == "ISOLATED"
     serialized = json.dumps(manifest)
     for forbidden in ("<all_urls>", "tabs", "debugger", "webRequest", "downloads"):
@@ -109,6 +109,22 @@ def test_auto_remains_bounded_and_explicitly_opt_in() -> None:
     assert 'automation.mode !== "auto"' in content
     assert "BDB_CONSIDER_AUTO" in content
     assert "BDB_AUTO_RESULT" in content
+
+
+def test_auto_entry_synchronizes_loop_state_without_weakening_replay_guard() -> None:
+    entry = read("background_entry.js")
+    background = read("background.js")
+    popup = read("popup.js")
+    assert 'importScripts("background.js")' in entry
+    assert "canonicalAutoStateKey" in entry
+    assert "chrome.storage.session.get(null)" in entry
+    assert "legacyAutoStateEntries" in entry
+    assert 'reason = "iteration_already_processed"' in entry
+    assert "expectedIteration" in entry
+    assert "claimAutoReplay" in background
+    assert "AUTO_REPLAY_GUARD_KEY" in background
+    assert "claimAutoReplay =" not in entry
+    assert "Oczekiwana iteracja" in popup
 
 
 def test_extension_contains_no_remote_scripts_or_inline_script() -> None:
