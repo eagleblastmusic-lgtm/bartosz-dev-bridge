@@ -6,7 +6,10 @@ from pathlib import Path
 from . import cli as _legacy
 from . import ghb07_cli as _base
 from .native_host import NativeArmStore, NativeHostConfig, default_native_config_path
+from .runtime_hardening import install_runtime_hardening
 
+
+install_runtime_hardening()
 
 _PREVIOUS_MAIN = _base.main
 _PREVIOUS_PARSER = _base._parser
