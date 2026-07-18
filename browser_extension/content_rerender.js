@@ -26,6 +26,16 @@ function hasLiveBdbPanel(codeBlock) {
   );
 }
 
+function containsRemovedBdbPanel(node) {
+  return Boolean(
+    node instanceof HTMLElement &&
+    (
+      node.classList.contains("bdb-assisted") ||
+      node.querySelector(".bdb-assisted")
+    )
+  );
+}
+
 scan = function scanWithRerenderReconciliation(root) {
   for (const block of bdbActionBlocks(root)) {
     if (
@@ -40,14 +50,14 @@ scan = function scanWithRerenderReconciliation(root) {
 };
 
 // The original observer scans additions and character changes. This focused observer
-// handles the complementary case where React removes only the extension-owned panel.
-// It rescans the mutation target; it never submits an action directly.
+// handles the complementary case where React removes an extension-owned panel.
+// It ignores unrelated DOM churn and never submits an action directly.
 const bdbRemovedPanelObserver = new MutationObserver((records) => {
   for (const record of records) {
     if (
       record.type === "childList" &&
-      record.removedNodes.length > 0 &&
-      record.target instanceof HTMLElement
+      record.target instanceof HTMLElement &&
+      Array.from(record.removedNodes).some(containsRemovedBdbPanel)
     ) {
       scan(record.target);
     }
