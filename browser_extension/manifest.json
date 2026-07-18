@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Bartosz Dev Bridge",
-  "version": "0.2.3",
-  "description": "Bounded local workspace context, tested edits, AUTO continuation, and verified fast-forward promotion for ChatGPT.",
+  "version": "0.2.4",
+  "description": "Bounded local workspace context, tested edits, confirmed AUTO continuation, and verified fast-forward promotion for ChatGPT.",
   "permissions": [
     "nativeMessaging",
     "storage"
@@ -11,7 +11,7 @@
     "https://chatgpt.com/*"
   ],
   "background": {
-    "service_worker": "background_entry.js"
+    "service_worker": "background_full_entry.js"
   },
   "action": {
     "default_title": "Bartosz Dev Bridge",
@@ -24,7 +24,8 @@
       ],
       "js": [
         "content.js",
-        "content_rerender.js"
+        "content_rerender.js",
+        "content_auto_send.js"
       ],
       "css": [
         "content.css"
