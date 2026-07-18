@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-gui-diagnostics-export-v1",
+  "title": "BDB GUI diagnostics export result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "output_path", "size_bytes", "sha256", "entries", "generated_at"],
+  "properties": {
+    "schema": { "const": "bdb-gui-diagnostics-export-v1" },
+    "output_path": { "type": "string" },
+    "size_bytes": { "type": "integer", "minimum": 1 },
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "entries": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": { "type": "string" }
+    },
+    "generated_at": { "type": "string" }
+  }
+}
