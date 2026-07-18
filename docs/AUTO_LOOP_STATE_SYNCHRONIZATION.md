@@ -78,7 +78,7 @@ Extension version `0.2.2` loads `content_rerender.js` after the mature `content.
 - the existing scanner then recreates the panel and calls the background AUTO decision again;
 - the durable replay guard remains the authority preventing duplicate execution.
 
-The reconciliation layer does not submit Native Messaging actions directly and does not add another observer. It delegates to the original scanner and its existing observer callback.
+The reconciliation layer never submits Native Messaging actions directly. A focused `MutationObserver` watches child removals only to rescan the affected live element; all parsing, execution decisions and replay claims remain delegated to the original scanner and background worker.
 
 ## Runtime regression tests
 
@@ -98,7 +98,9 @@ The reconciliation layer does not submit Native Messaging actions directly and d
 3. a later scan restoring the panel;
 4. reconsideration through the background replay guard rather than direct execution.
 
-Both tests were introduced red against the preceding implementation before their respective fixes.
+`tests/test_browser_content_rerender_observer_contract.py` locks the removed-node observer boundary and asserts that the companion script contains no direct runtime messaging.
+
+Both runtime regressions were introduced red against the preceding implementation before their respective fixes.
 
 ## Manual verification
 
