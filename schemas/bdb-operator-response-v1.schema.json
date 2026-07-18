@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-operator-response-v1",
+  "title": "BDB Operator API response v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "operation_id",
+    "operation",
+    "ok",
+    "generated_at",
+    "project_alias",
+    "data",
+    "error"
+  ],
+  "properties": {
+    "schema": {
+      "const": "bdb-operator-response-v1"
+    },
+    "operation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "operation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "project_alias": {
+      "type": ["string", "null"],
+      "pattern": "^[a-z][a-z0-9-]{0,31}$"
+    },
+    "data": {
+      "type": "object"
+    },
+    "error": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "details"],
+          "properties": {
+            "code": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "details": {
+              "type": "object"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
