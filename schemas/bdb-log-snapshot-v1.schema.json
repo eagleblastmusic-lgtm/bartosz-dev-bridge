@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-log-snapshot-v1",
+  "title": "BDB bounded log snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "project_alias", "generated_at", "limits", "sources"],
+  "properties": {
+    "schema": { "const": "bdb-log-snapshot-v1" },
+    "project_alias": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_bytes_per_source", "max_lines_per_source"],
+      "properties": {
+        "max_bytes_per_source": { "type": "integer", "minimum": 1, "maximum": 65536 },
+        "max_lines_per_source": { "type": "integer", "minimum": 1, "maximum": 500 }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "path",
+          "exists",
+          "size_bytes",
+          "modified_at",
+          "truncated",
+          "lines"
+        ],
+        "properties": {
+          "source": { "enum": ["promoter_stdout", "promoter_stderr"] },
+          "path": { "type": ["string", "null"] },
+          "exists": { "type": "boolean" },
+          "size_bytes": { "type": "integer", "minimum": 0 },
+          "modified_at": { "type": ["string", "null"], "format": "date-time" },
+          "truncated": { "type": "boolean" },
+          "lines": {
+            "type": "array",
+            "maxItems": 500,
+            "items": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}
