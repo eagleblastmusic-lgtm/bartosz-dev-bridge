@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-control-center-smoke-v1",
+  "title": "BDB Control Center headless smoke report v1",
+  "type": "object",
+  "required": ["schema", "status"],
+  "properties": {
+    "schema": { "const": "bdb-control-center-smoke-v1" },
+    "status": { "enum": ["success", "failed"] },
+    "window_object_name": { "type": "string" },
+    "window_constructed": { "type": "boolean" },
+    "read_only_startup": { "const": true },
+    "navigation": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 5
+    },
+    "page_count": { "type": "integer", "minimum": 0, "maximum": 5 },
+    "project_count": { "type": "integer", "minimum": 0 },
+    "bootstrap_completed": { "type": "boolean" },
+    "bootstrap_ok": { "type": "boolean" },
+    "bootstrap_error_code": { "type": ["string", "null"] },
+    "mutation_operations_invoked": { "const": 0 },
+    "operator_network_listener": { "type": ["boolean", "null"] },
+    "workspaces_root": { "type": "string" },
+    "qt_version": { "type": "string" },
+    "pyside_version": { "type": "string" },
+    "python_version": { "type": "string" },
+    "qt_platform": { "type": "string" },
+    "event_loop_exit_code": { "type": "integer" },
+    "timed_out": { "type": "boolean" },
+    "error_code": { "type": "string" },
+    "error": { "type": "string" },
+    "install_hint": { "type": "string" }
+  }
+}
