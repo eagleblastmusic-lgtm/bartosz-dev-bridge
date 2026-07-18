@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-gui-project-status-v1",
+  "title": "BDB Control Center project status snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "workspace_root",
+    "project_alias",
+    "ok",
+    "read_only",
+    "mutation_operations_invoked",
+    "operator_operation_id",
+    "overall_status",
+    "bridge",
+    "native_host",
+    "promoter",
+    "source",
+    "error"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-gui-project-status-v1" },
+    "workspace_root": { "type": "string", "minLength": 1 },
+    "project_alias": {
+      "type": ["string", "null"],
+      "pattern": "^[a-z][a-z0-9-]{0,31}$"
+    },
+    "ok": { "type": "boolean" },
+    "read_only": { "const": true },
+    "mutation_operations_invoked": { "const": 0 },
+    "operator_operation_id": { "type": "string", "minLength": 1 },
+    "overall_status": { "type": ["string", "null"] },
+    "bridge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "pid", "pid_alive"],
+      "properties": {
+        "status": { "type": ["string", "null"] },
+        "pid": { "type": ["integer", "null"], "minimum": 1 },
+        "pid_alive": { "type": ["boolean", "null"] }
+      }
+    },
+    "native_host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["armed", "armed_until"],
+      "properties": {
+        "armed": { "type": ["boolean", "null"] },
+        "armed_until": { "type": ["string", "null"] }
+      }
+    },
+    "promoter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["running", "pid"],
+      "properties": {
+        "running": { "type": ["boolean", "null"] },
+        "pid": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clean", "head"],
+      "properties": {
+        "clean": { "type": ["boolean", "null"] },
+        "head": { "type": ["string", "null"] }
+      }
+    },
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": ["string", "null"] },
+            "message": { "type": ["string", "null"] }
+          }
+        }
+      ]
+    }
+  }
+}
