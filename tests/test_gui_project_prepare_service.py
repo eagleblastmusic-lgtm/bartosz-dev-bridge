@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Iterable
 
 import pytest
 
@@ -19,14 +20,32 @@ class FakePrepareOperator:
         )
         self.calls: list[dict[str, object]] = []
 
-    def prepare(self, workspace_root: str | Path, **kwargs: object) -> OperatorResponse:
-        self.calls.append({"workspace_root": str(workspace_root), **kwargs})
+    def prepare(
+        self,
+        workspace_root: str | Path,
+        *,
+        source_repo: str | Path,
+        alias: str,
+        allowed_paths: Iterable[str],
+        test_timeout_seconds: float = 120.0,
+        python_executable: str | Path | None = None,
+    ) -> OperatorResponse:
+        self.calls.append(
+            {
+                "workspace_root": str(workspace_root),
+                "source_repo": str(source_repo),
+                "alias": alias,
+                "allowed_paths": tuple(allowed_paths),
+                "test_timeout_seconds": test_timeout_seconds,
+                "python_executable": str(python_executable) if python_executable is not None else None,
+            }
+        )
         return self.response
 
 
 def make_source(tmp_path: Path) -> Path:
     source = tmp_path / "source"
-    source.mkdir()
+    source.mkdir(parents=True)
     (source / ".git").mkdir()
     return source
 
@@ -57,7 +76,7 @@ def test_build_plan_is_read_only_and_normalizes_paths(tmp_path: Path) -> None:
     assert plan.to_dict()["schema"] == "bdb-gui-prepare-plan-v1"
 
 
-def test_execute_routes_exact_validated_plan_to_operator(tmp_path: Path) -> None:
+def test_execute_routes_only_supported_arguments_to_operator(tmp_path: Path) -> None:
     workspaces = tmp_path / "workspaces"
     workspaces.mkdir()
     source = make_source(tmp_path)
@@ -70,10 +89,6 @@ def test_execute_routes_exact_validated_plan_to_operator(tmp_path: Path) -> None
         allowed_paths=["README.md", "tests/*.py"],
         python_executable=sys.executable,
         test_timeout_seconds=90,
-        max_patch_bytes=100_000,
-        max_changed_files=7,
-        auto_send_max_bytes=12_000,
-        worker_timeout_seconds=180,
     )
 
     result = service.execute(plan)
@@ -88,12 +103,7 @@ def test_execute_routes_exact_validated_plan_to_operator(tmp_path: Path) -> None
             "source_repo": plan.source_repo,
             "alias": "alpha",
             "allowed_paths": ("README.md", "tests/*.py"),
-            "native_config": None,
             "test_timeout_seconds": 90,
-            "max_patch_bytes": 100_000,
-            "max_changed_files": 7,
-            "auto_send_max_bytes": 12_000,
-            "worker_timeout_seconds": 180,
             "python_executable": plan.python_executable,
         }
     ]
@@ -129,7 +139,7 @@ def test_prepare_failure_is_preserved(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "alias",
-    ["", "../alpha", "alpha/beta", "alpha beta", "_alpha", "a" * 65],
+    ["", "../alpha", "alpha/beta", "alpha beta", "_alpha", "Alpha", "alpha_1", "a" * 33],
 )
 def test_invalid_alias_is_rejected_before_operator(tmp_path: Path, alias: str) -> None:
     workspaces = tmp_path / "workspaces"
