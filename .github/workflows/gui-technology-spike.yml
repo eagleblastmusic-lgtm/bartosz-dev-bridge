@@ -1,0 +1,60 @@
+name: GUI Technology Spike
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/gui-technology-spike.yml"
+      - "pyproject.toml"
+      - "spikes/gui/**"
+      - "tests/test_gui_*.py"
+      - "docs/BDB_GUI_TECHNOLOGY_SPIKE.md"
+      - "docs/adr/0006-pyside6-qt-widgets-for-control-center-mvp.md"
+
+permissions:
+  contents: read
+
+jobs:
+  pyside6-windows-smoke:
+    name: PySide6 / Windows / Python 3.12
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install optional GUI spike dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev,gui-spike]"
+      - name: Compile GUI probe
+        run: python -m py_compile spikes/gui/pyside6_probe.py
+      - name: Run GUI spike contract tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -m pytest -q
+          tests/test_gui_technology_spike_contract.py
+          tests/test_gui_pyside6_probe.py
+      - name: Run direct headless probe
+        shell: powershell
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "pyside6-probe.json"
+          python spikes/gui/pyside6_probe.py --headless-smoke --json-out $report
+          if ($LASTEXITCODE -ne 0) {
+            throw "PySide6 headless probe failed"
+          }
+          $data = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+          if (
+            $data.status -ne "success" -or
+            $data.window_constructed -ne $true -or
+            $data.mutation_operations_invoked -ne 0 -or
+            $data.operator_network_listener -ne $false
+          ) {
+            $data | ConvertTo-Json -Depth 8 | Write-Host
+            throw "PySide6 probe report violates the P05 contract"
+          }
+          $data | ConvertTo-Json -Depth 8 | Write-Host
