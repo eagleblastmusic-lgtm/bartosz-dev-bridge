@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bartosz Dev Bridge",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Bounded local workspace context, tested edits, AUTO continuation, and verified fast-forward promotion for ChatGPT.",
   "permissions": [
     "nativeMessaging",
