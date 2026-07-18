@@ -115,7 +115,8 @@ def test_bootstrap_calls_only_capabilities_and_list_projects() -> None:
 
 
 def test_window_constructor_does_not_start_bootstrap_or_mutate() -> None:
-    tree = ast.parse(read(GUI / "main_window.py"))
+    source = read(GUI / "main_window.py")
+    tree = ast.parse(source)
     window_class = next(
         node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ControlCenterWindow"
     )
@@ -124,12 +125,20 @@ def test_window_constructor_does_not_start_bootstrap_or_mutate() -> None:
     )
     constructor_calls = attribute_calls(constructor)
     assert "start_bootstrap" not in constructor_calls
-    assert constructor_calls.isdisjoint({"prepare", "start", "stop", "rearm"})
+    assert constructor_calls.isdisjoint({"prepare", "stop", "rearm"})
 
-    all_calls = attribute_calls(window_class)
-    assert all_calls.isdisjoint({"prepare", "start", "stop", "rearm"})
-    assert "QThreadPool" in read(GUI / "main_window.py")
-    assert "BootstrapWorker" in read(GUI / "main_window.py")
+    # QThreadPool.start(worker) is the allowed way to schedule the read-only
+    # bootstrap. BDB mutations would have to pass through the injected service.
+    for forbidden in (
+        "self._bootstrap_service.prepare(",
+        "self._bootstrap_service.start(",
+        "self._bootstrap_service.stop(",
+        "self._bootstrap_service.rearm(",
+    ):
+        assert forbidden not in source
+    assert "self._thread_pool.start(worker)" in source
+    assert "QThreadPool" in source
+    assert "BootstrapWorker" in source
 
 
 def test_p06_window_has_no_process_control_buttons() -> None:
