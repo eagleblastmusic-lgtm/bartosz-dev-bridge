@@ -48,7 +48,13 @@ def test_async_result_companion_polls_accepted_command_until_completed(
                 assert.equal(value, "calculator2");
                 return value;
               },
-              async submitAction(_action, _tabId) {
+              async submitAction(action, _tabId) {
+                if (action.operation === "workspace_context") {
+                  return {
+                    status: "completed",
+                    result: { status: "success" }
+                  };
+                }
                 return {
                   status: "accepted",
                   command_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:000001"
@@ -103,12 +109,11 @@ def test_async_result_companion_polls_accepted_command_until_completed(
               }
 
               polls = 0;
-              context.submitActionBeforeAsyncResultPolling = async () => ({
-                status: "completed",
-                result: { status: "success" }
-              });
               const alreadyCompleted = await context.submitAction(
-                { repo_alias: "calculator2" },
+                {
+                  repo_alias: "calculator2",
+                  operation: "workspace_context"
+                },
                 18
               );
               assert.equal(alreadyCompleted.status, "completed");
