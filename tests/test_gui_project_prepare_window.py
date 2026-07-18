@@ -3,13 +3,13 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from typing import Iterable
 
 import pytest
 
 pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from bdb_gui.bootstrap import BootstrapService  # noqa: E402
 from bdb_gui.project_window import ProjectControlCenterWindow  # noqa: E402
 from bdb_gui.projects import PreparePlan, ProjectPrepareService  # noqa: E402
 from bdb_gui.state import BootstrapSnapshot  # noqa: E402
@@ -45,11 +45,29 @@ class FakePrepareOperator:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    def prepare(self, workspace_root: str | Path, **kwargs: object) -> OperatorResponse:
-        self.calls.append({"workspace_root": str(workspace_root), **kwargs})
+    def prepare(
+        self,
+        workspace_root: str | Path,
+        *,
+        source_repo: str | Path,
+        alias: str,
+        allowed_paths: Iterable[str],
+        test_timeout_seconds: float = 120.0,
+        python_executable: str | Path | None = None,
+    ) -> OperatorResponse:
+        self.calls.append(
+            {
+                "workspace_root": str(workspace_root),
+                "source_repo": str(source_repo),
+                "alias": alias,
+                "allowed_paths": tuple(allowed_paths),
+                "test_timeout_seconds": test_timeout_seconds,
+                "python_executable": str(python_executable) if python_executable is not None else None,
+            }
+        )
         return OperatorResponse.success(
             "prepare",
-            project_alias=str(kwargs["alias"]),
+            project_alias=alias,
             operation_id="prepare-window-op",
             data={"status": "prepared", "workspace_root": str(workspace_root)},
         )
@@ -116,12 +134,7 @@ def payload(tmp_path: Path) -> dict[str, object]:
         "source_repo": str(make_source(tmp_path)),
         "allowed_paths": ["README.md", "tests/*.py"],
         "python_executable": sys.executable,
-        "native_config": None,
         "test_timeout_seconds": 120,
-        "max_patch_bytes": 262_144,
-        "max_changed_files": 20,
-        "auto_send_max_bytes": 24_000,
-        "worker_timeout_seconds": 240,
     }
 
 
@@ -186,10 +199,14 @@ def test_confirmed_prepare_executes_once_and_refreshes_catalog(tmp_path: Path) -
     wait_until(lambda: len(operator.calls) == 1)
     wait_until(lambda: len(bootstrap.calls) == 1)
 
-    assert operator.calls[0]["workspace_root"] == plan.workspace_root
-    assert operator.calls[0]["source_repo"] == plan.source_repo
-    assert operator.calls[0]["alias"] == "alpha"
-    assert operator.calls[0]["allowed_paths"] == ("README.md", "tests/*.py")
+    assert operator.calls[0] == {
+        "workspace_root": plan.workspace_root,
+        "source_repo": plan.source_repo,
+        "alias": "alpha",
+        "allowed_paths": ("README.md", "tests/*.py"),
+        "test_timeout_seconds": 120,
+        "python_executable": plan.python_executable,
+    }
     assert window.smoke_report()["mutation_operations_invoked"] == 1
     assert window.projects_view.plan_state.text() == "PROJEKT PRZYGOTOWANY"
     window.close()
