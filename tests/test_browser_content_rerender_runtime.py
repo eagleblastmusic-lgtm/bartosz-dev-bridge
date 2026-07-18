@@ -165,7 +165,11 @@ def test_content_script_restores_panel_when_chatgpt_removes_panel_but_keeps_code
             vm.createContext(context);
 
             const scripts = manifest.content_scripts[0].js;
-            assert.deepEqual(scripts, ["content.js", "content_rerender.js"]);
+            assert.deepEqual(scripts, [
+              "content.js",
+              "content_rerender.js",
+              "content_auto_send.js"
+            ]);
             for (const scriptName of scripts) {
               const scriptPath = path.join(extensionDir, scriptName);
               vm.runInContext(fs.readFileSync(scriptPath, "utf8"), context, {
