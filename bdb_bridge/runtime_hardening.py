@@ -49,10 +49,14 @@ def _harden_worktree_add_args(args: Iterable[str]) -> list[str]:
 
 def _canonicalize_promotion_hashes(
     promotion: object,
+    *,
+    commit_sha: str,
     entries: dict[str, Any],
     reader: GitObjectReader,
 ) -> object:
     if not isinstance(promotion, dict):
+        return promotion
+    if promotion.get("source_commit") != commit_sha:
         return promotion
     raw_hashes = promotion.get("file_sha256")
     if not isinstance(raw_hashes, dict):
@@ -71,8 +75,6 @@ def _canonicalize_promotion_hashes(
     return {
         **promotion,
         "file_sha256": canonical_hashes,
-        "working_tree_file_sha256": dict(raw_hashes),
-        "hash_source": "git_blobs",
     }
 
 
@@ -127,8 +129,9 @@ def _canonicalize_clean_snapshot(
         "snapshot_source": "git_blobs",
         "latest_promotion": _canonicalize_promotion_hashes(
             snapshot.get("latest_promotion"),
-            entries,
-            reader,
+            commit_sha=commit_sha,
+            entries=entries,
+            reader=reader,
         ),
     }
     capabilities = result.get("capabilities")
