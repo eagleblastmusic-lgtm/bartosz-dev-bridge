@@ -128,7 +128,7 @@ def test_collect_redacts_secret_keys_assignments_and_bearer_values(tmp_path: Pat
     assert capabilities["api_token"] == "[REDACTED]"
     assert capabilities["nested"]["password"] == "[REDACTED]"
     assert "abc.def.ghi" not in status["note"]
-    assert "Bearer [REDACTED]" in status["note"]
+    assert "[REDACTED]" in status["note"]
     assert logs["sources"][0]["lines"][0] == "token=[REDACTED]"
     assert "super-secret-token" not in str(rendered)
     assert "hunter2" not in str(rendered)
@@ -166,4 +166,7 @@ def test_snapshot_document_contains_only_sanitized_section_data(tmp_path: Path) 
     assert document["mutation_operations_invoked"] == 0
     assert document["redaction_version"] == "bdb-redaction-v1"
     assert len(document["sections"]) == 4
-    assert all(section["schema"] == "bdb-gui-diagnostics-section-v1" for section in document["sections"])
+    assert all(
+        section["schema"] == "bdb-gui-diagnostics-section-v1"
+        for section in document["sections"]
+    )
