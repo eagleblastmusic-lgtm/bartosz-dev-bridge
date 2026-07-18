@@ -6,6 +6,8 @@
 // to the mature scanner. Duplicate execution remains protected by the background
 // replay guard keyed by <loop_id>:<iteration>.
 const scanBeforeRerenderReconciliation = scan;
+const BDB_DOCUMENT_RECONCILIATION_DELAY_MS = 200;
+let bdbDocumentReconciliationTimer = null;
 
 function bdbActionBlocks(root) {
   const blocks = [];
@@ -36,6 +38,47 @@ function containsRemovedBdbPanel(node) {
   );
 }
 
+function elementTouchesCode(node) {
+  return Boolean(
+    node instanceof HTMLElement &&
+    (
+      node.matches("code, pre") ||
+      node.closest("pre, code") ||
+      node.querySelector("pre code, code")
+    )
+  );
+}
+
+function mutationMayAffectBdbAction(record) {
+  if (record.type === "characterData") {
+    return Boolean(
+      record.target &&
+      record.target.parentElement &&
+      elementTouchesCode(record.target.parentElement)
+    );
+  }
+  if (record.type !== "childList") {
+    return false;
+  }
+  if (elementTouchesCode(record.target)) {
+    return true;
+  }
+  if (Array.from(record.addedNodes).some(elementTouchesCode)) {
+    return true;
+  }
+  return Array.from(record.removedNodes).some(containsRemovedBdbPanel);
+}
+
+function scheduleBdbDocumentReconciliation() {
+  if (bdbDocumentReconciliationTimer !== null) {
+    return;
+  }
+  bdbDocumentReconciliationTimer = setTimeout(() => {
+    bdbDocumentReconciliationTimer = null;
+    scan(document);
+  }, BDB_DOCUMENT_RECONCILIATION_DELAY_MS);
+}
+
 scan = function scanWithRerenderReconciliation(root) {
   for (const block of bdbActionBlocks(root)) {
     if (
@@ -49,10 +92,14 @@ scan = function scanWithRerenderReconciliation(root) {
   scanBeforeRerenderReconciliation(root);
 };
 
-// The original observer scans additions and character changes. This focused observer
-// handles the complementary case where React removes an extension-owned panel.
-// It ignores unrelated DOM churn and never submits an action directly.
+// The original observer scans additions and character changes immediately. This
+// companion observer covers two complementary cases:
+// 1. React removes an extension-owned panel while keeping the same <code> node.
+// 2. A streaming block is invalid during the immediate local scan but becomes a
+//    complete action before a delayed whole-document reconciliation runs.
+// It never submits an action directly; replay protection remains in background.js.
 const bdbRemovedPanelObserver = new MutationObserver((records) => {
+  let shouldReconcileDocument = false;
   for (const record of records) {
     if (
       record.type === "childList" &&
@@ -61,11 +108,18 @@ const bdbRemovedPanelObserver = new MutationObserver((records) => {
     ) {
       scan(record.target);
     }
+    if (mutationMayAffectBdbAction(record)) {
+      shouldReconcileDocument = true;
+    }
+  }
+  if (shouldReconcileDocument) {
+    scheduleBdbDocumentReconciliation();
   }
 });
 bdbRemovedPanelObserver.observe(document.documentElement, {
   childList: true,
-  subtree: true
+  subtree: true,
+  characterData: true
 });
 
 // Reconcile once immediately in case ChatGPT rerendered between content.js startup
