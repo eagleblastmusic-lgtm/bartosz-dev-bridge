@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
 )
 
 from .bootstrap import BootstrapService
+from .current_operation import CurrentOperationService, CurrentOperationSnapshot
+from .current_operation_view import CurrentOperationWidget
 from .dashboard import DashboardWidget
 from .operations import (
     ControlAction,
@@ -29,13 +31,18 @@ from .operations import (
     ProjectStatusSnapshot,
 )
 from .state import BootstrapSnapshot
-from .workers import BootstrapWorker, ControlWorker, StatusWorker
+from .workers import (
+    BootstrapWorker,
+    ControlWorker,
+    CurrentOperationWorker,
+    StatusWorker,
+)
 
 
 NAVIGATION = (
     ("Dashboard", "Stan runtime i jawne sterowanie BDB"),
     ("Projects", "Skonfigurowane workspace'y"),
-    ("Current operation", "Bieżąca operacja BDB"),
+    ("Current operation", "Bieżąca read-only projekcja Journalu"),
     ("History", "Zdarzenia i historia"),
     ("Diagnostics", "Diagnostyka i wersje"),
 )
@@ -72,6 +79,7 @@ class ControlCenterWindow(QMainWindow):
     bootstrap_finished = Signal(object)
     status_finished = Signal(object)
     control_finished = Signal(object)
+    current_operation_finished = Signal(object)
     dashboard_ready = Signal()
 
     def __init__(
@@ -80,12 +88,14 @@ class ControlCenterWindow(QMainWindow):
         bootstrap_service: BootstrapService,
         operations_service: ProjectOperationsService,
         workspaces_root: str,
+        current_operation_service: CurrentOperationService | None = None,
         auto_load_status: bool = True,
         confirmation_provider: ConfirmationProvider | None = None,
     ) -> None:
         super().__init__()
         self._bootstrap_service = bootstrap_service
         self._operations_service = operations_service
+        self._current_operation_service = current_operation_service or CurrentOperationService()
         self._workspaces_root = workspaces_root
         self._auto_load_status = bool(auto_load_status)
         self._confirmation_provider = confirmation_provider
@@ -93,9 +103,11 @@ class ControlCenterWindow(QMainWindow):
         self._bootstrap_worker: BootstrapWorker | None = None
         self._status_worker: StatusWorker | None = None
         self._control_worker: ControlWorker | None = None
+        self._current_operation_worker: CurrentOperationWorker | None = None
         self._last_snapshot: BootstrapSnapshot | None = None
         self._last_status: ProjectStatusSnapshot | None = None
         self._last_control_result: ControlResult | None = None
+        self._last_current_operation: CurrentOperationSnapshot | None = None
         self._mutation_operations_invoked = 0
 
         self.setObjectName("BdbControlCenterWindow")
@@ -117,6 +129,10 @@ class ControlCenterWindow(QMainWindow):
     @property
     def last_control_result(self) -> ControlResult | None:
         return self._last_control_result
+
+    @property
+    def last_current_operation(self) -> CurrentOperationSnapshot | None:
+        return self._last_current_operation
 
     def start_bootstrap(self) -> None:
         if self._has_active_task():
@@ -151,6 +167,7 @@ class ControlCenterWindow(QMainWindow):
             "status_error_code": status.error_code if status is not None else None,
         }
         report.update(self.dashboard.smoke_report())
+        report.update(self.current_operation_view.smoke_report())
         return report
 
     def _build_ui(self) -> None:
@@ -159,7 +176,6 @@ class ControlCenterWindow(QMainWindow):
         root = QHBoxLayout(shell)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-
         root.addWidget(self._build_sidebar())
         root.addWidget(self._build_content(), 1)
         self.setCentralWidget(shell)
@@ -256,12 +272,9 @@ class ControlCenterWindow(QMainWindow):
                 "Lista projektów jest dostępna w selektorze. Pełny kreator i szczegóły zostaną rozwinięte w P11.",
             )
         )
-        self.pages.addWidget(
-            self._placeholder_page(
-                "Current operation",
-                "Widok bieżącej operacji zostanie podłączony w P08.",
-            )
-        )
+        self.current_operation_view = CurrentOperationWidget()
+        self.current_operation_view.refresh_requested.connect(self._start_current_operation_read)
+        self.pages.addWidget(self.current_operation_view)
         self.pages.addWidget(
             self._placeholder_page(
                 "History",
@@ -340,6 +353,7 @@ class ControlCenterWindow(QMainWindow):
         self._last_snapshot = snapshot
         self._bootstrap_worker = None
         self._last_status = None
+        self._last_current_operation = None
 
         self.project_selector.blockSignals(True)
         self.project_selector.clear()
@@ -365,20 +379,21 @@ class ControlCenterWindow(QMainWindow):
             self.operator_card.update_value("BŁĄD", snapshot.error_code or "unknown")
             self.projects_card.update_value("—", snapshot.workspaces_root)
         self.project_selector.blockSignals(False)
-
-        self.project_selector.setEnabled(has_projects)
         self._set_global_busy(False)
+
         if has_projects:
             alias = self.project_selector.currentText()
             workspace_root = self._selected_workspace_root()
             if workspace_root is not None:
                 self.dashboard.set_project(alias, workspace_root)
+                self.current_operation_view.set_project(alias, workspace_root)
         else:
             self.dashboard.set_project_available(False)
+            self.current_operation_view.set_project_available(False)
 
         if snapshot.ok:
             self.status_line.setText(
-                "Lista projektów załadowana bez mutacji. Wybór projektu może uruchomić wyłącznie odczyt statusu."
+                "Lista projektów załadowana bez mutacji. Wybór projektu uruchamia tylko jawne odczyty."
             )
         else:
             self.status_line.setText(
@@ -398,9 +413,13 @@ class ControlCenterWindow(QMainWindow):
         workspace_root = self._selected_workspace_root()
         if workspace_root is None:
             self.dashboard.set_project_available(False)
+            self.current_operation_view.set_project_available(False)
             return
-        self.dashboard.set_project(self.project_selector.currentText(), workspace_root)
+        alias = self.project_selector.currentText()
+        self.dashboard.set_project(alias, workspace_root)
+        self.current_operation_view.set_project(alias, workspace_root)
         self._last_status = None
+        self._last_current_operation = None
         if self._auto_load_status:
             self._start_status_read()
 
@@ -434,6 +453,42 @@ class ControlCenterWindow(QMainWindow):
                 f"{snapshot.error_message or 'brak szczegółów'}"
             )
         self.status_finished.emit(snapshot)
+        if self._auto_load_status:
+            self._start_current_operation_read()
+        else:
+            self.dashboard_ready.emit()
+
+    @Slot()
+    def _start_current_operation_read(self) -> None:
+        if self._has_active_task():
+            return
+        workspace_root = self._selected_workspace_root()
+        if workspace_root is None:
+            self.current_operation_view.set_project_available(False)
+            return
+        self._set_global_busy(True, "Odczytywanie bieżącej operacji z Journalu…")
+        worker = CurrentOperationWorker(self._current_operation_service, workspace_root)
+        worker.signals.completed.connect(self._apply_current_operation_snapshot)
+        self._current_operation_worker = worker
+        self._thread_pool.start(worker)
+
+    @Slot(object)
+    def _apply_current_operation_snapshot(self, snapshot: CurrentOperationSnapshot) -> None:
+        self._current_operation_worker = None
+        self._last_current_operation = snapshot
+        self._set_global_busy(False)
+        self.current_operation_view.apply_snapshot(snapshot)
+        if snapshot.ok:
+            state = snapshot.operation.state if snapshot.active and snapshot.operation else "none"
+            self.status_line.setText(
+                f"Bieżąca operacja: {state}. Projekcja Journalu pozostała tylko do odczytu."
+            )
+        else:
+            self.status_line.setText(
+                f"Bieżąca operacja niedostępna: {snapshot.error_code or 'unknown'} — "
+                f"{snapshot.error_message or 'brak szczegółów'}"
+            )
+        self.current_operation_finished.emit(snapshot)
         self.dashboard_ready.emit()
 
     @Slot(str)
@@ -523,6 +578,7 @@ class ControlCenterWindow(QMainWindow):
                 self._bootstrap_worker,
                 self._status_worker,
                 self._control_worker,
+                self._current_operation_worker,
             )
         )
 
@@ -535,6 +591,7 @@ class ControlCenterWindow(QMainWindow):
             and bool(self._last_snapshot.projects)
         )
         self.dashboard.set_busy(busy, message)
+        self.current_operation_view.set_busy(busy, message)
         if message:
             self.status_line.setText(message)
 
@@ -571,29 +628,33 @@ class ControlCenterWindow(QMainWindow):
             #RefreshButton { background: #ffffff; border: 1px solid #cbd5e1; padding: 0 14px; color: #1e293b; }
             #RefreshButton:hover { background: #eef2f7; }
             #RefreshButton:disabled { color: #94a3b8; background: #eef2f7; }
-            #StatusCard, #HeroPanel, #RuntimeCard, #ControlPanel, #PlaceholderPanel {
+            #StatusCard, #HeroPanel, #RuntimeCard, #ControlPanel, #PlaceholderPanel,
+            #OperationHeroPanel, #OperationDetailsPanel {
                 background: #ffffff; border: 1px solid #dfe5ec; border-radius: 12px;
             }
-            #StatusCardTitle, #RuntimeCardTitle, #ControlTitle {
+            #StatusCardTitle, #RuntimeCardTitle, #ControlTitle, #OperationSectionTitle {
                 color: #64748b; font-size: 10px; font-weight: 700; letter-spacing: 1px;
             }
             #StatusCardValue, #RuntimeCardValue { color: #111827; font-size: 19px; font-weight: 700; }
-            #StatusCardDetail, #RuntimeCardDetail, #ControlDescription, #HeroText, #PlaceholderText {
+            #StatusCardDetail, #RuntimeCardDetail, #ControlDescription, #HeroText, #PlaceholderText,
+            #OperationFeedback, #OperationFieldLabel {
                 color: #64748b; font-size: 11px;
             }
             #HeroTitle, #PlaceholderTitle { color: #172033; font-size: 18px; font-weight: 700; }
-            #OverallStatus {
+            #OverallStatus, #OperationState {
                 color: #1d4ed8; background: #eff6ff; border: 1px solid #bfdbfe;
                 border-radius: 7px; padding: 6px 10px; font-size: 11px; font-weight: 800;
             }
-            #RefreshStatusButton, #StartButton, #StopButton, #RearmButton {
+            #OperationFieldValue { color: #1e293b; font-size: 11px; font-family: Consolas; }
+            #RefreshStatusButton, #StartButton, #StopButton, #RearmButton, #RefreshOperationButton {
                 min-height: 34px; border-radius: 7px; padding: 0 14px; font-weight: 600;
             }
-            #RefreshStatusButton { background: #ffffff; border: 1px solid #cbd5e1; color: #1e293b; }
+            #RefreshStatusButton, #RefreshOperationButton { background: #ffffff; border: 1px solid #cbd5e1; color: #1e293b; }
             #StartButton { background: #166534; border: 1px solid #14532d; color: #ffffff; }
             #StopButton { background: #991b1b; border: 1px solid #7f1d1d; color: #ffffff; }
             #RearmButton { background: #1d4ed8; border: 1px solid #1e40af; color: #ffffff; }
-            #RefreshStatusButton:disabled, #StartButton:disabled, #StopButton:disabled, #RearmButton:disabled {
+            #RefreshStatusButton:disabled, #StartButton:disabled, #StopButton:disabled,
+            #RearmButton:disabled, #RefreshOperationButton:disabled {
                 background: #e5e7eb; border-color: #d1d5db; color: #9ca3af;
             }
             #ArmMinutesSpin { min-height: 32px; min-width: 82px; }
