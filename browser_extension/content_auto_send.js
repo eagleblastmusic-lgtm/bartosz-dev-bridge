@@ -1,10 +1,11 @@
 "use strict";
 
-// ChatGPT may accept insertion into the composer but ignore a synthetic click or
-// keep the send button disabled briefly. AUTO must not report success until the
-// composer has actually consumed the exact marker. Retry only while the marker
-// is still present, which avoids duplicate submissions after a successful send.
+// ChatGPT may replace the composer after an input event, accept insertion but
+// ignore a synthetic click, or keep the send button disabled briefly. AUTO must
+// operate on the current live composer and must not report success until the
+// exact marker has been consumed.
 const BDB_AUTO_SEND_BUTTON_ATTEMPTS = 80;
+const BDB_AUTO_INSERTION_OBSERVE_POLLS = 40;
 const BDB_AUTO_SEND_CONFIRM_POLLS = 24;
 const BDB_AUTO_SEND_MAX_CLICKS = 3;
 const BDB_AUTO_SEND_POLL_MS = 100;
@@ -16,6 +17,28 @@ function bdbAutoSendSleep(milliseconds) {
 function bdbComposerContains(marker) {
   const current = findComposer();
   return Boolean(current && composerText(current).includes(marker));
+}
+
+function bdbInitialComposerState() {
+  const composer = findComposer();
+  if (!composer) {
+    return { composer: null, reason: "composer_missing" };
+  }
+  if (composerText(composer).trim() !== "") {
+    return { composer, reason: "composer_not_empty" };
+  }
+  return { composer, reason: null };
+}
+
+async function bdbWaitForLiveComposerMarker(marker) {
+  for (let poll = 0; poll < BDB_AUTO_INSERTION_OBSERVE_POLLS; poll += 1) {
+    const current = findComposer();
+    if (current && composerText(current).includes(marker)) {
+      return current;
+    }
+    await bdbAutoSendSleep(BDB_AUTO_SEND_POLL_MS);
+  }
+  return null;
 }
 
 async function bdbFindReadySendButton(composer) {
@@ -54,14 +77,29 @@ async function bdbWaitForComposerConsumption(marker) {
 autoSend = async function autoSendWithConfirmation(response, loopId, iteration) {
   const marker = `BDB_AUTO_RESULT:${loopId}:${iteration}`;
   const text = resultText(response, marker);
-  const composer = prepareContinuation(text, { requireEmpty: true });
-  if (!composer || !composerText(composer).includes(marker)) {
-    return { sent: false, reason: "composer_unavailable_or_not_empty" };
+  const initial = bdbInitialComposerState();
+  if (initial.reason) {
+    return { sent: false, reason: initial.reason };
   }
 
-  const ready = await bdbFindReadySendButton(composer);
+  const prepared = prepareContinuation(text, { requireEmpty: true });
+  if (!prepared) {
+    return { sent: false, reason: "insertion_failed" };
+  }
+
+  // React may replace the contenteditable node after the input event. Reacquire
+  // the live composer and wait until that exact node exposes the exact marker.
+  const liveComposer = await bdbWaitForLiveComposerMarker(marker);
+  if (!liveComposer) {
+    return { sent: false, reason: "insertion_not_observed" };
+  }
+
+  const ready = await bdbFindReadySendButton(liveComposer);
   if (!ready.form || !ready.button || !bdbComposerContains(marker)) {
-    return { sent: false, reason: ready.form ? "exact_send_button_unavailable" : "composer_form_missing" };
+    return {
+      sent: false,
+      reason: ready.form ? "exact_send_button_unavailable" : "composer_form_missing"
+    };
   }
 
   for (let clickAttempt = 0; clickAttempt < BDB_AUTO_SEND_MAX_CLICKS; clickAttempt += 1) {
@@ -69,7 +107,11 @@ autoSend = async function autoSendWithConfirmation(response, loopId, iteration) 
       return { sent: true, reason: null, confirmed: true, clickAttempts: clickAttempt };
     }
 
-    const current = await bdbFindReadySendButton(findComposer());
+    const currentComposer = findComposer();
+    if (!currentComposer || !composerText(currentComposer).includes(marker)) {
+      return { sent: false, reason: "live_composer_lost" };
+    }
+    const current = await bdbFindReadySendButton(currentComposer);
     if (!current.button) {
       return { sent: false, reason: "exact_send_button_unavailable" };
     }
