@@ -14,9 +14,11 @@ on:
       - "docs/BDB_GUI_TECHNOLOGY_SPIKE.md"
       - "docs/BDB_CONTROL_CENTER_SKELETON.md"
       - "docs/BDB_CONTROL_CENTER_PROCESS_CONTROLS.md"
+      - "docs/BDB_CONTROL_CENTER_CURRENT_OPERATION.md"
       - "docs/adr/0006-pyside6-qt-widgets-for-control-center-mvp.md"
       - "docs/adr/0007-read-only-asynchronous-gui-bootstrap.md"
       - "docs/adr/0008-explicit-serialized-process-controls.md"
+      - "docs/adr/0009-read-only-current-operation-view.md"
       - "docs/adr/README.md"
 
 permissions:
@@ -59,6 +61,14 @@ jobs:
           python -m pytest -vv
           tests/test_gui_project_operations.py
           tests/test_gui_process_controls.py
+      - name: Run current operation projection tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -m pytest -vv
+          tests/test_gui_current_operation_service.py
+          tests/test_gui_current_operation_view.py
+          tests/test_gui_current_operation_window.py
       - name: Run P05 PySide6 probe regression
         env:
           QT_QPA_PLATFORM: offscreen
@@ -118,12 +128,16 @@ jobs:
             $data.confirmation_required -ne $true -or
             $data.arm_minutes_min -ne 1 -or
             $data.arm_minutes_max -ne 60 -or
+            $data.current_operation_view_present -ne $true -or
+            $data.current_operation_read_only -ne $true -or
+            $data.current_operation_refresh_present -ne $true -or
+            $data.current_operation_loaded -ne $false -or
             $data.mutation_operations_invoked -ne 0 -or
             $data.operator_network_listener -ne $false -or
             $data.event_loop_exit_code -ne 0 -or
             $data.timed_out -ne $false
           ) {
             $data | ConvertTo-Json -Depth 8 | Write-Host
-            throw "Control Center smoke report violates the P07 contract"
+            throw "Control Center smoke report violates the P08 contract"
           }
           $data | ConvertTo-Json -Depth 8 | Write-Host

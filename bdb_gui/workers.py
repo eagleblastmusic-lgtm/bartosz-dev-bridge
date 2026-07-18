@@ -5,6 +5,7 @@ from uuid import uuid4
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 from .bootstrap import BootstrapService
+from .current_operation import CurrentOperationService, CurrentOperationSnapshot
 from .operations import ControlAction, ControlResult, ProjectOperationsService, ProjectStatusSnapshot
 from .state import BootstrapSnapshot
 
@@ -117,3 +118,35 @@ class ControlWorker(QRunnable):
                 error_message=f"{type(error).__name__}: {error}",
             )
         self.signals.completed.emit(result)
+
+
+class CurrentOperationWorkerSignals(QObject):
+    completed = Signal(object)
+
+
+class CurrentOperationWorker(QRunnable):
+    """Reads the current Journal operation without mutating BDB."""
+
+    def __init__(self, service: CurrentOperationService, workspace_root: str) -> None:
+        super().__init__()
+        self._service = service
+        self._workspace_root = workspace_root
+        self.signals = CurrentOperationWorkerSignals()
+        self.setAutoDelete(True)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            snapshot = self._service.read(self._workspace_root)
+        except Exception as error:  # defensive thread boundary
+            snapshot = CurrentOperationSnapshot(
+                workspace_root=self._workspace_root,
+                project_alias=None,
+                generated_at=None,
+                active=False,
+                operation=None,
+                operator_operation_id=f"gui-internal:{uuid4()}",
+                error_code="gui_current_operation_internal_error",
+                error_message=f"{type(error).__name__}: {error}",
+            )
+        self.signals.completed.emit(snapshot)

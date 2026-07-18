@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-gui-current-operation-v1",
+  "title": "BDB GUI current operation snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "workspace_root",
+    "project_alias",
+    "ok",
+    "read_only",
+    "mutation_operations_invoked",
+    "operator_operation_id",
+    "generated_at",
+    "active",
+    "operation",
+    "error"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-gui-current-operation-v1" },
+    "workspace_root": { "type": "string" },
+    "project_alias": { "type": ["string", "null"] },
+    "ok": { "type": "boolean" },
+    "read_only": { "const": true },
+    "mutation_operations_invoked": { "const": 0 },
+    "operator_operation_id": { "type": "string" },
+    "generated_at": { "type": ["string", "null"] },
+    "active": { "type": "boolean" },
+    "operation": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "command_id",
+            "session_id",
+            "sequence",
+            "state",
+            "operation",
+            "target_path",
+            "profile_id",
+            "repository_id",
+            "session_state",
+            "workspace_revision",
+            "workspace_state_hash",
+            "result_status",
+            "error_code",
+            "created_at",
+            "updated_at"
+          ],
+          "properties": {
+            "schema": { "const": "bdb-gui-operation-details-v1" },
+            "command_id": { "type": "string" },
+            "session_id": { "type": "string" },
+            "sequence": { "type": "integer", "minimum": 0 },
+            "state": { "type": "string" },
+            "operation": { "type": ["string", "null"] },
+            "target_path": { "type": ["string", "null"] },
+            "profile_id": { "type": ["string", "null"] },
+            "repository_id": { "type": ["string", "null"] },
+            "session_state": { "type": ["string", "null"] },
+            "workspace_revision": { "type": ["integer", "null"] },
+            "workspace_state_hash": { "type": ["string", "null"] },
+            "result_status": { "type": ["string", "null"] },
+            "error_code": { "type": ["string", "null"] },
+            "created_at": { "type": ["string", "null"] },
+            "updated_at": { "type": ["string", "null"] }
+          }
+        }
+      ]
+    },
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": ["string", "null"] },
+            "message": { "type": ["string", "null"] }
+          }
+        }
+      ]
+    }
+  }
+}

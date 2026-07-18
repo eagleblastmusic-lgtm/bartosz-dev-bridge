@@ -48,6 +48,20 @@ def test_control_result_schema_has_closed_action_catalog_and_one_mutation() -> N
     assert properties["mutation_operations_invoked"] == {"const": 1}
 
 
+def test_current_operation_schema_is_closed_and_read_only() -> None:
+    schema = load("bdb-gui-current-operation-v1.schema.json")
+
+    assert schema["$id"] == "bdb-gui-current-operation-v1"
+    assert schema["additionalProperties"] is False
+    properties = schema["properties"]
+    assert properties["schema"] == {"const": "bdb-gui-current-operation-v1"}
+    assert properties["read_only"] == {"const": True}
+    assert properties["mutation_operations_invoked"] == {"const": 0}
+    operation = properties["operation"]["oneOf"][1]
+    assert operation["additionalProperties"] is False
+    assert operation["properties"]["schema"] == {"const": "bdb-gui-operation-details-v1"}
+
+
 def test_control_center_smoke_preserves_zero_mutation_startup_gate() -> None:
     schema = load("bdb-control-center-smoke-v1.schema.json")
 
@@ -58,3 +72,5 @@ def test_control_center_smoke_preserves_zero_mutation_startup_gate() -> None:
     assert properties["status"]["enum"] == ["success", "failed"]
     assert properties["action_controls_present"] == {"type": "boolean"}
     assert properties["confirmation_required"] == {"const": True}
+    assert properties["current_operation_view_present"] == {"type": "boolean"}
+    assert properties["current_operation_read_only"] == {"const": True}
