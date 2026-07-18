@@ -1,4 +1,4 @@
-name: GUI Technology Spike
+name: Control Center GUI CI
 
 on:
   pull_request:
@@ -6,19 +6,22 @@ on:
     paths:
       - ".github/workflows/gui-technology-spike.yml"
       - "pyproject.toml"
+      - "bdb_gui/**"
       - "spikes/gui/**"
       - "tests/test_gui_*.py"
       - "docs/BDB_GUI_TECHNOLOGY_SPIKE.md"
+      - "docs/BDB_CONTROL_CENTER_SKELETON.md"
       - "docs/adr/0006-pyside6-qt-widgets-for-control-center-mvp.md"
+      - "docs/adr/0007-read-only-asynchronous-gui-bootstrap.md"
 
 permissions:
   contents: read
 
 jobs:
   pyside6-windows-smoke:
-    name: PySide6 / Windows / Python 3.12
+    name: Control Center / Windows / Python 3.12
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
@@ -26,18 +29,17 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install optional GUI spike dependencies
-        run: python -m pip install --disable-pip-version-check -e ".[dev,gui-spike]"
-      - name: Compile GUI probe
-        run: python -m py_compile spikes/gui/pyside6_probe.py
-      - name: Run GUI spike contract tests
+      - name: Install optional GUI dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev,gui]"
+      - name: Compile GUI packages and probe
+        run: |
+          python -m compileall -q bdb_gui
+          python -m py_compile spikes/gui/pyside6_probe.py
+      - name: Run all GUI contract and runtime tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: >-
-          python -m pytest -q
-          tests/test_gui_technology_spike_contract.py
-          tests/test_gui_pyside6_probe.py
-      - name: Run direct headless probe
+        run: python -m pytest -q tests/test_gui_*.py
+      - name: Preserve the P05 technology probe gate
         shell: powershell
         env:
           QT_QPA_PLATFORM: offscreen
@@ -56,5 +58,40 @@ jobs:
           ) {
             $data | ConvertTo-Json -Depth 8 | Write-Host
             throw "PySide6 probe report violates the P05 contract"
+          }
+          $data | ConvertTo-Json -Depth 8 | Write-Host
+      - name: Run production Control Center headless smoke
+        shell: powershell
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $workspaces = Join-Path $env:RUNNER_TEMP "bdb-control-center-workspaces"
+          $report = Join-Path $env:RUNNER_TEMP "bdb-control-center-smoke.json"
+          New-Item -ItemType Directory -Path $workspaces -Force | Out-Null
+
+          python -m bdb_gui.app `
+            --workspaces-root $workspaces `
+            --headless-smoke `
+            --json-out $report
+          if ($LASTEXITCODE -ne 0) {
+            throw "Production Control Center headless smoke failed"
+          }
+
+          $data = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+          if (
+            $data.status -ne "success" -or
+            $data.window_constructed -ne $true -or
+            $data.read_only_startup -ne $true -or
+            $data.bootstrap_completed -ne $true -or
+            $data.bootstrap_ok -ne $true -or
+            $data.page_count -ne 5 -or
+            $data.project_count -ne 0 -or
+            $data.mutation_operations_invoked -ne 0 -or
+            $data.operator_network_listener -ne $false -or
+            $data.event_loop_exit_code -ne 0 -or
+            $data.timed_out -ne $false
+          ) {
+            $data | ConvertTo-Json -Depth 8 | Write-Host
+            throw "Control Center smoke report violates the P06 contract"
           }
           $data | ConvertTo-Json -Depth 8 | Write-Host
