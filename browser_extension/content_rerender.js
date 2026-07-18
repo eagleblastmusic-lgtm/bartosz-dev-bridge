@@ -39,6 +39,25 @@ scan = function scanWithRerenderReconciliation(root) {
   scanBeforeRerenderReconciliation(root);
 };
 
+// The original observer scans additions and character changes. This focused observer
+// handles the complementary case where React removes only the extension-owned panel.
+// It rescans the mutation target; it never submits an action directly.
+const bdbRemovedPanelObserver = new MutationObserver((records) => {
+  for (const record of records) {
+    if (
+      record.type === "childList" &&
+      record.removedNodes.length > 0 &&
+      record.target instanceof HTMLElement
+    ) {
+      scan(record.target);
+    }
+  }
+});
+bdbRemovedPanelObserver.observe(document.documentElement, {
+  childList: true,
+  subtree: true
+});
+
 // Reconcile once immediately in case ChatGPT rerendered between content.js startup
 // and this companion script loading.
 scan(document);
