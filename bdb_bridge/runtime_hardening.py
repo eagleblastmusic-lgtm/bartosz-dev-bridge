@@ -30,6 +30,10 @@ _EMPTY_SHA256 = "sha256:" + hashlib.sha256(b"").hexdigest()
 _INSTALLED = False
 
 
+def _sha256(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
 def _harden_worktree_add_args(args: Iterable[str]) -> list[str]:
     values = list(args)
     if len(values) >= 2 and values[0] == "worktree" and values[1] == "add":
@@ -41,6 +45,35 @@ def _harden_worktree_add_args(args: Iterable[str]) -> list[str]:
             *values,
         ]
     return values
+
+
+def _canonicalize_promotion_hashes(
+    promotion: object,
+    entries: dict[str, Any],
+    reader: GitObjectReader,
+) -> object:
+    if not isinstance(promotion, dict):
+        return promotion
+    raw_hashes = promotion.get("file_sha256")
+    if not isinstance(raw_hashes, dict):
+        return promotion
+
+    canonical_hashes: dict[str, object] = {}
+    for raw_path, raw_hash in raw_hashes.items():
+        if not isinstance(raw_path, str):
+            continue
+        entry = entries.get(raw_path)
+        if entry is None:
+            canonical_hashes[raw_path] = raw_hash
+            continue
+        canonical_hashes[raw_path] = _sha256(reader.read_blob(entry.object_sha))
+
+    return {
+        **promotion,
+        "file_sha256": canonical_hashes,
+        "working_tree_file_sha256": dict(raw_hashes),
+        "hash_source": "git_blobs",
+    }
 
 
 def _canonicalize_clean_snapshot(
@@ -78,7 +111,7 @@ def _canonicalize_clean_snapshot(
             {
                 **raw,
                 "bytes": len(data),
-                "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+                "sha256": _sha256(data),
                 "content": text,
             }
         )
@@ -92,6 +125,11 @@ def _canonicalize_clean_snapshot(
             if isinstance(item, dict)
         ),
         "snapshot_source": "git_blobs",
+        "latest_promotion": _canonicalize_promotion_hashes(
+            snapshot.get("latest_promotion"),
+            entries,
+            reader,
+        ),
     }
     capabilities = result.get("capabilities")
     if isinstance(capabilities, dict):
