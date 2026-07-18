@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-current-operation-v1",
+  "title": "BDB current operation projection v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "project_alias", "generated_at", "active", "operation"],
+  "properties": {
+    "schema": { "const": "bdb-current-operation-v1" },
+    "project_alias": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "active": { "type": "boolean" },
+    "operation": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "command_id",
+            "session_id",
+            "sequence",
+            "state",
+            "operation",
+            "target_path",
+            "profile_id",
+            "repository_id",
+            "session_state",
+            "workspace_revision",
+            "workspace_state_hash",
+            "result_status",
+            "error_code",
+            "created_at",
+            "updated_at"
+          ],
+          "properties": {
+            "command_id": { "type": "string" },
+            "session_id": { "type": "string" },
+            "sequence": { "type": "integer", "minimum": 1 },
+            "state": { "type": "string" },
+            "operation": { "type": ["string", "null"] },
+            "target_path": { "type": ["string", "null"] },
+            "profile_id": { "type": ["string", "null"] },
+            "repository_id": { "type": "string" },
+            "session_state": { "type": "string" },
+            "workspace_revision": { "type": ["integer", "null"], "minimum": 0 },
+            "workspace_state_hash": { "type": ["string", "null"] },
+            "result_status": { "type": ["string", "null"] },
+            "error_code": { "type": ["string", "null"] },
+            "created_at": { "type": "string", "format": "date-time" },
+            "updated_at": { "type": "string", "format": "date-time" }
+          }
+        }
+      ]
+    }
+  }
+}
