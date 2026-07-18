@@ -67,11 +67,18 @@ def test_gui_is_read_only_on_open_and_mutations_are_explicit() -> None:
     assert "Operacje zmieniające stan wymagają jawnego działania użytkownika" in events
 
 
-def test_p02_does_not_implement_runtime_packages() -> None:
-    # P02 freezes contracts only. Runtime implementation belongs to P03+.
+def test_p03_introduces_only_the_operator_runtime_package() -> None:
+    assert (ROOT / "bdb_operator").is_dir()
     for path in (
-        ROOT / "bdb_operator",
         ROOT / "bdb_gui",
         ROOT / "bdb_bartosz_os",
     ):
-        assert not path.exists(), f"P02 unexpectedly introduced runtime package: {path.name}"
+        assert not path.exists(), f"P03 unexpectedly introduced future runtime package: {path.name}"
+
+
+def test_core_does_not_depend_on_operator_or_future_ui_layers() -> None:
+    forbidden = ("bdb_operator", "bdb_gui", "bdb_bartosz_os")
+    for path in (ROOT / "bdb_bridge").rglob("*.py"):
+        source = read(path)
+        for token in forbidden:
+            assert token not in source, f"Forbidden dependency {token} found in {path.relative_to(ROOT)}"
