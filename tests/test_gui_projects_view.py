@@ -6,7 +6,6 @@ import pytest
 
 from bdb_gui.projects import PreparePlan, PrepareResult
 
-
 pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -25,10 +24,6 @@ def plan() -> PreparePlan:
         allowed_paths=("README.md", "tests/*.py"),
         python_executable=sys.executable,
         test_timeout_seconds=120,
-        max_patch_bytes=262_144,
-        max_changed_files=20,
-        auto_send_max_bytes=24_000,
-        worker_timeout_seconds=240,
     )
 
 
@@ -48,7 +43,7 @@ def test_widget_starts_without_plan_and_prepare_is_disabled() -> None:
     widget.close()
 
 
-def test_build_plan_emits_current_form_payload() -> None:
+def test_build_plan_emits_only_supported_form_payload() -> None:
     app = application()
     widget = ProjectsWidget()
     widget.alias_edit.setText("alpha")
@@ -60,16 +55,19 @@ def test_build_plan_emits_current_form_payload() -> None:
     widget.plan_button.click()
     app.processEvents()
 
-    assert len(calls) == 1
-    assert calls[0]["alias"] == "alpha"
-    assert calls[0]["source_repo"] == "C:/source/alpha"
-    assert calls[0]["allowed_paths"] == ["README.md", "tests/*.py"]
-    assert calls[0]["python_executable"] == sys.executable
-    assert calls[0]["test_timeout_seconds"] == 120
+    assert calls == [
+        {
+            "alias": "alpha",
+            "source_repo": "C:/source/alpha",
+            "allowed_paths": ["README.md", "tests/*.py"],
+            "python_executable": sys.executable,
+            "test_timeout_seconds": 120,
+        }
+    ]
     widget.close()
 
 
-def test_valid_plan_requires_acknowledgement_before_prepare_signal() -> None:
+def test_valid_plan_requires_fresh_acknowledgement_before_prepare_signal() -> None:
     app = application()
     widget = ProjectsWidget()
     calls: list[PreparePlan] = []
@@ -85,13 +83,18 @@ def test_valid_plan_requires_acknowledgement_before_prepare_signal() -> None:
 
     widget.ack_checkbox.setChecked(True)
     assert widget.prepare_button.isEnabled() is True
+    widget.apply_plan(current)
+    assert widget.ack_checkbox.isChecked() is False
+    assert widget.prepare_button.isEnabled() is False
+
+    widget.ack_checkbox.setChecked(True)
     widget.prepare_button.click()
     app.processEvents()
     assert calls == [current]
     widget.close()
 
 
-def test_form_change_invalidates_existing_plan() -> None:
+def test_form_change_invalidates_existing_plan_and_acknowledgement() -> None:
     app = application()
     widget = ProjectsWidget()
     widget.apply_plan(plan())
@@ -102,6 +105,7 @@ def test_form_change_invalidates_existing_plan() -> None:
     app.processEvents()
 
     assert widget.plan is None
+    assert widget.ack_checkbox.isChecked() is False
     assert widget.prepare_button.isEnabled() is False
     assert "PONOWNEJ WALIDACJI" in widget.plan_state.text()
     widget.close()
@@ -139,11 +143,12 @@ def test_prepare_success_and_failure_are_distinct() -> None:
     assert widget.plan_state.text() == "PREPARE NIEUDANY"
     assert "operator_failed" in widget.feedback_label.text()
     assert widget.plan is current
+    assert widget.ack_checkbox.isChecked() is False
     widget.close()
 
 
 def test_busy_state_blocks_plan_and_prepare_actions() -> None:
-    app = application()
+    application()
     widget = ProjectsWidget()
     widget.apply_plan(plan())
     widget.ack_checkbox.setChecked(True)
