@@ -1,6 +1,6 @@
 # AUTO loop state synchronization
 
-## Problem
+## Problem 1: tab-scoped loop state
 
 The original browser AUTO state was stored under:
 
@@ -10,7 +10,7 @@ bdbAuto:<tabId>:<loop_id>
 
 That made the iteration counter depend on the sender tab identity. A later ChatGPT turn could carry the same `loop_id` and the correct next iteration, but after a tab identity change the service worker loaded an empty state with `lastIteration = 0`. Iteration 2 was then rejected as `non_sequential_iteration` even though iteration 1 had completed.
 
-## Current contract
+## Current state contract
 
 The canonical state key is now:
 
@@ -32,7 +32,11 @@ The state remains in `chrome.storage.session`, so it survives MV3 service-worker
 
 ## Legacy migration
 
-On the next AUTO action the entry worker scans session storage for old keys ending in the same `loop_id`.
+On the next AUTO action the entry worker scans session storage for exact old keys using the form:
+
+```text
+bdbAuto:<numeric-tabId>:<loop_id>
+```
 
 If a canonical state does not exist, it conservatively selects the legacy state with:
 
@@ -63,7 +67,20 @@ A repeated already-completed iteration is reported as `iteration_already_process
 
 Every AUTO decision returns `expectedIteration`. The extension popup displays the latest loop, status, completed iteration and expected next iteration.
 
-## Runtime regression test
+## Problem 2: ChatGPT rerender removes the panel
+
+ChatGPT may reconcile an assistant message by removing extension-owned DOM children while preserving the original `<code>` element. The original content script remembered processed code nodes in a `WeakSet`. If the `.bdb-assisted` panel disappeared but the same code node remained, later scans skipped that node permanently. Reloading the page created a new code node and only masked the problem.
+
+Extension version `0.2.2` loads `content_rerender.js` after the mature `content.js` scanner. Before each scan, the reconciliation layer checks remembered code nodes against the live DOM:
+
+- when the direct BDB panel still exists, nothing changes;
+- when the panel disappeared, only that code node is removed from `processedBlocks`;
+- the existing scanner then recreates the panel and calls the background AUTO decision again;
+- the durable replay guard remains the authority preventing duplicate execution.
+
+The reconciliation layer does not submit Native Messaging actions directly and does not add another observer. It delegates to the original scanner and its existing observer callback.
+
+## Runtime regression tests
 
 `tests/test_browser_auto_loop_runtime.py` executes the actual MV3 worker through a Node VM with stubbed Chrome storage and Native Messaging. It covers:
 
@@ -74,19 +91,27 @@ Every AUTO decision returns `expectedIteration`. The extension popup displays th
 5. rerender of iteration 3 without a second native request;
 6. a fresh loop starting at iteration 1.
 
-The test first failed on the old implementation with the second action rejected. The fixed worker must pass this scenario on every CI platform.
+`tests/test_browser_content_rerender_runtime.py` executes the content-script stack declared by the manifest. It covers:
+
+1. initial enhancement of an AUTO action;
+2. removal of the BDB panel while retaining the same `<code>` node;
+3. a later scan restoring the panel;
+4. reconsideration through the background replay guard rather than direct execution.
+
+Both tests were introduced red against the preceding implementation before their respective fixes.
 
 ## Manual verification
 
 After updating the unpacked extension:
 
-1. reload the extension in the browser;
-2. enable AUTO in the popup;
-3. start a new loop with a unique `loop_id` and iteration 1;
-4. allow the result to create the next ChatGPT turn;
-5. verify that iteration 2 runs without an ASSISTED click;
-6. inspect the popup and confirm the displayed expected iteration;
-7. refresh the ChatGPT tab before a later iteration and confirm continuation;
-8. confirm that rerendering an old action does not send a second Native Messaging request.
+1. reload the extension in the browser and confirm version `0.2.2`;
+2. use one ChatGPT tab for the acceptance run;
+3. enable AUTO in the popup;
+4. start a new loop with a unique `loop_id` and iteration 1;
+5. allow the result to create the next ChatGPT turn;
+6. verify that the mutation runs without an ASSISTED click;
+7. verify that the final receipt-validation action is detected without `Ctrl+R`;
+8. inspect the popup and confirm the displayed expected iteration;
+9. confirm that rerendering or refreshing an old action does not send a second Native Messaging request.
 
-The real Local Workspace Loop acceptance test still requires one initial user message, automatic context, mutation, tests, promotion receipt and final response without manual interaction.
+The Local Workspace Loop acceptance criterion remains strict: one initial user message, automatic context, mutation, tests, promotion receipt and final response without a manual click or page refresh.
