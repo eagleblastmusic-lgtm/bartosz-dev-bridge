@@ -182,10 +182,11 @@ def test_clean_workspace_context_uses_canonical_git_blob_bytes(tmp_path: Path) -
     assert readme["content"] == source.decode("utf-8")
     assert readme["bytes"] == len(source)
     assert readme["sha256"] == canonical_hash
-    assert snapshot["latest_promotion"]["file_sha256"] == {
-        "README.md": canonical_hash
+    assert snapshot["latest_promotion"] == {
+        "status": "promoted",
+        "command_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:000001",
+        "source_commit": head,
+        "changed_files": ["README.md"],
+        "file_sha256": {"README.md": canonical_hash},
+        "promoted_at": "2026-07-18T15:52:50.000000Z",
     }
-    assert snapshot["latest_promotion"]["working_tree_file_sha256"] == {
-        "README.md": physical_hash
-    }
-    assert snapshot["latest_promotion"]["hash_source"] == "git_blobs"
