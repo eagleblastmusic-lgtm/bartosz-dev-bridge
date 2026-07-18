@@ -183,7 +183,10 @@ class DiagnosticsService:
         return DiagnosticsSnapshot(
             workspace_root=root,
             generated_at=_utc_now(),
-            sections=tuple(DiagnosticsSection.from_response(name, response) for name, response in responses),
+            sections=tuple(
+                DiagnosticsSection.from_response(name, response)
+                for name, response in responses
+            ),
             versions=_versions(),
         )
 
@@ -242,7 +245,8 @@ class DiagnosticsExporter:
                     info.compress_type = zipfile.ZIP_DEFLATED
                     info.external_attr = 0o600 << 16
                     archive.writestr(info, content)
-            with temporary.open("rb") as handle:
+            with temporary.open("rb+") as handle:
+                handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, target)
         finally:
@@ -281,21 +285,29 @@ def _sanitize_object(value: Any, *, key: str | None = None) -> Any:
     if key is not None and _SECRET_KEY.search(key):
         return "[REDACTED]"
     if isinstance(value, dict):
-        return {str(item_key): _sanitize_object(item_value, key=str(item_key)) for item_key, item_value in value.items()}
+        return {
+            str(item_key): _sanitize_object(item_value, key=str(item_key))
+            for item_key, item_value in value.items()
+        }
     if isinstance(value, list):
         return [_sanitize_object(item) for item in value]
     if isinstance(value, tuple):
         return [_sanitize_object(item) for item in value]
     if isinstance(value, str):
         sanitized = _BEARER.sub("Bearer [REDACTED]", value)
-        return _SECRET_ASSIGNMENT.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", sanitized)
+        return _SECRET_ASSIGNMENT.sub(
+            lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+            sanitized,
+        )
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return str(value)
 
 
 def _json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
 
 
 def _sha256_bytes(content: bytes) -> str:
