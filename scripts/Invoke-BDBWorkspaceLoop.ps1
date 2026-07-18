@@ -112,6 +112,48 @@ function Wait-ForBridgeState(
     throw "Bridge did not reach $ExpectedState; last=$last"
 }
 
+function Test-SafeStaleBridgeState($Bridge) {
+    return (
+        $Bridge.status -eq "STALE" -and
+        $Bridge.lock_held -eq $false -and
+        $Bridge.pid_alive -eq $false
+    )
+}
+
+function Start-OrRecoverBridge(
+    [string]$PythonExecutable,
+    [string]$BridgeConfig,
+    $Bridge
+) {
+    if ($Bridge.status -eq "RUNNING") {
+        return $Bridge
+    }
+    if ($Bridge.status -ne "OFFLINE" -and -not (Test-SafeStaleBridgeState $Bridge)) {
+        throw "Bridge cannot start from state $($Bridge.status)"
+    }
+    Invoke-Checked $PythonExecutable @(
+        "-m", "bdb_bridge", "bridge", "start",
+        "--config", $BridgeConfig,
+        "--background"
+    ) | Out-Null
+    return Wait-ForBridgeState $PythonExecutable $BridgeConfig "RUNNING"
+}
+
+function Remove-StalePromoterPidFile($State) {
+    $pidFile = [string]$State.promoter_pid_file
+    if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) {
+        return
+    }
+    $status = Get-PromoterStatus $State
+    if ($status.running) {
+        return
+    }
+    if ($null -ne $status.pid -and (Test-ProcessAlive ([int]$status.pid))) {
+        throw "Workspace promoter PID file points to a live process"
+    }
+    Remove-Item -LiteralPath $pidFile -Force
+}
+
 function Start-Promoter($State) {
     $current = Get-PromoterStatus $State
     if ($current.running) {
@@ -196,23 +238,14 @@ $bridgeConfig = (Resolve-Path -LiteralPath ([string]$state.bridge_config)).Path
 $nativeConfig = (Resolve-Path -LiteralPath ([string]$state.native_config)).Path
 
 if ($Action -eq "Start") {
+    Remove-StalePromoterPidFile $state
     $promoter = Start-Promoter $state
     $bridge = Invoke-Json $pythonExecutable @(
         "-m", "bdb_bridge", "bridge", "status",
         "--config", $bridgeConfig,
         "--json"
     )
-    if ($bridge.status -eq "OFFLINE") {
-        Invoke-Checked $pythonExecutable @(
-            "-m", "bdb_bridge", "bridge", "start",
-            "--config", $bridgeConfig,
-            "--background"
-        ) | Out-Null
-        $bridge = Wait-ForBridgeState $pythonExecutable $bridgeConfig "RUNNING"
-    }
-    elseif ($bridge.status -ne "RUNNING") {
-        throw "Bridge cannot start from state $($bridge.status)"
-    }
+    $bridge = Start-OrRecoverBridge $pythonExecutable $bridgeConfig $bridge
     $arm = Invoke-Json $pythonExecutable @(
         "-m", "bdb_bridge", "bridge", "native-host", "arm",
         "--config", $nativeConfig,
@@ -270,11 +303,25 @@ Invoke-Json $pythonExecutable @(
     "-m", "bdb_bridge", "bridge", "native-host", "disarm",
     "--config", $nativeConfig
 ) | Out-Null
-Invoke-Checked $pythonExecutable @(
-    "-m", "bdb_bridge", "bridge", "stop",
-    "--config", $bridgeConfig
-) | Out-Null
-$bridge = Wait-ForBridgeState $pythonExecutable $bridgeConfig "OFFLINE"
+
+$bridge = Invoke-Json $pythonExecutable @(
+    "-m", "bdb_bridge", "bridge", "status",
+    "--config", $bridgeConfig,
+    "--json"
+)
+if (Test-SafeStaleBridgeState $bridge) {
+    $bridge = Start-OrRecoverBridge $pythonExecutable $bridgeConfig $bridge
+}
+if ($bridge.status -eq "RUNNING" -or $bridge.status -eq "STOPPING") {
+    Invoke-Checked $pythonExecutable @(
+        "-m", "bdb_bridge", "bridge", "stop",
+        "--config", $bridgeConfig
+    ) | Out-Null
+    $bridge = Wait-ForBridgeState $pythonExecutable $bridgeConfig "OFFLINE"
+}
+elseif ($bridge.status -ne "OFFLINE") {
+    throw "Bridge cannot stop safely from state $($bridge.status)"
+}
 
 $promoterBefore = Get-PromoterStatus $state
 if ($promoterBefore.running) {
@@ -295,6 +342,8 @@ $promoter = Get-PromoterStatus $state
 if ($promoter.running) {
     throw "Workspace promoter did not stop cooperatively"
 }
+Remove-StalePromoterPidFile $state
+$promoter = Get-PromoterStatus $state
 [ordered]@{
     status = "OFFLINE"
     alias = $state.alias
