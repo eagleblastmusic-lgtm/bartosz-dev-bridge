@@ -15,6 +15,7 @@ ADR-y opisują decyzje architektoniczne, których kolejne etapy nie powinny zmie
 | [0009](0009-read-only-current-operation-view.md) | Accepted | Bieżąca operacja jest ręcznie odświeżaną, read-only projekcją P04 bez bezpośredniego dostępu GUI do Journalu. |
 | [0010](0010-bounded-manual-journal-history.md) | Accepted | Historia Journalu jest ręczna, read-only, filtrowana i stronicowana bounded cursorem Operator API. |
 | [0011](0011-explicit-sanitized-diagnostics-export.md) | Accepted | Diagnostyka jest bounded i read-only, a sanitizowany ZIP powstaje wyłącznie po jawnym wyborze ścieżki. |
+| [0012](0012-two-gate-project-prepare-wizard.md) | Accepted | Kreator projektu najpierw buduje niemutujący plan, a Prepare uruchamia dopiero po świeżym acknowledgement i osobnym potwierdzeniu. |
 
 Dokument nadrzędny P02: [BDB Control Center — zamrożone granice](../BDB_CONTROL_CENTER_BOUNDARIES.md).
 
