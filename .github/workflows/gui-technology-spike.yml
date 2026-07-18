@@ -68,6 +68,7 @@ jobs:
           python -m pytest -vv
           tests/test_gui_current_operation_service.py
           tests/test_gui_current_operation_view.py
+          tests/test_gui_current_operation_window.py
       - name: Run P05 PySide6 probe regression
         env:
           QT_QPA_PLATFORM: offscreen
