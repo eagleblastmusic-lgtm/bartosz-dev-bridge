@@ -17,8 +17,13 @@ def test_manifest_has_minimal_mv3_permissions() -> None:
     assert manifest["manifest_version"] == 3
     assert manifest["permissions"] == ["nativeMessaging", "storage"]
     assert manifest["host_permissions"] == ["https://chatgpt.com/*"]
-    assert manifest["background"] == {"service_worker": "background.js"}
+    assert manifest["background"] == {"service_worker": "background_full_entry.js"}
     assert manifest["content_scripts"][0]["world"] == "ISOLATED"
+    assert manifest["content_scripts"][0]["js"] == [
+        "content.js",
+        "content_rerender.js",
+        "content_auto_send.js",
+    ]
     serialized = json.dumps(manifest)
     for forbidden in ("<all_urls>", "tabs", "debugger", "webRequest", "downloads"):
         assert forbidden not in serialized
@@ -109,6 +114,38 @@ def test_auto_remains_bounded_and_explicitly_opt_in() -> None:
     assert 'automation.mode !== "auto"' in content
     assert "BDB_CONSIDER_AUTO" in content
     assert "BDB_AUTO_RESULT" in content
+
+
+def test_auto_entry_synchronizes_loop_state_without_weakening_replay_guard() -> None:
+    entry = read("background_entry.js")
+    full_entry = read("background_full_entry.js")
+    background = read("background.js")
+    polling = read("background_async_result.js")
+    popup = read("popup.js")
+    assert 'importScripts("background.js")' in entry
+    assert 'importScripts("background_entry.js", "background_async_result.js")' in full_entry
+    assert "canonicalAutoStateKey" in entry
+    assert "chrome.storage.session.get(null)" in entry
+    assert "legacyAutoStateEntries" in entry
+    assert 'reason = "iteration_already_processed"' in entry
+    assert "expectedIteration" in entry
+    assert "claimAutoReplay" in background
+    assert "AUTO_REPLAY_GUARD_KEY" in background
+    assert "claimAutoReplay =" not in entry
+    assert 'action: "result"' in polling
+    assert "waitForRequiredPromotion(action, latest)" in polling
+    assert "BDB_ASYNC_RESULT_ATTEMPTS" in polling
+    assert "Oczekiwana iteracja" in popup
+
+
+def test_auto_send_requires_observed_composer_consumption() -> None:
+    companion = read("content_auto_send.js")
+    assert "BDB_AUTO_SEND_MAX_CLICKS" in companion
+    assert "bdbWaitForComposerConsumption" in companion
+    assert "send_not_confirmed" in companion
+    assert "current.button.click()" in companion
+    assert "markerStillPresent" in companion
+    assert "return { sent: true" not in companion.split("current.button.click();", 1)[1].split("if (await", 1)[0]
 
 
 def test_extension_contains_no_remote_scripts_or_inline_script() -> None:
