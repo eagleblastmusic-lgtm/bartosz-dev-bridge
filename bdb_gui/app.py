@@ -65,8 +65,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         from PySide6.QtWidgets import QApplication
 
         from .bootstrap import BootstrapService
-        from .main_window import ControlCenterWindow
         from .operations import ProjectOperationsService
+        from .project_window import ProjectControlCenterWindow
     except ImportError as error:
         report = {
             "schema": SMOKE_SCHEMA,
@@ -84,13 +84,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     application.setOrganizationName("Bartosz Dev Bridge")
     application.setQuitOnLastWindowClosed(True)
 
-    window = ControlCenterWindow(
+    window = ProjectControlCenterWindow(
         bootstrap_service=BootstrapService(),
         operations_service=ProjectOperationsService(),
         workspaces_root=workspaces_root,
-        # The generic smoke validates construction and bootstrap without touching
-        # a real runtime. P07 status/control behavior has a separate injected-service
-        # runtime test and therefore cannot add hidden mutations to this gate.
+        # Generic smoke validates construction/bootstrap and all explicit-action
+        # gates without touching a real runtime or invoking Prepare.
         auto_load_status=not args.headless_smoke,
     )
     report: dict[str, Any] = {}
