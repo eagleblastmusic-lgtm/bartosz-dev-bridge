@@ -15,9 +15,10 @@ dev = ["pytest>=8,<9"]
 [project.scripts]
 bdb = "bdb_bridge.cli:main"
 bdb-native-host = "bdb_bridge.native_host:main"
+bdb-operator = "bdb_operator.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["bdb_bridge*", "bdb_poc*"]
+include = ["bdb_bridge*", "bdb_operator*", "bdb_poc*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
