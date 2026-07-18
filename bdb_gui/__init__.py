@@ -6,6 +6,21 @@ from .current_operation import (
     CurrentOperationSnapshot,
     OperationDetails,
 )
+from .diagnostics import (
+    DIAGNOSTICS_ARCHIVE_SCHEMA,
+    GUI_DIAGNOSTICS_EXPORT_SCHEMA,
+    GUI_DIAGNOSTICS_SCHEMA,
+    GUI_DIAGNOSTICS_SECTION_SCHEMA,
+    DiagnosticsExporter,
+    DiagnosticsExportResult,
+    DiagnosticsSection,
+    DiagnosticsService,
+    DiagnosticsSnapshot,
+)
+from .diagnostics_tasks import (
+    GUI_DIAGNOSTICS_EXPORT_OUTCOME_SCHEMA,
+    DiagnosticsExportOutcome,
+)
 from .history import (
     GUI_EVENT_SCHEMA,
     GUI_HISTORY_SCHEMA,
@@ -31,9 +46,14 @@ from .state import (
 )
 
 __all__ = [
+    "DIAGNOSTICS_ARCHIVE_SCHEMA",
     "GUI_BOOTSTRAP_SCHEMA",
     "GUI_CONTROL_RESULT_SCHEMA",
     "GUI_CURRENT_OPERATION_SCHEMA",
+    "GUI_DIAGNOSTICS_EXPORT_OUTCOME_SCHEMA",
+    "GUI_DIAGNOSTICS_EXPORT_SCHEMA",
+    "GUI_DIAGNOSTICS_SCHEMA",
+    "GUI_DIAGNOSTICS_SECTION_SCHEMA",
     "GUI_EVENT_SCHEMA",
     "GUI_HISTORY_SCHEMA",
     "GUI_OPERATION_DETAILS_SCHEMA",
@@ -45,6 +65,12 @@ __all__ = [
     "ControlResult",
     "CurrentOperationService",
     "CurrentOperationSnapshot",
+    "DiagnosticsExporter",
+    "DiagnosticsExportOutcome",
+    "DiagnosticsExportResult",
+    "DiagnosticsSection",
+    "DiagnosticsService",
+    "DiagnosticsSnapshot",
     "GuiEvent",
     "GuiProject",
     "HistoryCursor",

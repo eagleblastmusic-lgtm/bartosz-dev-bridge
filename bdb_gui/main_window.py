@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import QThreadPool, Qt, Signal, Slot
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -24,19 +27,25 @@ from .bootstrap import BootstrapService
 from .current_operation import CurrentOperationService, CurrentOperationSnapshot
 from .current_operation_view import CurrentOperationWidget
 from .dashboard import DashboardWidget
+from .diagnostics import (
+    DiagnosticsExporter,
+    DiagnosticsExportResult,
+    DiagnosticsService,
+    DiagnosticsSnapshot,
+)
+from .diagnostics_tasks import DiagnosticsExportOutcome
+from .diagnostics_view import DiagnosticsWidget
 from .history import HistoryService, HistorySnapshot
 from .history_view import HistoryWidget
-from .operations import (
-    ControlAction,
-    ControlResult,
-    ProjectOperationsService,
-    ProjectStatusSnapshot,
-)
+from .operations import ControlAction, ControlResult, ProjectOperationsService, ProjectStatusSnapshot
 from .state import BootstrapSnapshot
+from .style import CONTROL_CENTER_STYLESHEET
 from .workers import (
     BootstrapWorker,
     ControlWorker,
     CurrentOperationWorker,
+    DiagnosticsCollectWorker,
+    DiagnosticsExportWorker,
     HistoryWorker,
     StatusWorker,
 )
@@ -47,10 +56,11 @@ NAVIGATION = (
     ("Projects", "Skonfigurowane workspace'y"),
     ("Current operation", "Bieżąca read-only projekcja Journalu"),
     ("History", "Filtrowana i stronicowana historia Journalu"),
-    ("Diagnostics", "Diagnostyka i wersje"),
+    ("Diagnostics", "Bounded diagnostyka i jawny sanitizowany eksport"),
 )
 
 ConfirmationProvider = Callable[[ControlAction, str], bool]
+ExportPathProvider = Callable[[str], tuple[str | None, bool]]
 
 
 class StatusCard(QFrame):
@@ -82,6 +92,8 @@ class ControlCenterWindow(QMainWindow):
     control_finished = Signal(object)
     current_operation_finished = Signal(object)
     history_finished = Signal(object, bool)
+    diagnostics_finished = Signal(object)
+    diagnostics_export_finished = Signal(object)
     dashboard_ready = Signal()
 
     def __init__(
@@ -92,28 +104,38 @@ class ControlCenterWindow(QMainWindow):
         workspaces_root: str,
         current_operation_service: CurrentOperationService | None = None,
         history_service: HistoryService | None = None,
+        diagnostics_service: DiagnosticsService | None = None,
+        diagnostics_exporter: DiagnosticsExporter | None = None,
         auto_load_status: bool = True,
         confirmation_provider: ConfirmationProvider | None = None,
+        export_path_provider: ExportPathProvider | None = None,
     ) -> None:
         super().__init__()
         self._bootstrap_service = bootstrap_service
         self._operations_service = operations_service
         self._current_operation_service = current_operation_service or CurrentOperationService()
         self._history_service = history_service or HistoryService()
+        self._diagnostics_service = diagnostics_service or DiagnosticsService()
+        self._diagnostics_exporter = diagnostics_exporter or DiagnosticsExporter()
         self._workspaces_root = workspaces_root
         self._auto_load_status = bool(auto_load_status)
         self._confirmation_provider = confirmation_provider
+        self._export_path_provider = export_path_provider
         self._thread_pool = QThreadPool.globalInstance()
         self._bootstrap_worker: BootstrapWorker | None = None
         self._status_worker: StatusWorker | None = None
         self._control_worker: ControlWorker | None = None
         self._current_operation_worker: CurrentOperationWorker | None = None
         self._history_worker: HistoryWorker | None = None
+        self._diagnostics_worker: DiagnosticsCollectWorker | None = None
+        self._diagnostics_export_worker: DiagnosticsExportWorker | None = None
         self._last_snapshot: BootstrapSnapshot | None = None
         self._last_status: ProjectStatusSnapshot | None = None
         self._last_control_result: ControlResult | None = None
         self._last_current_operation: CurrentOperationSnapshot | None = None
         self._last_history: HistorySnapshot | None = None
+        self._last_diagnostics: DiagnosticsSnapshot | None = None
+        self._last_diagnostics_export: DiagnosticsExportResult | None = None
         self._mutation_operations_invoked = 0
 
         self.setObjectName("BdbControlCenterWindow")
@@ -121,7 +143,7 @@ class ControlCenterWindow(QMainWindow):
         self.resize(1260, 820)
         self.setMinimumSize(1000, 660)
         self._build_ui()
-        self._apply_style()
+        self.setStyleSheet(CONTROL_CENTER_STYLESHEET)
         self._show_loading_state()
 
     @property
@@ -143,6 +165,14 @@ class ControlCenterWindow(QMainWindow):
     @property
     def last_history(self) -> HistorySnapshot | None:
         return self._last_history
+
+    @property
+    def last_diagnostics(self) -> DiagnosticsSnapshot | None:
+        return self._last_diagnostics
+
+    @property
+    def last_diagnostics_export(self) -> DiagnosticsExportResult | None:
+        return self._last_diagnostics_export
 
     def start_bootstrap(self) -> None:
         if self._has_active_task():
@@ -177,6 +207,7 @@ class ControlCenterWindow(QMainWindow):
         report.update(self.dashboard.smoke_report())
         report.update(self.current_operation_view.smoke_report())
         report.update(self.history_view.smoke_report())
+        report.update(self.diagnostics_view.smoke_report())
         return report
 
     def _build_ui(self) -> None:
@@ -225,8 +256,8 @@ class ControlCenterWindow(QMainWindow):
         safety_title = QLabel("EXPLICIT MUTATIONS")
         safety_title.setObjectName("SafetyTitle")
         safety_text = QLabel(
-            "Otwarcie okna pozostaje tylko do odczytu. Start, Stop i re-arm wymagają "
-            "osobnego kliknięcia oraz potwierdzenia."
+            "Otwarcie okna pozostaje tylko do odczytu. Sterowanie i eksport wymagają "
+            "osobnych działań użytkownika."
         )
         safety_text.setObjectName("SafetyText")
         safety_text.setWordWrap(True)
@@ -242,9 +273,7 @@ class ControlCenterWindow(QMainWindow):
         layout.setContentsMargins(28, 22, 28, 26)
         layout.setSpacing(18)
         header = QHBoxLayout()
-        header.setSpacing(12)
         heading_box = QVBoxLayout()
-        heading_box.setSpacing(3)
         self.page_title = QLabel("Dashboard")
         self.page_title.setObjectName("PageTitle")
         self.page_subtitle = QLabel(NAVIGATION[0][1])
@@ -272,7 +301,7 @@ class ControlCenterWindow(QMainWindow):
         self.pages.addWidget(
             self._placeholder_page(
                 "Projects",
-                "Lista projektów jest dostępna w selektorze. Pełny kreator i szczegóły zostaną rozwinięte w P11.",
+                "Lista projektów jest dostępna w selektorze. Kreator zostanie rozwinięty w P11.",
             )
         )
         self.current_operation_view = CurrentOperationWidget()
@@ -281,12 +310,10 @@ class ControlCenterWindow(QMainWindow):
         self.history_view = HistoryWidget()
         self.history_view.query_requested.connect(self._start_history_read)
         self.pages.addWidget(self.history_view)
-        self.pages.addWidget(
-            self._placeholder_page(
-                "Diagnostics",
-                "Eksport diagnostyczny i wersje zostaną rozwinięte w P10.",
-            )
-        )
+        self.diagnostics_view = DiagnosticsWidget()
+        self.diagnostics_view.collect_requested.connect(self._start_diagnostics_collect)
+        self.diagnostics_view.export_requested.connect(self._request_diagnostics_export)
+        self.pages.addWidget(self.diagnostics_view)
         layout.addWidget(self.pages, 1)
         self.status_line = QLabel("Inicjalizacja warstwy tylko do odczytu…")
         self.status_line.setObjectName("StatusLine")
@@ -302,7 +329,6 @@ class ControlCenterWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(14)
         cards = QHBoxLayout()
-        cards.setSpacing(12)
         self.operator_card = StatusCard("OPERATOR API", "Ładowanie")
         self.projects_card = StatusCard("PROJEKTY", "—")
         self.safety_card = StatusCard("TRYB STARTOWY", "READ-ONLY", "Sterowanie wymaga potwierdzenia")
@@ -320,11 +346,9 @@ class ControlCenterWindow(QMainWindow):
         page = QWidget()
         page.setObjectName(title.replace(" ", "") + "Page")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
         panel = QFrame()
         panel.setObjectName("PlaceholderPanel")
         panel_layout = QVBoxLayout(panel)
-        panel_layout.setContentsMargins(28, 26, 28, 26)
         heading = QLabel(title)
         heading.setObjectName("PlaceholderTitle")
         text = QLabel(description)
@@ -345,20 +369,23 @@ class ControlCenterWindow(QMainWindow):
     def _apply_bootstrap_snapshot(self, snapshot: BootstrapSnapshot) -> None:
         self._last_snapshot = snapshot
         self._bootstrap_worker = None
-        self._last_status = None
-        self._last_current_operation = None
-        self._last_history = None
+        self._reset_project_reads()
         self.project_selector.blockSignals(True)
         self.project_selector.clear()
         has_projects = False
+        if snapshot.ok and snapshot.projects:
+            for project in snapshot.projects:
+                self.project_selector.addItem(project.alias, project.workspace_root)
+            self.project_selector.setCurrentIndex(0)
+            has_projects = True
+        elif snapshot.ok:
+            self.project_selector.addItem("Brak przygotowanych projektów")
+        else:
+            self.project_selector.addItem("Bootstrap niedostępny")
+        self.project_selector.blockSignals(False)
+        self._set_global_busy(False)
+
         if snapshot.ok:
-            if snapshot.projects:
-                for project in snapshot.projects:
-                    self.project_selector.addItem(project.alias, project.workspace_root)
-                self.project_selector.setCurrentIndex(0)
-                has_projects = True
-            else:
-                self.project_selector.addItem("Brak przygotowanych projektów")
             self.operator_card.update_value(
                 "GOTOWY", f"{snapshot.operator_transport} · Journal {snapshot.journal_access or 'n/a'}"
             )
@@ -366,26 +393,15 @@ class ControlCenterWindow(QMainWindow):
                 str(len(snapshot.projects)), f"Nieprawidłowe wpisy: {len(snapshot.invalid_entries)}"
             )
         else:
-            self.project_selector.addItem("Bootstrap niedostępny")
             self.operator_card.update_value("BŁĄD", snapshot.error_code or "unknown")
             self.projects_card.update_value("—", snapshot.workspaces_root)
-        self.project_selector.blockSignals(False)
-        self._set_global_busy(False)
 
         if has_projects:
-            alias = self.project_selector.currentText()
-            workspace_root = self._selected_workspace_root()
-            if workspace_root is not None:
-                self.dashboard.set_project(alias, workspace_root)
-                self.current_operation_view.set_project(alias, workspace_root)
-                self.history_view.set_project(alias, workspace_root)
+            self._apply_selected_project_to_views()
         else:
-            self.dashboard.set_project_available(False)
-            self.current_operation_view.set_project_available(False)
-            self.history_view.set_project_available(False)
-
+            self._set_project_available(False)
         self.status_line.setText(
-            "Lista projektów załadowana bez mutacji. Wybór projektu uruchamia tylko jawne odczyty."
+            "Lista projektów załadowana bez mutacji."
             if snapshot.ok
             else snapshot.error_message or "Nie udało się załadować bootstrapu."
         )
@@ -399,21 +415,41 @@ class ControlCenterWindow(QMainWindow):
     def _project_selected(self, index: int) -> None:
         if index < 0 or self._has_active_task():
             return
-        workspace_root = self._selected_workspace_root()
-        if workspace_root is None:
-            self.dashboard.set_project_available(False)
-            self.current_operation_view.set_project_available(False)
-            self.history_view.set_project_available(False)
+        if self._selected_workspace_root() is None:
+            self._set_project_available(False)
             return
-        alias = self.project_selector.currentText()
-        self.dashboard.set_project(alias, workspace_root)
-        self.current_operation_view.set_project(alias, workspace_root)
-        self.history_view.set_project(alias, workspace_root)
-        self._last_status = None
-        self._last_current_operation = None
-        self._last_history = None
+        self._reset_project_reads()
+        self._apply_selected_project_to_views()
         if self._auto_load_status:
             self._start_status_read()
+
+    def _apply_selected_project_to_views(self) -> None:
+        workspace_root = self._selected_workspace_root()
+        if workspace_root is None:
+            self._set_project_available(False)
+            return
+        alias = self.project_selector.currentText()
+        for view in (
+            self.dashboard,
+            self.current_operation_view,
+            self.history_view,
+            self.diagnostics_view,
+        ):
+            view.set_project(alias, workspace_root)
+
+    def _set_project_available(self, available: bool) -> None:
+        self.dashboard.set_project_available(available)
+        self.current_operation_view.set_project_available(available)
+        self.history_view.set_project_available(available)
+        self.diagnostics_view.set_project_available(available)
+
+    def _reset_project_reads(self) -> None:
+        self._last_status = None
+        self._last_control_result = None
+        self._last_current_operation = None
+        self._last_history = None
+        self._last_diagnostics = None
+        self._last_diagnostics_export = None
 
     @Slot()
     def _start_status_read(self) -> None:
@@ -421,7 +457,6 @@ class ControlCenterWindow(QMainWindow):
             return
         workspace_root = self._selected_workspace_root()
         if workspace_root is None:
-            self.dashboard.set_project_available(False)
             return
         self._set_global_busy(True, "Pobieranie statusu projektu tylko do odczytu…")
         worker = StatusWorker(self._operations_service, workspace_root)
@@ -436,7 +471,7 @@ class ControlCenterWindow(QMainWindow):
         self._set_global_busy(False)
         self.dashboard.apply_status(snapshot)
         self.status_line.setText(
-            f"Status {snapshot.project_alias or 'projektu'}: {snapshot.overall_status or 'UNKNOWN'}. Odczyt nie zmienił stanu BDB."
+            f"Status: {snapshot.overall_status or 'UNKNOWN'}. Odczyt nie zmienił BDB."
             if snapshot.ok
             else f"Status niedostępny: {snapshot.error_code or 'unknown'} — {snapshot.error_message or 'brak szczegółów'}"
         )
@@ -452,7 +487,6 @@ class ControlCenterWindow(QMainWindow):
             return
         workspace_root = self._selected_workspace_root()
         if workspace_root is None:
-            self.current_operation_view.set_project_available(False)
             return
         self._set_global_busy(True, "Odczytywanie bieżącej operacji z Journalu…")
         worker = CurrentOperationWorker(self._current_operation_service, workspace_root)
@@ -466,15 +500,12 @@ class ControlCenterWindow(QMainWindow):
         self._last_current_operation = snapshot
         self._set_global_busy(False)
         self.current_operation_view.apply_snapshot(snapshot)
-        if snapshot.ok:
-            state = snapshot.operation.state if snapshot.active and snapshot.operation else "none"
-            self.status_line.setText(
-                f"Bieżąca operacja: {state}. Projekcja Journalu pozostała tylko do odczytu."
-            )
-        else:
-            self.status_line.setText(
-                f"Bieżąca operacja niedostępna: {snapshot.error_code or 'unknown'} — {snapshot.error_message or 'brak szczegółów'}"
-            )
+        state = snapshot.operation.state if snapshot.ok and snapshot.active and snapshot.operation else "none"
+        self.status_line.setText(
+            f"Bieżąca operacja: {state}. Projekcja pozostała read-only."
+            if snapshot.ok
+            else f"Bieżąca operacja niedostępna: {snapshot.error_code or 'unknown'}"
+        )
         self.current_operation_finished.emit(snapshot)
         self.dashboard_ready.emit()
 
@@ -484,7 +515,6 @@ class ControlCenterWindow(QMainWindow):
             return
         workspace_root = self._selected_workspace_root()
         if workspace_root is None:
-            self.history_view.set_project_available(False)
             return
         after_event_id = query.get("after_event_id", 0)
         limit = query.get("limit", 100)
@@ -499,7 +529,7 @@ class ControlCenterWindow(QMainWindow):
             return
         if command_id is not None and not isinstance(command_id, str):
             return
-        self._set_global_busy(True, "Odczytywanie ograniczonej strony historii Journalu…")
+        self._set_global_busy(True, "Odczytywanie ograniczonej strony historii…")
         worker = HistoryWorker(
             self._history_service,
             workspace_root,
@@ -520,11 +550,107 @@ class ControlCenterWindow(QMainWindow):
         self._set_global_busy(False)
         self.history_view.apply_snapshot(snapshot, append=append)
         self.status_line.setText(
-            f"Historia: pobrano {len(snapshot.events)} zdarzeń. Journal pozostał tylko do odczytu."
+            f"Historia: {len(snapshot.events)} zdarzeń z bieżącej strony."
             if snapshot.ok
-            else f"Historia niedostępna: {snapshot.error_code or 'unknown'} — {snapshot.error_message or 'brak szczegółów'}"
+            else f"Historia niedostępna: {snapshot.error_code or 'unknown'}"
         )
         self.history_finished.emit(snapshot, append)
+
+    @Slot()
+    def _start_diagnostics_collect(self) -> None:
+        if self._has_active_task():
+            return
+        workspace_root = self._selected_workspace_root()
+        if workspace_root is None:
+            return
+        self._set_global_busy(True, "Zbieranie bounded diagnostyki tylko do odczytu…")
+        worker = DiagnosticsCollectWorker(self._diagnostics_service, workspace_root)
+        worker.signals.completed.connect(self._apply_diagnostics_snapshot)
+        self._diagnostics_worker = worker
+        self._thread_pool.start(worker)
+
+    @Slot(object)
+    def _apply_diagnostics_snapshot(self, snapshot: DiagnosticsSnapshot) -> None:
+        self._diagnostics_worker = None
+        self._last_diagnostics = snapshot
+        self._last_diagnostics_export = None
+        self._set_global_busy(False)
+        self.diagnostics_view.apply_snapshot(snapshot)
+        self.status_line.setText(
+            f"Diagnostyka zebrana: {'kompletna' if snapshot.complete else 'częściowa'}; eksport nie został wykonany."
+        )
+        self.diagnostics_finished.emit(snapshot)
+
+    @Slot()
+    def _request_diagnostics_export(self) -> None:
+        if self._has_active_task() or self._last_diagnostics is None:
+            return
+        suggested = self._diagnostics_filename()
+        if self._export_path_provider is not None:
+            output_path, overwrite = self._export_path_provider(suggested)
+        else:
+            output_path, overwrite = self._choose_diagnostics_export_path(suggested)
+        if not output_path:
+            self.status_line.setText("Eksport diagnostyczny anulowany przed zapisem.")
+            return
+        self._set_global_busy(True, "Zapisywanie sanitizowanego pakietu diagnostycznego…")
+        worker = DiagnosticsExportWorker(
+            self._diagnostics_exporter,
+            self._last_diagnostics,
+            output_path,
+            overwrite=overwrite,
+        )
+        worker.signals.completed.connect(self._apply_diagnostics_export_outcome)
+        self._diagnostics_export_worker = worker
+        self._thread_pool.start(worker)
+
+    @Slot(object)
+    def _apply_diagnostics_export_outcome(self, outcome: DiagnosticsExportOutcome) -> None:
+        self._diagnostics_export_worker = None
+        self._set_global_busy(False)
+        if outcome.ok and outcome.result is not None:
+            self._last_diagnostics_export = outcome.result
+            self.diagnostics_view.apply_export_result(outcome.result)
+            self.status_line.setText(f"Pakiet diagnostyczny zapisany: {outcome.result.output_path}")
+        else:
+            self.diagnostics_view.apply_export_error(
+                outcome.error_code or "diagnostics_export_failed",
+                outcome.error_message or "brak szczegółów",
+            )
+            self.status_line.setText("Eksport diagnostyczny nie został zakończony.")
+        self.diagnostics_export_finished.emit(outcome)
+
+    def _choose_diagnostics_export_path(self, suggested: str) -> tuple[str | None, bool]:
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Eksportuj sanitizowaną diagnostykę BDB",
+            str(Path.home() / suggested),
+            "ZIP archive (*.zip)",
+        )
+        if not selected:
+            return None, False
+        path = Path(selected)
+        if path.suffix.lower() != ".zip":
+            path = path.with_suffix(".zip")
+        overwrite = False
+        if path.exists():
+            answer = QMessageBox.question(
+                self,
+                "Nadpisać istniejący plik?",
+                f"Plik już istnieje:\n{path}\n\nNadpisać go atomowo?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return None, False
+            overwrite = True
+        return str(path), overwrite
+
+    def _diagnostics_filename(self) -> str:
+        alias = self.project_selector.currentText().strip() or "project"
+        safe_alias = "".join(char if char.isalnum() or char in "-_" else "_" for char in alias)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        return f"bdb-diagnostics-{safe_alias}-{stamp}.zip"
 
     @Slot(str)
     def _request_control(self, action_text: str) -> None:
@@ -536,10 +662,12 @@ class ControlCenterWindow(QMainWindow):
             if workspace_root is not None:
                 self.status_line.setText(f"Operacja {action} została anulowana przed wykonaniem.")
             return
-        arm_minutes = self.dashboard.arm_minutes
         self._set_global_busy(True, f"Wykonywanie jawnej operacji {action}…")
         worker = ControlWorker(
-            self._operations_service, action, workspace_root, arm_minutes=arm_minutes
+            self._operations_service,
+            action,
+            workspace_root,
+            arm_minutes=self.dashboard.arm_minutes,
         )
         worker.signals.completed.connect(self._apply_control_result)
         self._control_worker = worker
@@ -552,26 +680,17 @@ class ControlCenterWindow(QMainWindow):
         self._mutation_operations_invoked += result.mutation_operations_invoked
         self.dashboard.apply_control_result(result)
         self.control_finished.emit(result)
-        self.status_line.setText(
-            f"Operacja {result.action} zakończona. Pobieram status potwierdzający wynik."
-            if result.ok
-            else f"Operacja {result.action} zakończona błędem: {result.error_code or 'unknown'}. Pobieram status końcowy bez kolejnej mutacji."
-        )
         self._set_global_busy(False)
         self._start_status_read()
 
     def _confirm_control(self, action: ControlAction, workspace_root: str) -> bool:
         if self._confirmation_provider is not None:
             return bool(self._confirmation_provider(action, workspace_root))
-        titles = {
-            "start": "Uruchomić BDB?",
-            "stop": "Zatrzymać BDB?",
-            "rearm": "Ponownie uzbroić Native Hosta?",
-        }
+        titles = {"start": "Uruchomić BDB?", "stop": "Zatrzymać BDB?", "rearm": "Uzbroić hosta?"}
         descriptions = {
-            "start": f"Uruchomiony zostanie promoter i Bridge, a Native Host zostanie uzbrojony na {self.dashboard.arm_minutes} minut.",
-            "stop": "Native Host zostanie rozbrojony, a Bridge i promoter zatrzymane kooperacyjnie. Journal, logi, wyniki, receipts i worktree zostaną zachowane.",
-            "rearm": f"Bieżący Native Host zostanie jawnie uzbrojony na {self.dashboard.arm_minutes} minut.",
+            "start": f"Bridge i promoter zostaną uruchomione, host uzbrojony na {self.dashboard.arm_minutes} minut.",
+            "stop": "Bridge i promoter zostaną zatrzymane kooperacyjnie; Journal i worktree pozostaną.",
+            "rearm": f"Native Host zostanie uzbrojony na {self.dashboard.arm_minutes} minut.",
         }
         answer = QMessageBox.question(
             self,
@@ -595,6 +714,8 @@ class ControlCenterWindow(QMainWindow):
                 self._control_worker,
                 self._current_operation_worker,
                 self._history_worker,
+                self._diagnostics_worker,
+                self._diagnostics_export_worker,
             )
         )
 
@@ -606,80 +727,22 @@ class ControlCenterWindow(QMainWindow):
             and self._last_snapshot.ok
             and bool(self._last_snapshot.projects)
         )
-        self.dashboard.set_busy(busy, message)
-        self.current_operation_view.set_busy(busy, message)
-        self.history_view.set_busy(busy, message)
+        for view in (
+            self.dashboard,
+            self.current_operation_view,
+            self.history_view,
+            self.diagnostics_view,
+        ):
+            view.set_busy(busy, message)
         if message:
             self.status_line.setText(message)
 
     @Slot(int)
     def _select_page(self, index: int) -> None:
-        if index < 0 or index >= len(NAVIGATION):
-            return
-        self.pages.setCurrentIndex(index)
-        self.page_title.setText(NAVIGATION[index][0])
-        self.page_subtitle.setText(NAVIGATION[index][1])
+        if 0 <= index < len(NAVIGATION):
+            self.pages.setCurrentIndex(index)
+            self.page_title.setText(NAVIGATION[index][0])
+            self.page_subtitle.setText(NAVIGATION[index][1])
 
-    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         super().closeEvent(event)
-
-    def _apply_style(self) -> None:
-        self.setStyleSheet(
-            """
-            QMainWindow, #AppShell, #Content { background: #f4f6f8; color: #172033; }
-            #Sidebar { background: #111827; color: #f8fafc; }
-            #BrandMark { color: #93c5fd; font-size: 12px; font-weight: 800; letter-spacing: 3px; }
-            #BrandTitle { color: #ffffff; font-size: 23px; font-weight: 700; }
-            #BrandSubtitle { color: #94a3b8; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
-            #Navigation { background: transparent; color: #cbd5e1; outline: 0; }
-            #Navigation::item { padding: 12px 13px; border-radius: 8px; }
-            #Navigation::item:hover { background: #1f2937; color: #ffffff; }
-            #Navigation::item:selected { background: #2563eb; color: #ffffff; }
-            #SafetyPanel { background: #172033; border: 1px solid #29364b; border-radius: 10px; }
-            #SafetyTitle { color: #86efac; font-size: 10px; font-weight: 800; letter-spacing: 1px; }
-            #SafetyText { color: #aebbd0; font-size: 11px; }
-            #PageTitle { color: #111827; font-size: 25px; font-weight: 700; }
-            #PageSubtitle { color: #64748b; font-size: 12px; }
-            #ProjectSelector, #RefreshButton { min-height: 34px; border-radius: 7px; }
-            #ProjectSelector { background: #ffffff; border: 1px solid #d7dde6; padding: 0 10px; }
-            #RefreshButton { background: #ffffff; border: 1px solid #cbd5e1; padding: 0 14px; color: #1e293b; }
-            #RefreshButton:hover { background: #eef2f7; }
-            #RefreshButton:disabled { color: #94a3b8; background: #eef2f7; }
-            #StatusCard, #HeroPanel, #RuntimeCard, #ControlPanel, #PlaceholderPanel,
-            #OperationHeroPanel, #OperationDetailsPanel, #HistoryHeroPanel,
-            #HistoryFiltersPanel, #HistoryDetailsPanel {
-                background: #ffffff; border: 1px solid #dfe5ec; border-radius: 12px;
-            }
-            #StatusCardTitle, #RuntimeCardTitle, #ControlTitle, #OperationSectionTitle,
-            #HistorySectionTitle { color: #64748b; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
-            #StatusCardValue, #RuntimeCardValue { color: #111827; font-size: 19px; font-weight: 700; }
-            #StatusCardDetail, #RuntimeCardDetail, #ControlDescription, #HeroText, #PlaceholderText,
-            #OperationFeedback, #OperationFieldLabel, #HistoryFeedback {
-                color: #64748b; font-size: 11px;
-            }
-            #HeroTitle, #PlaceholderTitle { color: #172033; font-size: 18px; font-weight: 700; }
-            #OverallStatus, #OperationState {
-                color: #1d4ed8; background: #eff6ff; border: 1px solid #bfdbfe;
-                border-radius: 7px; padding: 6px 10px; font-size: 11px; font-weight: 800;
-            }
-            #OperationFieldValue, #HistoryDetails { color: #1e293b; font-size: 11px; font-family: Consolas; }
-            #RefreshStatusButton, #StartButton, #StopButton, #RearmButton, #RefreshOperationButton,
-            #RefreshHistoryButton, #LoadMoreHistoryButton {
-                min-height: 34px; border-radius: 7px; padding: 0 14px; font-weight: 600;
-            }
-            #RefreshStatusButton, #RefreshOperationButton, #RefreshHistoryButton,
-            #LoadMoreHistoryButton { background: #ffffff; border: 1px solid #cbd5e1; color: #1e293b; }
-            #StartButton { background: #166534; border: 1px solid #14532d; color: #ffffff; }
-            #StopButton { background: #991b1b; border: 1px solid #7f1d1d; color: #ffffff; }
-            #RearmButton { background: #1d4ed8; border: 1px solid #1e40af; color: #ffffff; }
-            QPushButton:disabled { background: #e5e7eb; border-color: #d1d5db; color: #9ca3af; }
-            #ArmMinutesSpin { min-height: 32px; min-width: 82px; }
-            #ArmMinutesLabel { color: #475569; font-size: 11px; }
-            #ControlFeedback { color: #475569; font-size: 11px; }
-            #StatusLine { color: #64748b; font-size: 11px; }
-            #HistoryTable { background: #ffffff; border: 1px solid #dfe5ec; gridline-color: #e5e7eb; }
-            #HistorySessionFilter, #HistoryCommandFilter, #HistoryLimitSpin {
-                min-height: 32px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px;
-            }
-            """
-        )
