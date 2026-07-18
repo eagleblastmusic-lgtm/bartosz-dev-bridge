@@ -14,6 +14,11 @@ class OperatorErrorCode(StrEnum):
     COMMAND_FAILED = "command_failed"
     COMMAND_TIMEOUT = "command_timeout"
     INVALID_RESPONSE = "invalid_response"
+    OBSERVABILITY_CONFIG_MISSING = "observability_config_missing"
+    OBSERVABILITY_CONFIG_INVALID = "observability_config_invalid"
+    JOURNAL_MISSING = "journal_missing"
+    JOURNAL_UNAVAILABLE = "journal_unavailable"
+    LOG_READ_FAILED = "log_read_failed"
     INTERNAL_ERROR = "internal_error"
 
 

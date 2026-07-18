@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-event-v1",
+  "title": "BDB operator event projection v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "event_id",
+    "sequence",
+    "event_type",
+    "occurred_at",
+    "source",
+    "severity",
+    "correlation_id",
+    "session_id",
+    "command_id",
+    "payload"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-event-v1" },
+    "event_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "event_type": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "source": {
+      "enum": ["bridge", "native_host", "promoter", "operator", "project"]
+    },
+    "severity": { "enum": ["info", "warning", "error"] },
+    "correlation_id": { "type": ["string", "null"], "maxLength": 256 },
+    "session_id": { "type": ["string", "null"], "maxLength": 256 },
+    "command_id": { "type": ["string", "null"], "maxLength": 256 },
+    "payload": { "type": "object" }
+  }
+}
