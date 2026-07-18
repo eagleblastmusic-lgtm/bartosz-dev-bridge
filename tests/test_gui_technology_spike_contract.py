@@ -21,17 +21,19 @@ def test_p05_decision_and_probe_exist() -> None:
         assert path.stat().st_size > 0
 
 
-def test_probe_is_valid_python_and_remains_outside_production_package() -> None:
+def test_probe_is_valid_python_and_remains_separate_from_production_package() -> None:
     ast.parse(read(PROBE))
-    assert not (ROOT / "bdb_gui").exists()
+    assert (ROOT / "bdb_gui").is_dir()
     assert PROBE.parts[-3:-1] == ("spikes", "gui")
+    assert not str(PROBE.relative_to(ROOT)).startswith("bdb_gui/")
 
 
-def test_pyside6_is_optional_and_not_a_base_dependency() -> None:
+def test_pyside6_remains_optional_after_p06() -> None:
     pyproject = read(PYPROJECT)
     assert "dependencies = []" in pyproject
+    assert 'gui = ["PySide6-Essentials>=6.10,<6.12"]' in pyproject
     assert 'gui-spike = ["PySide6-Essentials>=6.10,<6.12"]' in pyproject
-    assert "bdb_gui*" not in pyproject
+    assert 'include = ["bdb_bridge*", "bdb_operator*", "bdb_gui*", "bdb_poc*"]' in pyproject
 
 
 def test_decision_selects_widgets_and_preserves_fallback() -> None:

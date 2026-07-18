@@ -10,6 +10,7 @@ ADR-y opisują decyzje architektoniczne, których kolejne etapy nie powinny zmie
 | [0004](0004-in-process-operator-api-with-json-cli.md) | Accepted | Operator API v1 działa in-process i udostępnia lokalny JSON CLI bez listenera sieciowego. |
 | [0005](0005-read-only-journal-event-projection.md) | Accepted | Eventy i bieżąca operacja są projekcją Journalu otwieranego przez SQLite `mode=ro`, bez migracji i zapisów. |
 | [0006](0006-pyside6-qt-widgets-for-control-center-mvp.md) | Accepted | MVP Control Center użyje opcjonalnego PySide6 + Qt Widgets i publicznego Operator API in-process. |
+| [0007](0007-read-only-asynchronous-gui-bootstrap.md) | Accepted | Okno uruchamia jawny, asynchroniczny bootstrap korzystający wyłącznie z odczytów `capabilities` i `list_projects`. |
 
 Dokument nadrzędny P02: [BDB Control Center — zamrożone granice](../BDB_CONTROL_CENTER_BOUNDARIES.md).
 

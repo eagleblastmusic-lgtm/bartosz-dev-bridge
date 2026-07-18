@@ -67,18 +67,23 @@ def test_gui_is_read_only_on_open_and_mutations_are_explicit() -> None:
     assert "Operacje zmieniające stan wymagają jawnego działania użytkownika" in events
 
 
-def test_p03_introduces_only_the_operator_runtime_package() -> None:
+def test_p06_introduces_gui_but_not_future_bartosz_os_runtime() -> None:
     assert (ROOT / "bdb_operator").is_dir()
-    for path in (
-        ROOT / "bdb_gui",
-        ROOT / "bdb_bartosz_os",
-    ):
-        assert not path.exists(), f"P03 unexpectedly introduced future runtime package: {path.name}"
+    assert (ROOT / "bdb_gui").is_dir()
+    assert not (ROOT / "bdb_bartosz_os").exists()
 
 
-def test_core_does_not_depend_on_operator_or_future_ui_layers() -> None:
+def test_core_does_not_depend_on_operator_or_ui_layers() -> None:
     forbidden = ("bdb_operator", "bdb_gui", "bdb_bartosz_os")
     for path in (ROOT / "bdb_bridge").rglob("*.py"):
+        source = read(path)
+        for token in forbidden:
+            assert token not in source, f"Forbidden dependency {token} found in {path.relative_to(ROOT)}"
+
+
+def test_operator_does_not_depend_on_gui_or_future_os_adapter() -> None:
+    forbidden = ("bdb_gui", "bdb_bartosz_os")
+    for path in (ROOT / "bdb_operator").rglob("*.py"):
         source = read(path)
         for token in forbidden:
             assert token not in source, f"Forbidden dependency {token} found in {path.relative_to(ROOT)}"
