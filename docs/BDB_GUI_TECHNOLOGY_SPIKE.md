@@ -54,7 +54,7 @@ Skala ocen: `1` — słabo, `5` — bardzo dobrze.
 | wdrożenie i diagnostyka MVP | 15 | 4 | 5 | 3 |
 | zgodność z aktualnym toolchainem projektu | 10 | 5 | 2 | 2 |
 | możliwość późniejszej wymiany powłoki | 10 | 4 | 4 | 4 |
-| **wynik ważony / 5** | **100** | **4,50** | **3,10** | **3,15** |
+| **wynik ważony / 5** | **100** | **4,45** | **3,15** | **3,00** |
 
 ## Decyzja
 
