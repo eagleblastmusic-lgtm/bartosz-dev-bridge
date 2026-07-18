@@ -31,13 +31,18 @@ def test_production_gui_packages_and_entrypoint_exist() -> None:
         GUI / "state.py",
         GUI / "bootstrap.py",
         GUI / "operations.py",
+        GUI / "current_operation.py",
+        GUI / "current_operation_view.py",
         GUI / "workers.py",
         GUI / "dashboard.py",
         GUI / "main_window.py",
         GUI / "app.py",
         ROOT / "docs" / "BDB_CONTROL_CENTER_SKELETON.md",
+        ROOT / "docs" / "BDB_CONTROL_CENTER_PROCESS_CONTROLS.md",
+        ROOT / "docs" / "BDB_CONTROL_CENTER_CURRENT_OPERATION.md",
         ROOT / "docs" / "adr" / "0007-read-only-asynchronous-gui-bootstrap.md",
         ROOT / "docs" / "adr" / "0008-explicit-serialized-process-controls.md",
+        ROOT / "docs" / "adr" / "0009-read-only-current-operation-view.md",
     )
     for path in expected:
         assert path.is_file(), f"Missing GUI artifact: {path.relative_to(ROOT)}"
@@ -66,6 +71,9 @@ def test_gui_depends_only_on_public_operator_boundary() -> None:
 
     assert "from bdb_operator import OperatorApi, OperatorResponse" in read(GUI / "bootstrap.py")
     assert "from bdb_operator import OperatorApi, OperatorResponse" in read(GUI / "operations.py")
+    assert "from bdb_operator import OperatorApi, OperatorResponse" in read(
+        GUI / "current_operation.py"
+    )
 
 
 def test_gui_has_no_process_network_or_git_execution_surface() -> None:
@@ -128,7 +136,9 @@ def test_window_constructor_does_not_start_io_or_mutate() -> None:
     )
     constructor_calls = attribute_calls(constructor)
     assert "start_bootstrap" not in constructor_calls
-    assert constructor_calls.isdisjoint({"read_status", "execute", "prepare", "stop", "rearm"})
+    assert constructor_calls.isdisjoint(
+        {"read", "read_status", "execute", "prepare", "stop", "rearm"}
+    )
 
     for forbidden in (
         "self._bootstrap_service.prepare(",
@@ -137,6 +147,7 @@ def test_window_constructor_does_not_start_io_or_mutate() -> None:
         "self._bootstrap_service.rearm(",
         "self._operations_service.execute(",
         "self._operations_service.read_status(",
+        "self._current_operation_service.read(",
     ):
         assert forbidden not in source
     assert "self._thread_pool.start(worker)" in source
@@ -144,6 +155,7 @@ def test_window_constructor_does_not_start_io_or_mutate() -> None:
     assert "BootstrapWorker" in source
     assert "StatusWorker" in source
     assert "ControlWorker" in source
+    assert "CurrentOperationWorker" in source
 
 
 def test_p07_process_controls_are_closed_explicit_and_confirmed() -> None:
@@ -160,6 +172,21 @@ def test_p07_process_controls_are_closed_explicit_and_confirmed() -> None:
     assert "self._has_active_task()" in window
     assert "self._start_status_read()" in window
     assert "EXPLICIT MUTATIONS" in window
+
+
+def test_p08_current_operation_is_read_only_and_uses_existing_projection() -> None:
+    service = read(GUI / "current_operation.py")
+    view = read(GUI / "current_operation_view.py")
+    window = read(GUI / "main_window.py")
+
+    assert "self._operator.current_operation(workspace_root)" in service
+    for forbidden in (".start(", ".stop(", ".rearm(", ".prepare(", ".events(", ".logs("):
+        assert forbidden not in service
+    assert 'QPushButton("Odśwież operację")' in view
+    assert "READ-ONLY JOURNAL PROJECTION" in view
+    assert "CurrentOperationWidget" in window
+    assert "CurrentOperationWorker" in window
+    assert "self._current_operation_worker" in window
 
 
 def test_gui_contains_no_background_polling_loop() -> None:
