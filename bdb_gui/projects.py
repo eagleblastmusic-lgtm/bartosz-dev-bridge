@@ -4,14 +4,14 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Iterable, Protocol
 
 from bdb_operator import OperatorApi, OperatorResponse
 
 
 GUI_PREPARE_PLAN_SCHEMA = "bdb-gui-prepare-plan-v1"
 GUI_PREPARE_RESULT_SCHEMA = "bdb-gui-prepare-result-v1"
-_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_ALIAS = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 MAX_ALLOWED_PATHS = 100
 
 
@@ -22,13 +22,8 @@ class PrepareOperator(Protocol):
         *,
         source_repo: str | Path,
         alias: str,
-        allowed_paths: Sequence[str],
-        native_config: str | Path | None = None,
-        test_timeout_seconds: int = 120,
-        max_patch_bytes: int = 262_144,
-        max_changed_files: int = 20,
-        auto_send_max_bytes: int = 24_000,
-        worker_timeout_seconds: int = 240,
+        allowed_paths: Iterable[str],
+        test_timeout_seconds: float = 120.0,
         python_executable: str | Path | None = None,
     ) -> OperatorResponse:
         ...
@@ -42,11 +37,6 @@ class PreparePlan:
     allowed_paths: tuple[str, ...]
     python_executable: str
     test_timeout_seconds: int
-    max_patch_bytes: int
-    max_changed_files: int
-    auto_send_max_bytes: int
-    worker_timeout_seconds: int
-    native_config: str | None = None
     requires_confirmation: bool = True
     preflight_owner: str = "existing_prepare_workspace_loop"
     read_only: bool = True
@@ -62,11 +52,6 @@ class PreparePlan:
             "allowed_paths": list(self.allowed_paths),
             "python_executable": self.python_executable,
             "test_timeout_seconds": self.test_timeout_seconds,
-            "max_patch_bytes": self.max_patch_bytes,
-            "max_changed_files": self.max_changed_files,
-            "auto_send_max_bytes": self.auto_send_max_bytes,
-            "worker_timeout_seconds": self.worker_timeout_seconds,
-            "native_config": self.native_config,
             "requires_confirmation": self.requires_confirmation,
             "preflight_owner": self.preflight_owner,
             "read_only": self.read_only,
@@ -127,18 +112,13 @@ class ProjectPrepareService:
         workspaces_root: str | Path,
         alias: str,
         source_repo: str | Path,
-        allowed_paths: Sequence[str],
+        allowed_paths: Iterable[str],
         python_executable: str | Path | None = None,
-        native_config: str | Path | None = None,
         test_timeout_seconds: int = 120,
-        max_patch_bytes: int = 262_144,
-        max_changed_files: int = 20,
-        auto_send_max_bytes: int = 24_000,
-        worker_timeout_seconds: int = 240,
     ) -> PreparePlan:
         normalized_alias = alias.strip()
         if not _ALIAS.fullmatch(normalized_alias):
-            raise ValueError("alias must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+            raise ValueError("alias must match ^[a-z][a-z0-9-]{0,31}$")
 
         workspace_parent = Path(workspaces_root).expanduser().resolve(strict=False)
         if not workspace_parent.is_dir():
@@ -154,23 +134,14 @@ class ProjectPrepareService:
         source = Path(source_repo).expanduser().resolve(strict=False)
         if not source.is_dir() or not source.joinpath(".git").exists():
             raise ValueError("source_repo must be an existing non-bare Git checkout")
-        if workspace_parent == source or workspace_parent in source.parents:
-            raise ValueError("workspaces_root must not be inside source_repo")
+        if source == workspace_root or source in workspace_root.parents:
+            raise ValueError("workspace_root must stay outside source_repo")
 
         paths = _normalize_allowed_paths(allowed_paths)
         python = Path(python_executable or sys.executable).expanduser().resolve(strict=False)
         if not python.is_file():
             raise ValueError("python_executable must be an existing file")
-        native = (
-            str(Path(native_config).expanduser().resolve(strict=False))
-            if native_config is not None and str(native_config).strip()
-            else None
-        )
         _bounded_int("test_timeout_seconds", test_timeout_seconds, 1, 3_600)
-        _bounded_int("max_patch_bytes", max_patch_bytes, 1, 16_777_216)
-        _bounded_int("max_changed_files", max_changed_files, 1, 1_000)
-        _bounded_int("auto_send_max_bytes", auto_send_max_bytes, 1, 1_048_576)
-        _bounded_int("worker_timeout_seconds", worker_timeout_seconds, 1, 3_600)
 
         return PreparePlan(
             alias=normalized_alias,
@@ -178,12 +149,7 @@ class ProjectPrepareService:
             source_repo=str(source),
             allowed_paths=paths,
             python_executable=str(python),
-            native_config=native,
             test_timeout_seconds=test_timeout_seconds,
-            max_patch_bytes=max_patch_bytes,
-            max_changed_files=max_changed_files,
-            auto_send_max_bytes=auto_send_max_bytes,
-            worker_timeout_seconds=worker_timeout_seconds,
         )
 
     def execute(self, plan: PreparePlan) -> PrepareResult:
@@ -194,18 +160,13 @@ class ProjectPrepareService:
             source_repo=plan.source_repo,
             alias=plan.alias,
             allowed_paths=plan.allowed_paths,
-            native_config=plan.native_config,
             test_timeout_seconds=plan.test_timeout_seconds,
-            max_patch_bytes=plan.max_patch_bytes,
-            max_changed_files=plan.max_changed_files,
-            auto_send_max_bytes=plan.auto_send_max_bytes,
-            worker_timeout_seconds=plan.worker_timeout_seconds,
             python_executable=plan.python_executable,
         )
         return PrepareResult.from_response(plan, response)
 
 
-def _normalize_allowed_paths(values: Sequence[str]) -> tuple[str, ...]:
+def _normalize_allowed_paths(values: Iterable[str]) -> tuple[str, ...]:
     if isinstance(values, (str, bytes)):
         raise ValueError("allowed_paths must be a sequence of path patterns")
     normalized: list[str] = []
