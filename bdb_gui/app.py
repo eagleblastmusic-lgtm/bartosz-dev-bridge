@@ -67,6 +67,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .bootstrap import BootstrapService
         from .operations import ProjectOperationsService
         from .project_window import ProjectControlCenterWindow
+        from .tray import TrayController
+        from .tray_window import TrayProjectControlCenterWindow
     except ImportError as error:
         report = {
             "schema": SMOKE_SCHEMA,
@@ -82,16 +84,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     application = QApplication.instance() or QApplication(["bdb-control-center"])
     application.setApplicationName("BDB Control Center")
     application.setOrganizationName("Bartosz Dev Bridge")
-    application.setQuitOnLastWindowClosed(True)
+    application.setQuitOnLastWindowClosed(args.headless_smoke)
 
-    window = ProjectControlCenterWindow(
-        bootstrap_service=BootstrapService(),
-        operations_service=ProjectOperationsService(),
-        workspaces_root=workspaces_root,
-        # Generic smoke validates construction/bootstrap and all explicit-action
-        # gates without touching a real runtime or invoking Prepare.
-        auto_load_status=not args.headless_smoke,
-    )
+    common = {
+        "bootstrap_service": BootstrapService(),
+        "operations_service": ProjectOperationsService(),
+        "workspaces_root": workspaces_root,
+        "auto_load_status": not args.headless_smoke,
+    }
+    tray_controller: TrayController | None = None
+    if args.headless_smoke:
+        # Smoke never creates a tray icon and never changes close semantics.
+        window = ProjectControlCenterWindow(**common)
+    else:
+        window = TrayProjectControlCenterWindow(**common)
+        tray_controller = TrayController(application, window)
+        window.install_tray_controller(tray_controller)
+        tray_controller.start()
+
     report: dict[str, Any] = {}
     timed_out = False
 
@@ -108,6 +118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "pyside_version": PySide6.__version__,
                 "python_version": platform.python_version(),
                 "qt_platform": os.environ.get("QT_QPA_PLATFORM") or "native",
+                "tray_created": False,
             }
         )
         window.close()
@@ -126,6 +137,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "workspaces_root": workspaces_root,
                 "bootstrap_completed": False,
                 "mutation_operations_invoked": 0,
+                "tray_created": False,
             }
         )
         window.close()
