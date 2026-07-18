@@ -25,19 +25,22 @@ def attribute_calls(tree: ast.AST) -> set[str]:
     return calls
 
 
-def test_p06_production_package_and_entrypoint_exist() -> None:
+def test_production_gui_packages_and_entrypoint_exist() -> None:
     expected = (
         GUI / "__init__.py",
         GUI / "state.py",
         GUI / "bootstrap.py",
+        GUI / "operations.py",
         GUI / "workers.py",
+        GUI / "dashboard.py",
         GUI / "main_window.py",
         GUI / "app.py",
         ROOT / "docs" / "BDB_CONTROL_CENTER_SKELETON.md",
         ROOT / "docs" / "adr" / "0007-read-only-asynchronous-gui-bootstrap.md",
+        ROOT / "docs" / "adr" / "0008-explicit-serialized-process-controls.md",
     )
     for path in expected:
-        assert path.is_file(), f"Missing P06 artifact: {path.relative_to(ROOT)}"
+        assert path.is_file(), f"Missing GUI artifact: {path.relative_to(ROOT)}"
         assert path.stat().st_size > 0
 
     pyproject = read(ROOT / "pyproject.toml")
@@ -61,8 +64,8 @@ def test_gui_depends_only_on_public_operator_boundary() -> None:
                 f"GUI imports BDB Core directly in {path.relative_to(ROOT)}: {names}"
             )
 
-    bootstrap = read(GUI / "bootstrap.py")
-    assert "from bdb_operator import OperatorApi, OperatorResponse" in bootstrap
+    assert "from bdb_operator import OperatorApi, OperatorResponse" in read(GUI / "bootstrap.py")
+    assert "from bdb_operator import OperatorApi, OperatorResponse" in read(GUI / "operations.py")
 
 
 def test_gui_has_no_process_network_or_git_execution_surface() -> None:
@@ -114,7 +117,7 @@ def test_bootstrap_calls_only_capabilities_and_list_projects() -> None:
     assert calls & operator_operations == {"capabilities", "list_projects"}
 
 
-def test_window_constructor_does_not_start_bootstrap_or_mutate() -> None:
+def test_window_constructor_does_not_start_io_or_mutate() -> None:
     source = read(GUI / "main_window.py")
     tree = ast.parse(source)
     window_class = next(
@@ -125,35 +128,38 @@ def test_window_constructor_does_not_start_bootstrap_or_mutate() -> None:
     )
     constructor_calls = attribute_calls(constructor)
     assert "start_bootstrap" not in constructor_calls
-    assert constructor_calls.isdisjoint({"prepare", "stop", "rearm"})
+    assert constructor_calls.isdisjoint({"read_status", "execute", "prepare", "stop", "rearm"})
 
-    # QThreadPool.start(worker) is the allowed way to schedule the read-only
-    # bootstrap. BDB mutations would have to pass through the injected service.
     for forbidden in (
         "self._bootstrap_service.prepare(",
         "self._bootstrap_service.start(",
         "self._bootstrap_service.stop(",
         "self._bootstrap_service.rearm(",
+        "self._operations_service.execute(",
+        "self._operations_service.read_status(",
     ):
         assert forbidden not in source
     assert "self._thread_pool.start(worker)" in source
     assert "QThreadPool" in source
     assert "BootstrapWorker" in source
+    assert "StatusWorker" in source
+    assert "ControlWorker" in source
 
 
-def test_p06_window_has_no_process_control_buttons() -> None:
-    source = read(GUI / "main_window.py")
-    for forbidden_label in (
-        'QPushButton("Start")',
-        'QPushButton("Stop")',
-        'QPushButton("Re-arm")',
-        'QPushButton("Uzbrój")',
-        'QPushButton("Uruchom")',
-        'QPushButton("Zatrzymaj")',
-    ):
-        assert forbidden_label not in source
-    assert 'QPushButton("Odśwież odczyt")' in source
-    assert "READ-ONLY STARTUP" in source
+def test_p07_process_controls_are_closed_explicit_and_confirmed() -> None:
+    dashboard = read(GUI / "dashboard.py")
+    operations = read(GUI / "operations.py")
+    window = read(GUI / "main_window.py")
+
+    for label in ('QPushButton("Start")', 'QPushButton("Stop")', 'QPushButton("Re-arm")'):
+        assert label in dashboard
+    assert 'QPushButton("Odśwież status")' in dashboard
+    assert 'action not in {"start", "stop", "rearm"}' in operations
+    assert "QMessageBox.question" in window
+    assert "confirmation_provider" in window
+    assert "self._has_active_task()" in window
+    assert "self._start_status_read()" in window
+    assert "EXPLICIT MUTATIONS" in window
 
 
 def test_gui_contains_no_background_polling_loop() -> None:

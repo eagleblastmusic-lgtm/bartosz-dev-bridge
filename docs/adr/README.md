@@ -11,6 +11,7 @@ ADR-y opisują decyzje architektoniczne, których kolejne etapy nie powinny zmie
 | [0005](0005-read-only-journal-event-projection.md) | Accepted | Eventy i bieżąca operacja są projekcją Journalu otwieranego przez SQLite `mode=ro`, bez migracji i zapisów. |
 | [0006](0006-pyside6-qt-widgets-for-control-center-mvp.md) | Accepted | MVP Control Center użyje opcjonalnego PySide6 + Qt Widgets i publicznego Operator API in-process. |
 | [0007](0007-read-only-asynchronous-gui-bootstrap.md) | Accepted | Okno uruchamia jawny, asynchroniczny bootstrap korzystający wyłącznie z odczytów `capabilities` i `list_projects`. |
+| [0008](0008-explicit-serialized-process-controls.md) | Accepted | Status pozostaje odczytem, a Start, Stop i re-arm są jawne, potwierdzane i serializowane przez Operator API. |
 
 Dokument nadrzędny P02: [BDB Control Center — zamrożone granice](../BDB_CONTROL_CENTER_BOUNDARIES.md).
 

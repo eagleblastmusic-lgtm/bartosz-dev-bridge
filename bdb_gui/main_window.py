@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from PySide6.QtCore import QThreadPool, Qt, Signal, Slot
 from PySide6.QtGui import QCloseEvent
@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QStackedWidget,
@@ -20,17 +21,26 @@ from PySide6.QtWidgets import (
 )
 
 from .bootstrap import BootstrapService
+from .dashboard import DashboardWidget
+from .operations import (
+    ControlAction,
+    ControlResult,
+    ProjectOperationsService,
+    ProjectStatusSnapshot,
+)
 from .state import BootstrapSnapshot
-from .workers import BootstrapWorker
+from .workers import BootstrapWorker, ControlWorker, StatusWorker
 
 
 NAVIGATION = (
-    ("Dashboard", "Ogólny stan Control Center"),
+    ("Dashboard", "Stan runtime i jawne sterowanie BDB"),
     ("Projects", "Skonfigurowane workspace'y"),
     ("Current operation", "Bieżąca operacja BDB"),
     ("History", "Zdarzenia i historia"),
     ("Diagnostics", "Diagnostyka i wersje"),
 )
+
+ConfirmationProvider = Callable[[ControlAction, str], bool]
 
 
 class StatusCard(QFrame):
@@ -60,25 +70,38 @@ class StatusCard(QFrame):
 
 class ControlCenterWindow(QMainWindow):
     bootstrap_finished = Signal(object)
+    status_finished = Signal(object)
+    control_finished = Signal(object)
+    dashboard_ready = Signal()
 
     def __init__(
         self,
         *,
         bootstrap_service: BootstrapService,
+        operations_service: ProjectOperationsService,
         workspaces_root: str,
+        auto_load_status: bool = True,
+        confirmation_provider: ConfirmationProvider | None = None,
     ) -> None:
         super().__init__()
         self._bootstrap_service = bootstrap_service
+        self._operations_service = operations_service
         self._workspaces_root = workspaces_root
+        self._auto_load_status = bool(auto_load_status)
+        self._confirmation_provider = confirmation_provider
         self._thread_pool = QThreadPool.globalInstance()
-        self._worker: BootstrapWorker | None = None
+        self._bootstrap_worker: BootstrapWorker | None = None
+        self._status_worker: StatusWorker | None = None
+        self._control_worker: ControlWorker | None = None
         self._last_snapshot: BootstrapSnapshot | None = None
-        self._closed_explicitly = False
+        self._last_status: ProjectStatusSnapshot | None = None
+        self._last_control_result: ControlResult | None = None
+        self._mutation_operations_invoked = 0
 
         self.setObjectName("BdbControlCenterWindow")
         self.setWindowTitle("BDB Control Center")
-        self.resize(1160, 760)
-        self.setMinimumSize(920, 620)
+        self.resize(1220, 800)
+        self.setMinimumSize(980, 650)
         self._build_ui()
         self._apply_style()
         self._show_loading_state()
@@ -87,18 +110,27 @@ class ControlCenterWindow(QMainWindow):
     def last_snapshot(self) -> BootstrapSnapshot | None:
         return self._last_snapshot
 
+    @property
+    def last_status(self) -> ProjectStatusSnapshot | None:
+        return self._last_status
+
+    @property
+    def last_control_result(self) -> ControlResult | None:
+        return self._last_control_result
+
     def start_bootstrap(self) -> None:
-        if self._worker is not None:
+        if self._has_active_task():
             return
         self._show_loading_state()
         worker = BootstrapWorker(self._bootstrap_service, self._workspaces_root)
         worker.signals.completed.connect(self._apply_bootstrap_snapshot)
-        self._worker = worker
+        self._bootstrap_worker = worker
         self._thread_pool.start(worker)
 
     def smoke_report(self) -> dict[str, Any]:
         snapshot = self._last_snapshot
-        return {
+        status = self._last_status
+        report = {
             "schema": "bdb-control-center-smoke-v1",
             "window_object_name": self.objectName(),
             "window_constructed": self.objectName() == "BdbControlCenterWindow",
@@ -109,13 +141,17 @@ class ControlCenterWindow(QMainWindow):
             "bootstrap_completed": snapshot is not None,
             "bootstrap_ok": snapshot.ok if snapshot is not None else False,
             "bootstrap_error_code": snapshot.error_code if snapshot is not None else None,
-            "mutation_operations_invoked": (
-                snapshot.mutation_operations_invoked if snapshot is not None else 0
-            ),
+            "mutation_operations_invoked": self._mutation_operations_invoked,
             "operator_network_listener": (
                 snapshot.network_listener if snapshot is not None else None
             ),
+            "selected_workspace_root": self._selected_workspace_root(),
+            "status_read_completed": status is not None,
+            "status_read_ok": status.ok if status is not None else None,
+            "status_error_code": status.error_code if status is not None else None,
         }
+        report.update(self.dashboard.smoke_report())
+        return report
 
     def _build_ui(self) -> None:
         shell = QWidget(self)
@@ -124,10 +160,8 @@ class ControlCenterWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        sidebar = self._build_sidebar()
-        content = self._build_content()
-        root.addWidget(sidebar)
-        root.addWidget(content, 1)
+        root.addWidget(self._build_sidebar())
+        root.addWidget(self._build_content(), 1)
         self.setCentralWidget(shell)
 
     def _build_sidebar(self) -> QWidget:
@@ -166,9 +200,12 @@ class ControlCenterWindow(QMainWindow):
         safety_layout = QVBoxLayout(safety)
         safety_layout.setContentsMargins(12, 11, 12, 11)
         safety_layout.setSpacing(4)
-        safety_title = QLabel("READ-ONLY STARTUP")
+        safety_title = QLabel("EXPLICIT MUTATIONS")
         safety_title.setObjectName("SafetyTitle")
-        safety_text = QLabel("Otwarcie okna nie uruchamia Bridge'a, nie uzbraja hosta i nie modyfikuje repozytoriów.")
+        safety_text = QLabel(
+            "Otwarcie okna pozostaje tylko do odczytu. Start, Stop i re-arm wymagają "
+            "osobnego kliknięcia oraz potwierdzenia."
+        )
         safety_text.setObjectName("SafetyText")
         safety_text.setWordWrap(True)
         safety_layout.addWidget(safety_title)
@@ -198,12 +235,13 @@ class ControlCenterWindow(QMainWindow):
 
         self.project_selector = QComboBox()
         self.project_selector.setObjectName("ProjectSelector")
-        self.project_selector.setMinimumWidth(240)
+        self.project_selector.setMinimumWidth(260)
         self.project_selector.setEnabled(False)
         self.project_selector.addItem("Ładowanie projektów…")
+        self.project_selector.currentIndexChanged.connect(self._project_selected)
         header.addWidget(self.project_selector)
 
-        self.refresh_button = QPushButton("Odśwież odczyt")
+        self.refresh_button = QPushButton("Odśwież projekty")
         self.refresh_button.setObjectName("RefreshButton")
         self.refresh_button.clicked.connect(self.start_bootstrap)
         header.addWidget(self.refresh_button)
@@ -212,10 +250,30 @@ class ControlCenterWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.pages.setObjectName("Pages")
         self.pages.addWidget(self._build_dashboard_page())
-        self.pages.addWidget(self._placeholder_page("Projects", "Lista i szczegóły projektów zostaną rozwinięte w P07/P11."))
-        self.pages.addWidget(self._placeholder_page("Current operation", "Widok bieżącej operacji zostanie podłączony w P08."))
-        self.pages.addWidget(self._placeholder_page("History", "Historia eventów i Journal zostaną rozwinięte w P09."))
-        self.pages.addWidget(self._placeholder_page("Diagnostics", "Eksport diagnostyczny i wersje zostaną rozwinięte w P10."))
+        self.pages.addWidget(
+            self._placeholder_page(
+                "Projects",
+                "Lista projektów jest dostępna w selektorze. Pełny kreator i szczegóły zostaną rozwinięte w P11.",
+            )
+        )
+        self.pages.addWidget(
+            self._placeholder_page(
+                "Current operation",
+                "Widok bieżącej operacji zostanie podłączony w P08.",
+            )
+        )
+        self.pages.addWidget(
+            self._placeholder_page(
+                "History",
+                "Historia eventów i Journal zostaną rozwinięte w P09.",
+            )
+        )
+        self.pages.addWidget(
+            self._placeholder_page(
+                "Diagnostics",
+                "Eksport diagnostyczny i wersje zostaną rozwinięte w P10.",
+            )
+        )
         layout.addWidget(self.pages, 1)
 
         self.status_line = QLabel("Inicjalizacja warstwy tylko do odczytu…")
@@ -227,38 +285,29 @@ class ControlCenterWindow(QMainWindow):
 
     def _build_dashboard_page(self) -> QWidget:
         page = QWidget()
-        page.setObjectName("DashboardPage")
+        page.setObjectName("DashboardContainer")
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(18)
-
-        intro = QFrame()
-        intro.setObjectName("HeroPanel")
-        intro_layout = QVBoxLayout(intro)
-        intro_layout.setContentsMargins(24, 22, 24, 22)
-        intro_layout.setSpacing(7)
-        intro_title = QLabel("Bezpieczny podgląd lokalnego środowiska BDB")
-        intro_title.setObjectName("HeroTitle")
-        intro_text = QLabel(
-            "P06 ładuje wyłącznie capabilities i listę przygotowanych workspace'ów. "
-            "Sterowanie procesami pojawi się dopiero w P07 jako jawne akcje użytkownika."
-        )
-        intro_text.setObjectName("HeroText")
-        intro_text.setWordWrap(True)
-        intro_layout.addWidget(intro_title)
-        intro_layout.addWidget(intro_text)
-        layout.addWidget(intro)
+        layout.setSpacing(14)
 
         cards = QHBoxLayout()
-        cards.setSpacing(14)
-        self.operator_card = StatusCard("Operator API", "Ładowanie")
-        self.projects_card = StatusCard("Projekty", "—")
-        self.safety_card = StatusCard("Tryb startowy", "READ-ONLY", "Brak ukrytych mutacji")
+        cards.setSpacing(12)
+        self.operator_card = StatusCard("OPERATOR API", "Ładowanie")
+        self.projects_card = StatusCard("PROJEKTY", "—")
+        self.safety_card = StatusCard(
+            "TRYB STARTOWY",
+            "READ-ONLY",
+            "Sterowanie wymaga potwierdzenia",
+        )
         for card in (self.operator_card, self.projects_card, self.safety_card):
             card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             cards.addWidget(card)
         layout.addLayout(cards)
-        layout.addStretch(1)
+
+        self.dashboard = DashboardWidget()
+        self.dashboard.refresh_status_requested.connect(self._start_status_read)
+        self.dashboard.control_requested.connect(self._request_control)
+        layout.addWidget(self.dashboard, 1)
         return page
 
     def _placeholder_page(self, title: str, description: str) -> QWidget:
@@ -282,26 +331,27 @@ class ControlCenterWindow(QMainWindow):
         return page
 
     def _show_loading_state(self) -> None:
-        self.refresh_button.setEnabled(False)
-        self.status_line.setText("Pobieranie capabilities i listy projektów w wątku roboczym…")
+        self._set_global_busy(True, "Pobieranie capabilities i listy projektów…")
         self.operator_card.update_value("Ładowanie", "Operator API in-process")
         self.projects_card.update_value("—", self._workspaces_root)
 
     @Slot(object)
     def _apply_bootstrap_snapshot(self, snapshot: BootstrapSnapshot) -> None:
         self._last_snapshot = snapshot
-        self._worker = None
-        self.refresh_button.setEnabled(True)
-        self.project_selector.clear()
+        self._bootstrap_worker = None
+        self._last_status = None
 
+        self.project_selector.blockSignals(True)
+        self.project_selector.clear()
+        has_projects = False
         if snapshot.ok:
             if snapshot.projects:
                 for project in snapshot.projects:
                     self.project_selector.addItem(project.alias, project.workspace_root)
-                self.project_selector.setEnabled(True)
+                self.project_selector.setCurrentIndex(0)
+                has_projects = True
             else:
                 self.project_selector.addItem("Brak przygotowanych projektów")
-                self.project_selector.setEnabled(False)
             self.operator_card.update_value(
                 "GOTOWY",
                 f"{snapshot.operator_transport} · Journal {snapshot.journal_access or 'n/a'}",
@@ -310,17 +360,183 @@ class ControlCenterWindow(QMainWindow):
                 str(len(snapshot.projects)),
                 f"Nieprawidłowe wpisy: {len(snapshot.invalid_entries)}",
             )
-            self.status_line.setText(
-                "Bootstrap zakończony. Okno pozostaje tylko do odczytu; nie wykonano żadnej mutacji."
-            )
         else:
             self.project_selector.addItem("Bootstrap niedostępny")
-            self.project_selector.setEnabled(False)
             self.operator_card.update_value("BŁĄD", snapshot.error_code or "unknown")
             self.projects_card.update_value("—", snapshot.workspaces_root)
-            self.status_line.setText(snapshot.error_message or "Nie udało się załadować bootstrapu.")
+        self.project_selector.blockSignals(False)
+
+        self.project_selector.setEnabled(has_projects)
+        self._set_global_busy(False)
+        if has_projects:
+            alias = self.project_selector.currentText()
+            workspace_root = self._selected_workspace_root()
+            if workspace_root is not None:
+                self.dashboard.set_project(alias, workspace_root)
+        else:
+            self.dashboard.set_project_available(False)
+
+        if snapshot.ok:
+            self.status_line.setText(
+                "Lista projektów załadowana bez mutacji. Wybór projektu może uruchomić wyłącznie odczyt statusu."
+            )
+        else:
+            self.status_line.setText(
+                snapshot.error_message or "Nie udało się załadować bootstrapu."
+            )
 
         self.bootstrap_finished.emit(snapshot)
+        if has_projects and self._auto_load_status:
+            self._start_status_read()
+        else:
+            self.dashboard_ready.emit()
+
+    @Slot(int)
+    def _project_selected(self, index: int) -> None:
+        if index < 0 or self._has_active_task():
+            return
+        workspace_root = self._selected_workspace_root()
+        if workspace_root is None:
+            self.dashboard.set_project_available(False)
+            return
+        self.dashboard.set_project(self.project_selector.currentText(), workspace_root)
+        self._last_status = None
+        if self._auto_load_status:
+            self._start_status_read()
+
+    @Slot()
+    def _start_status_read(self) -> None:
+        if self._has_active_task():
+            return
+        workspace_root = self._selected_workspace_root()
+        if workspace_root is None:
+            self.dashboard.set_project_available(False)
+            return
+        self._set_global_busy(True, "Pobieranie statusu projektu tylko do odczytu…")
+        worker = StatusWorker(self._operations_service, workspace_root)
+        worker.signals.completed.connect(self._apply_status_snapshot)
+        self._status_worker = worker
+        self._thread_pool.start(worker)
+
+    @Slot(object)
+    def _apply_status_snapshot(self, snapshot: ProjectStatusSnapshot) -> None:
+        self._status_worker = None
+        self._last_status = snapshot
+        self._set_global_busy(False)
+        self.dashboard.apply_status(snapshot)
+        if snapshot.ok:
+            self.status_line.setText(
+                f"Status {snapshot.project_alias or 'projektu'}: {snapshot.overall_status or 'UNKNOWN'}. Odczyt nie zmienił stanu BDB."
+            )
+        else:
+            self.status_line.setText(
+                f"Status niedostępny: {snapshot.error_code or 'unknown'} — "
+                f"{snapshot.error_message or 'brak szczegółów'}"
+            )
+        self.status_finished.emit(snapshot)
+        self.dashboard_ready.emit()
+
+    @Slot(str)
+    def _request_control(self, action_text: str) -> None:
+        if action_text not in {"start", "stop", "rearm"} or self._has_active_task():
+            return
+        action: ControlAction = action_text  # type: ignore[assignment]
+        workspace_root = self._selected_workspace_root()
+        if workspace_root is None:
+            return
+        if not self._confirm_control(action, workspace_root):
+            self.status_line.setText(f"Operacja {action} została anulowana przed wykonaniem.")
+            return
+
+        arm_minutes = self.dashboard.arm_minutes
+        self._set_global_busy(True, f"Wykonywanie jawnej operacji {action}…")
+        worker = ControlWorker(
+            self._operations_service,
+            action,
+            workspace_root,
+            arm_minutes=arm_minutes,
+        )
+        worker.signals.completed.connect(self._apply_control_result)
+        self._control_worker = worker
+        self._thread_pool.start(worker)
+
+    @Slot(object)
+    def _apply_control_result(self, result: ControlResult) -> None:
+        self._control_worker = None
+        self._last_control_result = result
+        self._mutation_operations_invoked += result.mutation_operations_invoked
+        self.dashboard.apply_control_result(result)
+        self.control_finished.emit(result)
+
+        if result.ok:
+            self.status_line.setText(
+                f"Operacja {result.action} zakończona. Pobieram status potwierdzający wynik."
+            )
+        else:
+            self.status_line.setText(
+                f"Operacja {result.action} zakończona błędem: {result.error_code or 'unknown'}. "
+                "Pobieram status końcowy bez wykonywania kolejnej mutacji."
+            )
+        self._set_global_busy(False)
+        self._start_status_read()
+
+    def _confirm_control(self, action: ControlAction, workspace_root: str) -> bool:
+        if self._confirmation_provider is not None:
+            return bool(self._confirmation_provider(action, workspace_root))
+
+        titles = {
+            "start": "Uruchomić BDB?",
+            "stop": "Zatrzymać BDB?",
+            "rearm": "Ponownie uzbroić Native Hosta?",
+        }
+        descriptions = {
+            "start": (
+                "Uruchomiony zostanie promoter i Bridge, a Native Host zostanie uzbrojony "
+                f"na {self.dashboard.arm_minutes} minut."
+            ),
+            "stop": (
+                "Native Host zostanie rozbrojony, a Bridge i promoter zatrzymane kooperacyjnie. "
+                "Journal, logi, wyniki, receipts i worktree zostaną zachowane."
+            ),
+            "rearm": (
+                "Bieżący Native Host zostanie jawnie uzbrojony "
+                f"na {self.dashboard.arm_minutes} minut."
+            ),
+        }
+        answer = QMessageBox.question(
+            self,
+            titles[action],
+            f"Projekt: {self.project_selector.currentText()}\n\n{descriptions[action]}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _selected_workspace_root(self) -> str | None:
+        value = self.project_selector.currentData()
+        return value if isinstance(value, str) and value else None
+
+    def _has_active_task(self) -> bool:
+        return any(
+            worker is not None
+            for worker in (
+                self._bootstrap_worker,
+                self._status_worker,
+                self._control_worker,
+            )
+        )
+
+    def _set_global_busy(self, busy: bool, message: str = "") -> None:
+        self.refresh_button.setEnabled(not busy)
+        self.project_selector.setEnabled(
+            not busy
+            and self._last_snapshot is not None
+            and self._last_snapshot.ok
+            and bool(self._last_snapshot.projects)
+        )
+        self.dashboard.set_busy(busy, message)
+        if message:
+            self.status_line.setText(message)
 
     @Slot(int)
     def _select_page(self, index: int) -> None:
@@ -331,7 +547,6 @@ class ControlCenterWindow(QMainWindow):
         self.page_subtitle.setText(NAVIGATION[index][1])
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
-        self._closed_explicitly = True
         super().closeEvent(event)
 
     def _apply_style(self) -> None:
@@ -356,13 +571,35 @@ class ControlCenterWindow(QMainWindow):
             #RefreshButton { background: #ffffff; border: 1px solid #cbd5e1; padding: 0 14px; color: #1e293b; }
             #RefreshButton:hover { background: #eef2f7; }
             #RefreshButton:disabled { color: #94a3b8; background: #eef2f7; }
-            #HeroPanel, #StatusCard, #PlaceholderPanel { background: #ffffff; border: 1px solid #dfe5ec; border-radius: 12px; }
-            #HeroTitle { color: #172033; font-size: 18px; font-weight: 700; }
-            #HeroText, #PlaceholderText { color: #64748b; font-size: 12px; }
-            #StatusCardTitle { color: #64748b; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
-            #StatusCardValue { color: #111827; font-size: 20px; font-weight: 700; }
-            #StatusCardDetail { color: #64748b; font-size: 11px; }
-            #PlaceholderTitle { color: #172033; font-size: 20px; font-weight: 700; }
+            #StatusCard, #HeroPanel, #RuntimeCard, #ControlPanel, #PlaceholderPanel {
+                background: #ffffff; border: 1px solid #dfe5ec; border-radius: 12px;
+            }
+            #StatusCardTitle, #RuntimeCardTitle, #ControlTitle {
+                color: #64748b; font-size: 10px; font-weight: 700; letter-spacing: 1px;
+            }
+            #StatusCardValue, #RuntimeCardValue { color: #111827; font-size: 19px; font-weight: 700; }
+            #StatusCardDetail, #RuntimeCardDetail, #ControlDescription, #HeroText, #PlaceholderText {
+                color: #64748b; font-size: 11px;
+            }
+            #HeroTitle, #PlaceholderTitle { color: #172033; font-size: 18px; font-weight: 700; }
+            #OverallStatus {
+                color: #1d4ed8; background: #eff6ff; border: 1px solid #bfdbfe;
+                border-radius: 7px; padding: 6px 10px; font-size: 11px; font-weight: 800;
+            }
+            #RefreshStatusButton, #StartButton, #StopButton, #RearmButton {
+                min-height: 34px; border-radius: 7px; padding: 0 14px; font-weight: 600;
+            }
+            #RefreshStatusButton { background: #ffffff; border: 1px solid #cbd5e1; color: #1e293b; }
+            #StartButton { background: #166534; border: 1px solid #14532d; color: #ffffff; }
+            #StopButton { background: #991b1b; border: 1px solid #7f1d1d; color: #ffffff; }
+            #RearmButton { background: #1d4ed8; border: 1px solid #1e40af; color: #ffffff; }
+            #RefreshStatusButton:disabled, #StartButton:disabled, #StopButton:disabled, #RearmButton:disabled {
+                background: #e5e7eb; border-color: #d1d5db; color: #9ca3af;
+            }
+            #ArmMinutesSpin { min-height: 32px; min-width: 82px; }
+            #ArmMinutesLabel { color: #475569; font-size: 11px; }
+            #ControlFeedback { color: #475569; font-size: 11px; }
+            #ControlFeedback[busy="true"] { color: #1d4ed8; }
             #StatusLine { color: #64748b; font-size: 11px; }
             """
         )
