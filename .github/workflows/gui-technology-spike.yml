@@ -15,10 +15,12 @@ on:
       - "docs/BDB_CONTROL_CENTER_SKELETON.md"
       - "docs/BDB_CONTROL_CENTER_PROCESS_CONTROLS.md"
       - "docs/BDB_CONTROL_CENTER_CURRENT_OPERATION.md"
+      - "docs/BDB_CONTROL_CENTER_HISTORY.md"
       - "docs/adr/0006-pyside6-qt-widgets-for-control-center-mvp.md"
       - "docs/adr/0007-read-only-asynchronous-gui-bootstrap.md"
       - "docs/adr/0008-explicit-serialized-process-controls.md"
       - "docs/adr/0009-read-only-current-operation-view.md"
+      - "docs/adr/0010-bounded-manual-journal-history.md"
       - "docs/adr/README.md"
 
 permissions:
@@ -69,6 +71,14 @@ jobs:
           tests/test_gui_current_operation_service.py
           tests/test_gui_current_operation_view.py
           tests/test_gui_current_operation_window.py
+      - name: Run bounded Journal history tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -m pytest -vv
+          tests/test_gui_history_service.py
+          tests/test_gui_history_view.py
+          tests/test_gui_history_window.py
       - name: Run P05 PySide6 probe regression
         env:
           QT_QPA_PLATFORM: offscreen
@@ -84,9 +94,7 @@ jobs:
         run: |
           $report = Join-Path $env:RUNNER_TEMP "pyside6-probe.json"
           python spikes/gui/pyside6_probe.py --headless-smoke --json-out $report
-          if ($LASTEXITCODE -ne 0) {
-            throw "PySide6 headless probe failed"
-          }
+          if ($LASTEXITCODE -ne 0) { throw "PySide6 headless probe failed" }
           $data = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
           if (
             $data.status -ne "success" -or
@@ -106,15 +114,8 @@ jobs:
           $workspaces = Join-Path $env:RUNNER_TEMP "bdb-control-center-workspaces"
           $report = Join-Path $env:RUNNER_TEMP "bdb-control-center-smoke.json"
           New-Item -ItemType Directory -Path $workspaces -Force | Out-Null
-
-          python -m bdb_gui.app `
-            --workspaces-root $workspaces `
-            --headless-smoke `
-            --json-out $report
-          if ($LASTEXITCODE -ne 0) {
-            throw "Production Control Center headless smoke failed"
-          }
-
+          python -m bdb_gui.app --workspaces-root $workspaces --headless-smoke --json-out $report
+          if ($LASTEXITCODE -ne 0) { throw "Production Control Center headless smoke failed" }
           $data = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
           if (
             $data.status -ne "success" -or
@@ -126,18 +127,21 @@ jobs:
             $data.project_count -ne 0 -or
             $data.action_controls_present -ne $true -or
             $data.confirmation_required -ne $true -or
-            $data.arm_minutes_min -ne 1 -or
-            $data.arm_minutes_max -ne 60 -or
             $data.current_operation_view_present -ne $true -or
             $data.current_operation_read_only -ne $true -or
-            $data.current_operation_refresh_present -ne $true -or
             $data.current_operation_loaded -ne $false -or
+            $data.history_view_present -ne $true -or
+            $data.history_read_only -ne $true -or
+            $data.history_pagination_present -ne $true -or
+            $data.history_filters_present -ne $true -or
+            $data.history_loaded -ne $false -or
+            $data.history_event_count -ne 0 -or
             $data.mutation_operations_invoked -ne 0 -or
             $data.operator_network_listener -ne $false -or
             $data.event_loop_exit_code -ne 0 -or
             $data.timed_out -ne $false
           ) {
             $data | ConvertTo-Json -Depth 8 | Write-Host
-            throw "Control Center smoke report violates the P08 contract"
+            throw "Control Center smoke report violates the P09 contract"
           }
           $data | ConvertTo-Json -Depth 8 | Write-Host
