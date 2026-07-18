@@ -13,6 +13,7 @@ ADR-y opisują decyzje architektoniczne, których kolejne etapy nie powinny zmie
 | [0007](0007-read-only-asynchronous-gui-bootstrap.md) | Accepted | Okno uruchamia jawny, asynchroniczny bootstrap korzystający wyłącznie z odczytów `capabilities` i `list_projects`. |
 | [0008](0008-explicit-serialized-process-controls.md) | Accepted | Status pozostaje odczytem, a Start, Stop i re-arm są jawne, potwierdzane i serializowane przez Operator API. |
 | [0009](0009-read-only-current-operation-view.md) | Accepted | Bieżąca operacja jest ręcznie odświeżaną, read-only projekcją P04 bez bezpośredniego dostępu GUI do Journalu. |
+| [0010](0010-bounded-manual-journal-history.md) | Accepted | Historia Journalu jest ręczna, read-only, filtrowana i stronicowana bounded cursorem Operator API. |
 
 Dokument nadrzędny P02: [BDB Control Center — zamrożone granice](../BDB_CONTROL_CENTER_BOUNDARIES.md).
 
