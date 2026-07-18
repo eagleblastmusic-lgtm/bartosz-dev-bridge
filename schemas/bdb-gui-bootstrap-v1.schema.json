@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-gui-bootstrap-v1",
+  "title": "BDB Control Center bootstrap snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "workspaces_root",
+    "ok",
+    "read_only",
+    "mutation_operations_invoked",
+    "operator",
+    "projects",
+    "invalid_entries",
+    "error"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-gui-bootstrap-v1" },
+    "workspaces_root": { "type": "string", "minLength": 1 },
+    "ok": { "type": "boolean" },
+    "read_only": { "const": true },
+    "mutation_operations_invoked": { "const": 0 },
+    "operator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "transport", "network_listener", "journal_access"],
+      "properties": {
+        "schema": { "type": ["string", "null"] },
+        "transport": { "type": ["string", "null"] },
+        "network_listener": { "type": ["boolean", "null"] },
+        "journal_access": { "type": ["string", "null"] }
+      }
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "alias",
+          "workspace_root",
+          "source_repo",
+          "source_branch",
+          "configured_status",
+          "allowed_paths"
+        ],
+        "properties": {
+          "schema": { "const": "bdb-gui-project-v1" },
+          "alias": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+          "workspace_root": { "type": "string", "minLength": 1 },
+          "source_repo": { "type": "string", "minLength": 1 },
+          "source_branch": { "type": "string", "minLength": 1 },
+          "configured_status": { "type": "string", "minLength": 1 },
+          "allowed_paths": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "invalid_entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "code"],
+        "properties": {
+          "path": { "type": "string" },
+          "code": { "type": "string" }
+        }
+      }
+    },
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": ["string", "null"] },
+            "message": { "type": ["string", "null"] }
+          }
+        }
+      ]
+    }
+  }
+}
