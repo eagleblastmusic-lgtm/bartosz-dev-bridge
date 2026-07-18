@@ -6,15 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from bdb_gui.bootstrap import BootstrapService
-from bdb_gui.project_window import ProjectControlCenterWindow
-from bdb_gui.projects import PreparePlan, ProjectPrepareService
-from bdb_gui.state import BootstrapSnapshot
-from bdb_operator.models import OperatorResponse
-
-
 pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication  # noqa: E402
+
+from bdb_gui.bootstrap import BootstrapService  # noqa: E402
+from bdb_gui.project_window import ProjectControlCenterWindow  # noqa: E402
+from bdb_gui.projects import PreparePlan, ProjectPrepareService  # noqa: E402
+from bdb_gui.state import BootstrapSnapshot  # noqa: E402
+from bdb_operator.models import OperatorResponse  # noqa: E402
 
 
 class FakeBootstrapService:
