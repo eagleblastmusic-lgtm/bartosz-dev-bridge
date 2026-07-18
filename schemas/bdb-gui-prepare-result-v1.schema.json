@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-gui-prepare-result-v1",
+  "title": "BDB GUI project prepare result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "plan", "ok", "operation_id", "project_alias",
+    "operator_data", "mutation_operations_invoked", "error"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-gui-prepare-result-v1" },
+    "plan": { "$ref": "bdb-gui-prepare-plan-v1" },
+    "ok": { "type": "boolean" },
+    "operation_id": { "type": "string" },
+    "project_alias": { "type": ["string", "null"] },
+    "operator_data": { "type": "object" },
+    "mutation_operations_invoked": { "const": 1 },
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": ["string", "null"] },
+            "message": { "type": ["string", "null"] }
+          }
+        }
+      ]
+    }
+  }
+}
