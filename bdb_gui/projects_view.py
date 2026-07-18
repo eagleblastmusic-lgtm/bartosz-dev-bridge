@@ -46,6 +46,7 @@ class ProjectsWidget(QWidget):
             self.feedback_label.setText(message)
 
     def apply_plan(self, plan: PreparePlan) -> None:
+        self.ack_checkbox.setChecked(False)
         self._plan = plan
         self.set_busy(False)
         self.plan_preview.setPlainText(
@@ -58,6 +59,7 @@ class ProjectsWidget(QWidget):
         self._update_enabled_state()
 
     def apply_plan_error(self, code: str, message: str) -> None:
+        self.ack_checkbox.setChecked(False)
         self._plan = None
         self.set_busy(False)
         self.plan_state.setText("PLAN NIEPRAWIDŁOWY")
@@ -70,6 +72,7 @@ class ProjectsWidget(QWidget):
         self.plan_preview.setPlainText(
             json.dumps(result.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
         )
+        self.ack_checkbox.setChecked(False)
         if result.ok:
             self.plan_state.setText("PROJEKT PRZYGOTOWANY")
             self.feedback_label.setText(
@@ -97,12 +100,7 @@ class ProjectsWidget(QWidget):
             "source_repo": self.source_edit.text(),
             "allowed_paths": self.allowed_paths_edit.toPlainText().splitlines(),
             "python_executable": self.python_edit.text(),
-            "native_config": self.native_config_edit.text() or None,
             "test_timeout_seconds": self.test_timeout_spin.value(),
-            "max_patch_bytes": self.max_patch_bytes_spin.value(),
-            "max_changed_files": self.max_changed_files_spin.value(),
-            "auto_send_max_bytes": self.auto_send_max_bytes_spin.value(),
-            "worker_timeout_seconds": self.worker_timeout_spin.value(),
         }
 
     def _build_ui(self) -> None:
@@ -152,21 +150,11 @@ class ProjectsWidget(QWidget):
         self.python_edit = QLineEdit(sys.executable)
         self.python_edit.setObjectName("ProjectPythonEdit")
         form_layout.addRow("Python", self.python_edit)
-        self.native_config_edit = QLineEdit()
-        self.native_config_edit.setObjectName("ProjectNativeConfigEdit")
-        self.native_config_edit.setPlaceholderText("puste = domyślna konfiguracja Native Host")
-        form_layout.addRow("Native config", self.native_config_edit)
-
-        self.test_timeout_spin = self._spin(1, 3600, 120)
+        self.test_timeout_spin = QSpinBox()
+        self.test_timeout_spin.setRange(1, 3600)
+        self.test_timeout_spin.setValue(120)
+        self.test_timeout_spin.setGroupSeparatorShown(True)
         form_layout.addRow("Test timeout (s)", self.test_timeout_spin)
-        self.max_patch_bytes_spin = self._spin(1, 16_777_216, 262_144)
-        form_layout.addRow("Max patch bytes", self.max_patch_bytes_spin)
-        self.max_changed_files_spin = self._spin(1, 1000, 20)
-        form_layout.addRow("Max changed files", self.max_changed_files_spin)
-        self.auto_send_max_bytes_spin = self._spin(1, 1_048_576, 24_000)
-        form_layout.addRow("AUTO send max bytes", self.auto_send_max_bytes_spin)
-        self.worker_timeout_spin = self._spin(1, 3600, 240)
-        form_layout.addRow("Worker timeout (s)", self.worker_timeout_spin)
         body.addWidget(form_panel, 2)
 
         preview_panel = QFrame()
@@ -192,7 +180,9 @@ class ProjectsWidget(QWidget):
         actions.addWidget(self.ack_checkbox, 1)
         self.plan_button = QPushButton("Zbuduj plan")
         self.plan_button.setObjectName("BuildPreparePlanButton")
-        self.plan_button.clicked.connect(lambda: self.plan_requested.emit(self.request_payload()))
+        self.plan_button.clicked.connect(
+            lambda _checked=False: self.plan_requested.emit(self.request_payload())
+        )
         actions.addWidget(self.plan_button)
         self.prepare_button = QPushButton("Przygotuj projekt")
         self.prepare_button.setObjectName("ExecutePrepareButton")
@@ -205,40 +195,27 @@ class ProjectsWidget(QWidget):
         self.feedback_label.setWordWrap(True)
         layout.addWidget(self.feedback_label)
 
-    def _spin(self, minimum: int, maximum: int, value: int) -> QSpinBox:
-        spin = QSpinBox()
-        spin.setRange(minimum, maximum)
-        spin.setValue(value)
-        spin.setGroupSeparatorShown(True)
-        return spin
-
     def _connect_invalidation(self) -> None:
-        for edit in (self.alias_edit, self.source_edit, self.python_edit, self.native_config_edit):
+        for edit in (self.alias_edit, self.source_edit, self.python_edit):
             edit.textChanged.connect(self._invalidate_plan)
         self.allowed_paths_edit.textChanged.connect(self._invalidate_plan)
-        for spin in (
-            self.test_timeout_spin,
-            self.max_patch_bytes_spin,
-            self.max_changed_files_spin,
-            self.auto_send_max_bytes_spin,
-            self.worker_timeout_spin,
-        ):
-            spin.valueChanged.connect(self._invalidate_plan)
+        self.test_timeout_spin.valueChanged.connect(self._invalidate_plan)
         self.ack_checkbox.toggled.connect(self._update_enabled_state)
 
-    def _invalidate_plan(self, *args: object) -> None:
+    def _invalidate_plan(self, *_args: object) -> None:
         if self._plan is None:
             return
         self._plan = None
+        self.ack_checkbox.setChecked(False)
         self.plan_state.setText("PLAN WYMAGA PONOWNEJ WALIDACJI")
         self.feedback_label.setText("Zmiana formularza unieważniła poprzedni plan.")
         self._update_enabled_state()
 
-    def _emit_prepare(self) -> None:
+    def _emit_prepare(self, *_args: object) -> None:
         if self._plan is not None and self.ack_checkbox.isChecked():
             self.prepare_requested.emit(self._plan)
 
-    def _update_enabled_state(self, *args: object) -> None:
+    def _update_enabled_state(self, *_args: object) -> None:
         self.plan_button.setEnabled(not self._busy)
         self.prepare_button.setEnabled(
             not self._busy and self._plan is not None and self.ack_checkbox.isChecked()
