@@ -31,6 +31,9 @@ def test_content_script_restores_panel_when_chatgpt_removes_panel_but_keeps_code
             const vm = require("node:vm");
 
             const extensionDir = process.argv[2];
+            const manifest = JSON.parse(
+              fs.readFileSync(path.join(extensionDir, "manifest.json"), "utf8")
+            );
 
             class FakeClassList {
               constructor() {
@@ -161,10 +164,14 @@ def test_content_script_restores_panel_when_chatgpt_removes_panel_but_keeps_code
             context.globalThis = context;
             vm.createContext(context);
 
-            const scriptPath = path.join(extensionDir, "content.js");
-            vm.runInContext(fs.readFileSync(scriptPath, "utf8"), context, {
-              filename: scriptPath
-            });
+            const scripts = manifest.content_scripts[0].js;
+            assert.deepEqual(scripts, ["content.js", "content_rerender.js"]);
+            for (const scriptName of scripts) {
+              const scriptPath = path.join(extensionDir, scriptName);
+              vm.runInContext(fs.readFileSync(scriptPath, "utf8"), context, {
+                filename: scriptPath
+              });
+            }
             assert.equal(typeof context.scan, "function");
             assert.equal(typeof observerCallback, "function");
 
