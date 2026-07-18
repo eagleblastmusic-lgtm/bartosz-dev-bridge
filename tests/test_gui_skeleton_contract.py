@@ -33,6 +33,8 @@ def test_production_gui_packages_and_entrypoint_exist() -> None:
         GUI / "operations.py",
         GUI / "current_operation.py",
         GUI / "current_operation_view.py",
+        GUI / "history.py",
+        GUI / "history_view.py",
         GUI / "workers.py",
         GUI / "dashboard.py",
         GUI / "main_window.py",
@@ -40,9 +42,11 @@ def test_production_gui_packages_and_entrypoint_exist() -> None:
         ROOT / "docs" / "BDB_CONTROL_CENTER_SKELETON.md",
         ROOT / "docs" / "BDB_CONTROL_CENTER_PROCESS_CONTROLS.md",
         ROOT / "docs" / "BDB_CONTROL_CENTER_CURRENT_OPERATION.md",
+        ROOT / "docs" / "BDB_CONTROL_CENTER_HISTORY.md",
         ROOT / "docs" / "adr" / "0007-read-only-asynchronous-gui-bootstrap.md",
         ROOT / "docs" / "adr" / "0008-explicit-serialized-process-controls.md",
         ROOT / "docs" / "adr" / "0009-read-only-current-operation-view.md",
+        ROOT / "docs" / "adr" / "0010-bounded-manual-journal-history.md",
     )
     for path in expected:
         assert path.is_file(), f"Missing GUI artifact: {path.relative_to(ROOT)}"
@@ -69,25 +73,14 @@ def test_gui_depends_only_on_public_operator_boundary() -> None:
                 f"GUI imports BDB Core directly in {path.relative_to(ROOT)}: {names}"
             )
 
-    assert "from bdb_operator import OperatorApi, OperatorResponse" in read(GUI / "bootstrap.py")
-    assert "from bdb_operator import OperatorApi, OperatorResponse" in read(GUI / "operations.py")
-    assert "from bdb_operator import OperatorApi, OperatorResponse" in read(
-        GUI / "current_operation.py"
-    )
+    for path in (GUI / "bootstrap.py", GUI / "operations.py", GUI / "current_operation.py", GUI / "history.py"):
+        assert "from bdb_operator import OperatorApi, OperatorResponse" in read(path)
 
 
 def test_gui_has_no_process_network_or_git_execution_surface() -> None:
     forbidden_import_roots = {
-        "subprocess",
-        "socket",
-        "socketserver",
-        "http",
-        "urllib",
-        "requests",
-        "aiohttp",
-        "websockets",
-        "fastapi",
-        "flask",
+        "subprocess", "socket", "socketserver", "http", "urllib", "requests",
+        "aiohttp", "websockets", "fastapi", "flask",
     }
     for path in python_sources():
         tree = ast.parse(read(path), filename=str(path))
@@ -111,16 +104,8 @@ def test_bootstrap_calls_only_capabilities_and_list_projects() -> None:
     tree = ast.parse(read(GUI / "bootstrap.py"))
     calls = attribute_calls(tree)
     operator_operations = {
-        "capabilities",
-        "list_projects",
-        "status",
-        "events",
-        "current_operation",
-        "logs",
-        "prepare",
-        "start",
-        "stop",
-        "rearm",
+        "capabilities", "list_projects", "status", "events", "current_operation",
+        "logs", "prepare", "start", "stop", "rearm",
     }
     assert calls & operator_operations == {"capabilities", "list_projects"}
 
@@ -136,9 +121,7 @@ def test_window_constructor_does_not_start_io_or_mutate() -> None:
     )
     constructor_calls = attribute_calls(constructor)
     assert "start_bootstrap" not in constructor_calls
-    assert constructor_calls.isdisjoint(
-        {"read", "read_status", "execute", "prepare", "stop", "rearm"}
-    )
+    assert constructor_calls.isdisjoint({"read", "read_status", "execute", "prepare", "stop", "rearm"})
 
     for forbidden in (
         "self._bootstrap_service.prepare(",
@@ -148,21 +131,18 @@ def test_window_constructor_does_not_start_io_or_mutate() -> None:
         "self._operations_service.execute(",
         "self._operations_service.read_status(",
         "self._current_operation_service.read(",
+        "self._history_service.read(",
     ):
         assert forbidden not in source
     assert "self._thread_pool.start(worker)" in source
-    assert "QThreadPool" in source
-    assert "BootstrapWorker" in source
-    assert "StatusWorker" in source
-    assert "ControlWorker" in source
-    assert "CurrentOperationWorker" in source
+    for worker in ("BootstrapWorker", "StatusWorker", "ControlWorker", "CurrentOperationWorker", "HistoryWorker"):
+        assert worker in source
 
 
 def test_p07_process_controls_are_closed_explicit_and_confirmed() -> None:
     dashboard = read(GUI / "dashboard.py")
     operations = read(GUI / "operations.py")
     window = read(GUI / "main_window.py")
-
     for label in ('QPushButton("Start")', 'QPushButton("Stop")', 'QPushButton("Re-arm")'):
         assert label in dashboard
     assert 'QPushButton("Odśwież status")' in dashboard
@@ -178,7 +158,6 @@ def test_p08_current_operation_is_read_only_and_uses_existing_projection() -> No
     service = read(GUI / "current_operation.py")
     view = read(GUI / "current_operation_view.py")
     window = read(GUI / "main_window.py")
-
     assert "self._operator.current_operation(workspace_root)" in service
     for forbidden in (".start(", ".stop(", ".rearm(", ".prepare(", ".events(", ".logs("):
         assert forbidden not in service
@@ -186,7 +165,23 @@ def test_p08_current_operation_is_read_only_and_uses_existing_projection() -> No
     assert "READ-ONLY JOURNAL PROJECTION" in view
     assert "CurrentOperationWidget" in window
     assert "CurrentOperationWorker" in window
-    assert "self._current_operation_worker" in window
+
+
+def test_p09_history_is_bounded_manual_and_read_only() -> None:
+    service = read(GUI / "history.py")
+    view = read(GUI / "history_view.py")
+    window = read(GUI / "main_window.py")
+    assert "self._operator.events(" in service
+    assert "MAX_HISTORY_LIMIT = 500" in service
+    assert "after_event_id" in service
+    assert "next_after_event_id" in service
+    assert 'QPushButton("Odśwież historię")' in view
+    assert 'QPushButton("Wczytaj więcej")' in view
+    assert "HistoryWidget" in window
+    assert "HistoryWorker" in window
+    for forbidden in ("sqlite3", "SELECT ", "INSERT ", "UPDATE ", "DELETE "):
+        assert forbidden not in service
+        assert forbidden not in view
 
 
 def test_gui_contains_no_background_polling_loop() -> None:
