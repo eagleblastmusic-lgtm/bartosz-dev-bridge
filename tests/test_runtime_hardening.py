@@ -145,19 +145,47 @@ def test_clean_workspace_context_uses_canonical_git_blob_bytes(tmp_path: Path) -
     (repo / "README.md").write_bytes(source)
     git(repo, "add", "README.md")
     git(repo, "commit", "-m", "initial")
+    head = git(repo, "rev-parse", "HEAD")
+
+    runtime = tmp_path / "runtime"
+    promotions = runtime / "promotions"
+    promotions.mkdir(parents=True)
+    physical_hash = "sha256:" + "f" * 64
+    (promotions / "receipt.json").write_text(
+        json.dumps(
+            {
+                "schema": "bdb-workspace-promotion-v1",
+                "status": "promoted",
+                "command_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:000001",
+                "source_commit": head,
+                "promoted_at": "2026-07-18T15:52:50.000000Z",
+                "changed_files": ["README.md"],
+                "file_sha256": {"README.md": physical_hash},
+            }
+        ),
+        encoding="utf-8",
+    )
 
     config = SimpleNamespace(
         fixture_repo_path=str(repo),
         allowed_paths=("README.md",),
-        runtime_dir=str(tmp_path / "runtime"),
+        runtime_dir=str(runtime),
     )
     snapshot = WorkspaceContextBuilder(config).build()
     readme = next(
         item for item in snapshot["snapshot_files"] if item["path"] == "README.md"
     )
+    canonical_hash = "sha256:" + hashlib.sha256(source).hexdigest()
 
     assert snapshot["snapshot_source"] == "git_blobs"
     assert snapshot["capabilities"]["canonical_git_blob_hashes"] is True
     assert readme["content"] == source.decode("utf-8")
     assert readme["bytes"] == len(source)
-    assert readme["sha256"] == "sha256:" + hashlib.sha256(source).hexdigest()
+    assert readme["sha256"] == canonical_hash
+    assert snapshot["latest_promotion"]["file_sha256"] == {
+        "README.md": canonical_hash
+    }
+    assert snapshot["latest_promotion"]["working_tree_file_sha256"] == {
+        "README.md": physical_hash
+    }
+    assert snapshot["latest_promotion"]["hash_source"] == "git_blobs"
