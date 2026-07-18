@@ -6,6 +6,7 @@ from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 from .bootstrap import BootstrapService
 from .current_operation import CurrentOperationService, CurrentOperationSnapshot
+from .history import HistoryService, HistorySnapshot
 from .operations import ControlAction, ControlResult, ProjectOperationsService, ProjectStatusSnapshot
 from .state import BootstrapSnapshot
 
@@ -150,3 +151,56 @@ class CurrentOperationWorker(QRunnable):
                 error_message=f"{type(error).__name__}: {error}",
             )
         self.signals.completed.emit(snapshot)
+
+
+class HistoryWorkerSignals(QObject):
+    completed = Signal(object, bool)
+
+
+class HistoryWorker(QRunnable):
+    """Reads one bounded Journal event page without mutating BDB."""
+
+    def __init__(
+        self,
+        service: HistoryService,
+        workspace_root: str,
+        *,
+        after_event_id: int,
+        limit: int,
+        session_id: str | None,
+        command_id: str | None,
+        append: bool,
+    ) -> None:
+        super().__init__()
+        self._service = service
+        self._workspace_root = workspace_root
+        self._after_event_id = after_event_id
+        self._limit = limit
+        self._session_id = session_id
+        self._command_id = command_id
+        self._append = append
+        self.signals = HistoryWorkerSignals()
+        self.setAutoDelete(True)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            snapshot = self._service.read(
+                self._workspace_root,
+                after_event_id=self._after_event_id,
+                limit=self._limit,
+                session_id=self._session_id,
+                command_id=self._command_id,
+            )
+        except Exception as error:  # defensive thread boundary
+            snapshot = HistorySnapshot.failure(
+                self._workspace_root,
+                operation_id=f"gui-internal:{uuid4()}",
+                project_alias=None,
+                error_code="gui_history_internal_error",
+                error_message=f"{type(error).__name__}: {error}",
+                after_event_id=self._after_event_id,
+                session_id=self._session_id,
+                command_id=self._command_id,
+            )
+        self.signals.completed.emit(snapshot, self._append)
