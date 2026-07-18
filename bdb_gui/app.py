@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import platform
-import sys
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -67,6 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         from .bootstrap import BootstrapService
         from .main_window import ControlCenterWindow
+        from .operations import ProjectOperationsService
     except ImportError as error:
         report = {
             "schema": SMOKE_SCHEMA,
@@ -86,12 +86,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     window = ControlCenterWindow(
         bootstrap_service=BootstrapService(),
+        operations_service=ProjectOperationsService(),
         workspaces_root=workspaces_root,
+        # The generic smoke validates construction and bootstrap without touching
+        # a real runtime. P07 status/control behavior has a separate injected-service
+        # runtime test and therefore cannot add hidden mutations to this gate.
+        auto_load_status=not args.headless_smoke,
     )
     report: dict[str, Any] = {}
     timed_out = False
 
-    def finish_smoke(snapshot: object) -> None:
+    def finish_smoke() -> None:
         if not args.headless_smoke or report:
             return
         report.update(window.smoke_report())
@@ -128,7 +133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         application.quit()
 
     if args.headless_smoke:
-        window.bootstrap_finished.connect(finish_smoke)
+        window.dashboard_ready.connect(finish_smoke)
         QTimer.singleShot(args.smoke_timeout_ms, fail_timeout)
 
     window.show()
