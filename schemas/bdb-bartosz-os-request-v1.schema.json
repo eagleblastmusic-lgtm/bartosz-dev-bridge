@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-bartosz-os-request-v1",
+  "title": "BDB Bartosz OS adapter request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "request_id", "operation", "parameters", "mutation_authorized"],
+  "properties": {
+    "schema": { "const": "bdb-bartosz-os-request-v1" },
+    "request_id": { "type": "string", "format": "uuid" },
+    "operation": {
+      "enum": [
+        "capabilities", "list_projects", "status", "events", "current_operation", "logs",
+        "prepare", "start", "stop", "rearm"
+      ]
+    },
+    "parameters": { "type": "object" },
+    "mutation_authorized": { "type": "boolean" }
+  }
+}

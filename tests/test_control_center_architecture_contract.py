@@ -67,10 +67,14 @@ def test_gui_is_read_only_on_open_and_mutations_are_explicit() -> None:
     assert "Operacje zmieniające stan wymagają jawnego działania użytkownika" in events
 
 
-def test_p06_introduces_gui_but_not_future_bartosz_os_runtime() -> None:
+def test_p14_introduces_only_the_reserved_adapter_not_bartosz_os_core_runtime() -> None:
     assert (ROOT / "bdb_operator").is_dir()
     assert (ROOT / "bdb_gui").is_dir()
-    assert not (ROOT / "bdb_bartosz_os").exists()
+    assert (ROOT / "bdb_bartosz_os").is_dir()
+    assert (ROOT / "bdb_bartosz_os" / "adapter.py").is_file()
+    assert (ROOT / "manifests" / "bartosz-dev-bridge.module.json").is_file()
+    assert not (ROOT / "bartosz_os_core").exists()
+    assert not (ROOT / "bdb_event_bus").exists()
 
 
 def test_core_does_not_depend_on_operator_or_ui_layers() -> None:
@@ -81,7 +85,7 @@ def test_core_does_not_depend_on_operator_or_ui_layers() -> None:
             assert token not in source, f"Forbidden dependency {token} found in {path.relative_to(ROOT)}"
 
 
-def test_operator_does_not_depend_on_gui_or_future_os_adapter() -> None:
+def test_operator_does_not_depend_on_gui_or_os_adapter() -> None:
     forbidden = ("bdb_gui", "bdb_bartosz_os")
     for path in (ROOT / "bdb_operator").rglob("*.py"):
         source = read(path)

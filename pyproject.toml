@@ -22,7 +22,7 @@ bdb-operator = "bdb_operator.cli:main"
 bdb-control-center = "bdb_gui.app:main"
 
 [tool.setuptools.packages.find]
-include = ["bdb_bridge*", "bdb_operator*", "bdb_gui*", "bdb_release*", "bdb_poc*"]
+include = ["bdb_bridge*", "bdb_operator*", "bdb_gui*", "bdb_release*", "bdb_bartosz_os*", "bdb_poc*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-bartosz-os-response-v1",
+  "title": "BDB Bartosz OS adapter response v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "request_id", "operation", "ok", "adapter_persisted_state",
+    "network_listener", "operator_response", "error"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-bartosz-os-response-v1" },
+    "request_id": { "type": "string" },
+    "operation": { "type": "string" },
+    "ok": { "type": "boolean" },
+    "adapter_persisted_state": { "const": false },
+    "network_listener": { "const": false },
+    "operator_response": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "object" }
+      ]
+    },
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": ["string", "null"] },
+            "message": { "type": ["string", "null"] }
+          }
+        }
+      ]
+    }
+  }
+}
