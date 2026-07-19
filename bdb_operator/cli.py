@@ -16,7 +16,11 @@ def _parser() -> argparse.ArgumentParser:
         default=str(Path(__file__).resolve().parents[1]),
         help="BDB implementation checkout containing scripts/Invoke-BDBWorkspaceLoop.ps1",
     )
-    parser.add_argument("--powershell", default="powershell.exe")
+    parser.add_argument(
+        "--powershell",
+        default=None,
+        help="PowerShell 7 executable path. Defaults to pwsh.exe; Windows PowerShell 5.1 is rejected.",
+    )
     parser.add_argument("--timeout", type=float, default=60.0)
 
     commands = parser.add_subparsers(dest="command", required=True)
