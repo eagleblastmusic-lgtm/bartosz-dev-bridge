@@ -46,6 +46,7 @@ def wait_until(predicate, timeout: float = 5.0) -> None:
 
 
 def test_session_window_installs_two_history_tabs_and_serialized_read(tmp_path: Path) -> None:
+    app = application()
     root, _, _, _ = workspace_fixture(tmp_path)
     window = SessionProjectControlCenterWindow(
         bootstrap_service=UnusedBootstrapService(),  # type: ignore[arg-type]
@@ -77,7 +78,7 @@ def test_session_window_installs_two_history_tabs_and_serialized_read(tmp_path: 
         journal_access="read_only",
     )
     window._apply_bootstrap_snapshot(snapshot)
-    application().processEvents()
+    app.processEvents()
 
     initial = window.smoke_report()
     assert initial["history_tabs_present"] is True
