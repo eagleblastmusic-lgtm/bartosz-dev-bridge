@@ -49,16 +49,18 @@ jobs:
         run: |
           python -m compileall -q bdb_gui
           python -m py_compile spikes/gui/pyside6_probe.py
-      - name: Run GUI architecture and schema contracts
+      - name: Run P05-P11 architecture and schema contracts
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
           python -m pytest -vv
           tests/test_gui_skeleton_contract.py
           tests/test_gui_diagnostics_architecture.py
           tests/test_gui_project_prepare_architecture.py
-          tests/test_gui_tray_architecture.py
           tests/test_gui_schema_contract.py
           tests/test_gui_technology_spike_contract.py
+      - name: Run P12 tray architecture contract
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv tests/test_gui_tray_architecture.py
       - name: Run read-only bootstrap unit tests
         env: { QT_QPA_PLATFORM: offscreen }
         run: python -m pytest -vv tests/test_gui_bootstrap_service.py
