@@ -23,7 +23,7 @@ jobs:
   adapter-contract:
     name: Adapter contract / Python 3.12
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -38,3 +38,5 @@ jobs:
         run: python -m pytest -vv tests/test_bartosz_os_adapter.py
       - name: Run module manifest and architecture gates
         run: python -m pytest -vv tests/test_bartosz_os_manifest_contract.py
+      - name: Report first repository-wide regression
+        run: python -m pytest -x --tb=line -q
