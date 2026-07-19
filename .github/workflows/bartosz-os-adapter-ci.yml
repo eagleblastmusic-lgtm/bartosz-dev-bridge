@@ -38,5 +38,15 @@ jobs:
         run: python -m pytest -vv tests/test_bartosz_os_adapter.py
       - name: Run module manifest and architecture gates
         run: python -m pytest -vv tests/test_bartosz_os_manifest_contract.py
-      - name: Report first repository-wide regression
+      - name: Run P13 release metadata regressions
+        run: >-
+          python -m pytest -vv
+          tests/test_release_manifest.py
+          tests/test_release_packaging_contract.py
+      - name: Run GUI package discovery regressions
+        run: >-
+          python -m pytest -vv
+          tests/test_gui_skeleton_contract.py
+          tests/test_gui_technology_spike_contract.py
+      - name: Report first remaining repository-wide regression
         run: python -m pytest -x --tb=line -q
