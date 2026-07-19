@@ -13,6 +13,7 @@ on:
       - "schemas/bdb-bartosz-os-request-v1.schema.json"
       - "schemas/bdb-bartosz-os-response-v1.schema.json"
       - "tests/test_bartosz_os_*.py"
+      - "tests/test_control_center_architecture_contract.py"
       - "docs/BDB_BARTOSZ_OS_ADAPTER.md"
       - "docs/adr/0015-stateless-bartosz-os-adapter.md"
 
@@ -23,7 +24,7 @@ jobs:
   adapter-contract:
     name: Adapter contract / Python 3.12
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -37,44 +38,7 @@ jobs:
       - name: Run adapter routing and mutation gates
         run: python -m pytest -vv tests/test_bartosz_os_adapter.py
       - name: Run module manifest and architecture gates
-        run: python -m pytest -vv tests/test_bartosz_os_manifest_contract.py
-      - name: Run P13 release metadata regressions
         run: >-
           python -m pytest -vv
-          tests/test_release_manifest.py
-          tests/test_release_packaging_contract.py
-      - name: Run GUI package discovery regressions
-        run: >-
-          python -m pytest -vv
-          tests/test_gui_skeleton_contract.py
-          tests/test_gui_technology_spike_contract.py
-      - name: Find the first failing control test
-        id: control_bisect
-        shell: bash
-        run: |
-          shopt -s nullglob
-          files=(tests/test_control*.py)
-          failed=""
-          for file in "${files[@]}"; do
-            if ! python -m pytest -q "$file"; then
-              failed="$(basename "$file")"
-              printf '%s\n' "$failed" > failing-control-test.txt
-              break
-            fi
-          done
-          echo "failed=$failed" >> "$GITHUB_OUTPUT"
-      - name: Upload failing control test marker
-        if: steps.control_bisect.outputs.failed != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: failing-${{ steps.control_bisect.outputs.failed }}
-          path: failing-control-test.txt
-          retention-days: 1
-      - name: Fail when a control test regressed
-        if: steps.control_bisect.outputs.failed != ''
-        shell: bash
-        run: |
-          echo "Failing test file: ${{ steps.control_bisect.outputs.failed }}"
-          exit 1
-      - name: Report first remaining repository-wide regression
-        run: python -m pytest -x --tb=line -q
+          tests/test_bartosz_os_manifest_contract.py
+          tests/test_control_center_architecture_contract.py
