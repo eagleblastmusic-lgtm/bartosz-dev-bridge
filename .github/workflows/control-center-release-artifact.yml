@@ -33,7 +33,7 @@ jobs:
           tests/test_release_manifest.py
           tests/test_release_packaging_contract.py
       - name: Build one-directory Control Center
-        shell: powershell
+        shell: pwsh
         run: |
           python -m PyInstaller `
             --noconfirm `
@@ -49,30 +49,55 @@ jobs:
             packaging/windows/control_center_entry.py
           if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
       - name: Smoke the bundled executable
-        shell: powershell
+        shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
           $workspaces = Join-Path $env:RUNNER_TEMP "bdb-release-smoke-workspaces"
           $report = Join-Path $env:RUNNER_TEMP "bdb-release-smoke.json"
+          $executable = Join-Path $PWD "dist\BDB-Control-Center\BDB-Control-Center.exe"
           New-Item -ItemType Directory -Path $workspaces -Force | Out-Null
-          & .\dist\BDB-Control-Center\BDB-Control-Center.exe `
-            --workspaces-root $workspaces `
-            --headless-smoke `
-            --json-out $report
-          if ($LASTEXITCODE -ne 0) { throw "Bundled Control Center smoke failed" }
-          $data = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+
+          $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $startInfo.FileName = $executable
+          $startInfo.UseShellExecute = $false
+          foreach ($argument in @(
+            "--workspaces-root",
+            $workspaces,
+            "--headless-smoke",
+            "--json-out",
+            $report
+          )) {
+            [void]$startInfo.ArgumentList.Add($argument)
+          }
+
+          $process = [System.Diagnostics.Process]::Start($startInfo)
+          if ($null -eq $process) { throw "Bundled Control Center process did not start" }
+          $process.WaitForExit()
+          $smokeExitCode = $process.ExitCode
+
+          if (-not (Test-Path -LiteralPath $report -PathType Leaf)) {
+            throw "Bundled Control Center smoke failed with exit code $smokeExitCode and produced no report"
+          }
+
+          $rawReport = Get-Content -LiteralPath $report -Raw
+          Write-Host "=== BUNDLED SMOKE REPORT ==="
+          Write-Host $rawReport
+          $data = $rawReport | ConvertFrom-Json
+
+          if ($smokeExitCode -ne 0) {
+            throw "Bundled Control Center smoke failed with exit code $smokeExitCode"
+          }
           if (
             $data.status -ne "success" -or
             $data.read_only_startup -ne $true -or
             $data.mutation_operations_invoked -ne 0 -or
             $data.tray_created -ne $false
           ) {
-            $data | ConvertTo-Json -Depth 8 | Write-Host
             throw "Bundled smoke violates the Control Center contract"
           }
       - name: Create ZIP and manifest
-        shell: powershell
+        shell: pwsh
         run: |
           $release = Join-Path $PWD "release"
           New-Item -ItemType Directory -Path $release -Force | Out-Null
