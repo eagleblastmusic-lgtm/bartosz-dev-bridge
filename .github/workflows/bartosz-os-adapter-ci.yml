@@ -48,47 +48,33 @@ jobs:
           python -m pytest -vv
           tests/test_gui_skeleton_contract.py
           tests/test_gui_technology_spike_contract.py
-      - name: Bisect command tests
-        shell: bash
-        run: |
-          shopt -s nullglob
-          files=(tests/test_command*.py)
-          ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
-      - name: Bisect config tests
-        shell: bash
-        run: |
-          shopt -s nullglob
-          files=(tests/test_config*.py)
-          ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
-      - name: Bisect content tests
-        shell: bash
-        run: |
-          shopt -s nullglob
-          files=(tests/test_content*.py)
-          ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
-      - name: Bisect contract tests
-        shell: bash
-        run: |
-          shopt -s nullglob
-          files=(tests/test_contract*.py)
-          ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
-      - name: Bisect control tests
+      - name: Find the first failing control test
+        id: control_bisect
         shell: bash
         run: |
           shopt -s nullglob
           files=(tests/test_control*.py)
-          ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
-      - name: Bisect current tests
+          failed=""
+          for file in "${files[@]}"; do
+            if ! python -m pytest -q "$file"; then
+              failed="$(basename "$file")"
+              printf '%s\n' "$failed" > failing-control-test.txt
+              break
+            fi
+          done
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+      - name: Upload failing control test marker
+        if: steps.control_bisect.outputs.failed != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: failing-${{ steps.control_bisect.outputs.failed }}
+          path: failing-control-test.txt
+          retention-days: 1
+      - name: Fail when a control test regressed
+        if: steps.control_bisect.outputs.failed != ''
         shell: bash
         run: |
-          shopt -s nullglob
-          files=(tests/test_current*.py)
-          ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
-      - name: Bisect other CO tests
-        shell: bash
-        run: |
-          shopt -s nullglob
-          files=(tests/test_co*.py)
-          ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
+          echo "Failing test file: ${{ steps.control_bisect.outputs.failed }}"
+          exit 1
       - name: Report first remaining repository-wide regression
         run: python -m pytest -x --tb=line -q
