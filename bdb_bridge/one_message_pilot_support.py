@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -13,6 +14,12 @@ from .native_messaging import encode_native_message, read_native_message
 
 ORIGIN = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"
 ALIAS = "calculator2"
+_NATIVE_SHIM = (
+    "import sys; "
+    "from bdb_bridge.native_host import main; "
+    "sys.argv = ['bdb-native-host', *sys.argv[1:]]; "
+    "main()"
+)
 
 
 def canonical_time(value: datetime) -> str:
@@ -25,8 +32,7 @@ def sha256_value(content: bytes) -> str:
 
 def content_fields(content: bytes) -> dict[str, str]:
     return {
-        "content_encoding": "utf-8",
-        "content": content.decode("utf-8"),
+        "content_base64": base64.b64encode(content).decode("ascii"),
         "content_sha256": sha256_value(content),
     }
 
@@ -167,7 +173,7 @@ def submit_patch(
         "bdb_action": action,
     }
     completed = run(
-        [python_executable, "-m", "bdb_bridge.native_host", ORIGIN, "--config", str(native_config)],
+        [python_executable, "-c", _NATIVE_SHIM, ORIGIN, "--config", str(native_config)],
         cwd=repo_root,
         input_bytes=encode_native_message(request),
     )
