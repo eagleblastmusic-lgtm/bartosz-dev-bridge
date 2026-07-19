@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -10,6 +10,8 @@ from bdb_operator import OperatorApi, OperatorResponse
 GUI_SESSION_HISTORY_SCHEMA = "bdb-gui-session-history-v1"
 GUI_SESSION_SCHEMA = "bdb-gui-session-summary-v1"
 GUI_SESSION_ATTEMPT_SCHEMA = "bdb-gui-session-attempt-v1"
+GUI_REPAIR_GROUP_SCHEMA = "bdb-gui-repair-group-v1"
+REPAIR_CORRELATION_SCHEMA = "bdb-repair-correlation-v1"
 MAX_SESSION_HISTORY_LIMIT = 100
 
 
@@ -76,6 +78,105 @@ class PromotionReceiptSummary:
 
 
 @dataclass(frozen=True)
+class RepairCorrelationSummary:
+    correlation_id: str
+    role: str
+    predecessor_session_id: str | None
+    schema: str = REPAIR_CORRELATION_SCHEMA
+
+    @classmethod
+    def from_document(cls, document: dict[str, Any], *, session_id: str) -> "RepairCorrelationSummary":
+        if document.get("schema") != REPAIR_CORRELATION_SCHEMA:
+            raise ValueError("Repair correlation schema is unsupported")
+        correlation_id = _required_string(document, "correlation_id")
+        role = _required_string(document, "role")
+        predecessor = _optional_string(document.get("predecessor_session_id"), "predecessor_session_id")
+        if role == "initial":
+            if predecessor is not None:
+                raise ValueError("Initial repair correlation cannot have a predecessor")
+        elif role == "repair":
+            if predecessor is None or predecessor == session_id:
+                raise ValueError("Repair correlation requires a distinct predecessor")
+        else:
+            raise ValueError("Repair correlation role is unsupported")
+        return cls(correlation_id, role, predecessor)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "correlation_id": self.correlation_id,
+            "role": self.role,
+            "predecessor_session_id": self.predecessor_session_id,
+        }
+
+
+@dataclass(frozen=True)
+class RepairGroupSummary:
+    correlation_id: str
+    verified: bool
+    initial_session_id: str | None
+    repair_session_ids: tuple[str, ...]
+    session_ids: tuple[str, ...]
+    edges: tuple[tuple[str, str], ...]
+    warnings: tuple[str, ...]
+    relationship_inferred: bool
+    schema: str = GUI_REPAIR_GROUP_SCHEMA
+
+    @classmethod
+    def from_document(cls, document: dict[str, Any]) -> "RepairGroupSummary":
+        if document.get("schema") != "bdb-repair-group-v1":
+            raise ValueError("Operator repair group schema is unsupported")
+        inferred = _required_bool(document, "relationship_inferred")
+        if inferred:
+            raise ValueError("Inferred repair relationships are forbidden")
+        edges_raw = document.get("edges")
+        if not isinstance(edges_raw, list):
+            raise ValueError("Repair group edges must be an array")
+        edges: list[tuple[str, str]] = []
+        for item in edges_raw:
+            edge = _object(item, "repair edge")
+            edges.append(
+                (
+                    _required_string(edge, "predecessor_session_id"),
+                    _required_string(edge, "repair_session_id"),
+                )
+            )
+        verified = _required_bool(document, "verified")
+        warnings = _string_tuple(document.get("warnings"), "warnings")
+        if verified and warnings:
+            raise ValueError("Verified repair group cannot contain warnings")
+        return cls(
+            correlation_id=_required_string(document, "correlation_id"),
+            verified=verified,
+            initial_session_id=_optional_string(document.get("initial_session_id"), "initial_session_id"),
+            repair_session_ids=_string_tuple(document.get("repair_session_ids"), "repair_session_ids"),
+            session_ids=_string_tuple(document.get("session_ids"), "session_ids"),
+            edges=tuple(edges),
+            warnings=warnings,
+            relationship_inferred=inferred,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "correlation_id": self.correlation_id,
+            "verified": self.verified,
+            "initial_session_id": self.initial_session_id,
+            "repair_session_ids": list(self.repair_session_ids),
+            "session_ids": list(self.session_ids),
+            "edges": [
+                {
+                    "predecessor_session_id": predecessor,
+                    "repair_session_id": repair,
+                }
+                for predecessor, repair in self.edges
+            ],
+            "warnings": list(self.warnings),
+            "relationship_inferred": self.relationship_inferred,
+        }
+
+
+@dataclass(frozen=True)
 class SessionAttempt:
     command_id: str
     sequence: int
@@ -107,10 +208,14 @@ class SessionAttempt:
         receipt_raw = document.get("receipt")
         receipt = None if receipt_raw is None else PromotionReceiptSummary.from_document(_object(receipt_raw, "receipt"))
         result_file = SessionFileState.from_document(
-            document.get("result_path"), _object(document.get("result_file"), "result_file"), "result"
+            document.get("result_path"),
+            _object(document.get("result_file"), "result_file"),
+            "result",
         )
         receipt_file = SessionFileState.from_document(
-            document.get("receipt_path"), _object(document.get("receipt_file"), "receipt_file"), "receipt"
+            document.get("receipt_path"),
+            _object(document.get("receipt_file"), "receipt_file"),
+            "receipt",
         )
         if receipt is not None and not receipt_file.valid:
             raise ValueError("Receipt summary requires a valid receipt file")
@@ -186,7 +291,9 @@ class SessionSummary:
     attempts: tuple[SessionAttempt, ...]
     attempts_truncated: bool
     repair_group_id: str | None
+    repair_correlation: RepairCorrelationSummary | None
     repair_relationship_inferred: bool
+    warnings: tuple[str, ...]
     schema: str = GUI_SESSION_SCHEMA
 
     @classmethod
@@ -201,11 +308,25 @@ class SessionSummary:
         if document.get("attempt_count") != len(attempts):
             raise ValueError("Operator session attempt_count does not match attempts")
         inferred = _required_bool(document, "repair_relationship_inferred")
+        if inferred:
+            raise ValueError("Inferred repair relationships are forbidden")
+        session_id = _required_string(document, "session_id")
+        correlation_raw = document.get("repair_correlation")
+        correlation = (
+            None
+            if correlation_raw is None
+            else RepairCorrelationSummary.from_document(
+                _object(correlation_raw, "repair_correlation"),
+                session_id=session_id,
+            )
+        )
         repair_group = _optional_string(document.get("repair_group_id"), "repair_group_id")
-        if inferred or repair_group is not None:
-            raise ValueError("This GUI version does not accept inferred repair relationships")
+        if (correlation is None and repair_group is not None) or (
+            correlation is not None and repair_group != correlation.correlation_id
+        ):
+            raise ValueError("Session repair_group_id does not match explicit correlation")
         return cls(
-            session_id=_required_string(document, "session_id"),
+            session_id=session_id,
             repository_id=_required_string(document, "repository_id"),
             base_sha=_required_string(document, "base_sha"),
             state=_required_string(document, "state"),
@@ -216,7 +337,9 @@ class SessionSummary:
             attempts=attempts,
             attempts_truncated=_required_bool(document, "attempts_truncated"),
             repair_group_id=repair_group,
+            repair_correlation=correlation,
             repair_relationship_inferred=inferred,
+            warnings=_string_tuple(document.get("warnings", []), "warnings"),
         )
 
     @property
@@ -232,11 +355,16 @@ class SessionSummary:
             "state": self.state,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "workspace": {"path": self.workspace_path, "revision": self.workspace_revision},
+            "workspace": {
+                "path": self.workspace_path,
+                "revision": self.workspace_revision,
+            },
             "attempts": [attempt.to_dict() for attempt in self.attempts],
             "attempts_truncated": self.attempts_truncated,
             "repair_group_id": self.repair_group_id,
+            "repair_correlation": self.repair_correlation.to_dict() if self.repair_correlation else None,
             "repair_relationship_inferred": self.repair_relationship_inferred,
+            "warnings": list(self.warnings),
         }
 
 
@@ -246,6 +374,7 @@ class SessionHistorySnapshot:
     project_alias: str | None
     generated_at: str | None
     sessions: tuple[SessionSummary, ...]
+    repair_groups: tuple[RepairGroupSummary, ...]
     limit: int
     operator_operation_id: str
     error_code: str | None = None
@@ -258,6 +387,12 @@ class SessionHistorySnapshot:
     @property
     def ok(self) -> bool:
         return self.error_code is None
+
+    def group_for_session(self, session_id: str) -> RepairGroupSummary | None:
+        for group in self.repair_groups:
+            if session_id in group.session_ids:
+                return group
+        return None
 
     @classmethod
     def failure(
@@ -275,6 +410,7 @@ class SessionHistorySnapshot:
             project_alias=project_alias,
             generated_at=None,
             sessions=(),
+            repair_groups=(),
             limit=limit,
             operator_operation_id=operation_id,
             error_code=error_code,
@@ -310,11 +446,20 @@ class SessionHistorySnapshot:
             if not isinstance(raw_sessions, list):
                 raise ValueError("Operator sessions must be an array")
             sessions = tuple(SessionSummary.from_document(_object(item, "session")) for item in raw_sessions)
+            raw_groups = data.get("repair_groups", [])
+            if not isinstance(raw_groups, list):
+                raise ValueError("Operator repair_groups must be an array")
+            groups = tuple(
+                RepairGroupSummary.from_document(_object(item, "repair_group"))
+                for item in raw_groups
+            )
+            _validate_group_membership(sessions, groups)
             return cls(
                 workspace_root=_resolved(workspace_root),
                 project_alias=_optional_string(data.get("project_alias"), "project_alias") or response.project_alias,
                 generated_at=_required_string(data, "generated_at"),
                 sessions=sessions,
+                repair_groups=groups,
                 limit=requested_limit,
                 operator_operation_id=response.operation_id,
             )
@@ -340,6 +485,33 @@ class SessionHistoryService:
             raise ValueError(f"limit must be between 1 and {MAX_SESSION_HISTORY_LIMIT}")
         response = self._operator.sessions(workspace_root, limit=limit)
         return SessionHistorySnapshot.from_response(workspace_root, response, requested_limit=limit)
+
+
+def _validate_group_membership(
+    sessions: tuple[SessionSummary, ...],
+    groups: tuple[RepairGroupSummary, ...],
+) -> None:
+    by_id = {session.session_id: session for session in sessions}
+    by_correlation = {group.correlation_id: group for group in groups}
+    if len(by_correlation) != len(groups):
+        raise ValueError("Repair group correlation IDs must be unique")
+    for group in groups:
+        if any(session_id not in by_id for session_id in group.session_ids):
+            raise ValueError("Repair group references a session outside the bounded response")
+        if group.initial_session_id is not None and group.initial_session_id not in group.session_ids:
+            raise ValueError("Repair group initial session is not a group member")
+        if any(session_id not in group.session_ids for session_id in group.repair_session_ids):
+            raise ValueError("Repair group repair session is not a group member")
+        for predecessor, repair in group.edges:
+            if predecessor not in group.session_ids or repair not in group.session_ids:
+                raise ValueError("Repair group edge references a non-member session")
+    for session in sessions:
+        correlation = session.repair_correlation
+        if correlation is None:
+            continue
+        group = by_correlation.get(correlation.correlation_id)
+        if group is None or session.session_id not in group.session_ids:
+            raise ValueError("Explicit session correlation is missing its repair group")
 
 
 def _resolved(path: str | Path) -> str:

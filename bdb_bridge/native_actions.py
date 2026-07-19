@@ -21,6 +21,7 @@ from .protocol import (
     validate_base_sha,
     validate_session_id,
 )
+from .repair_correlation import RepairCorrelation, parse_repair_correlation
 from .workspace_context import WorkspaceContextBuilder
 from .workspace_manager import Git
 from .workspace_state import clean_workspace_state_hash
@@ -73,10 +74,11 @@ class NativeSessionRecord:
     repository_id: str
     base_sha: str
     created_at: str
+    repair_correlation: RepairCorrelation | None = None
 
 
 class NativeSessionStore:
-    """Durably bind a BDB session to one trusted alias and exact base SHA."""
+    """Durably bind a BDB session to one trusted alias, base SHA, and repair correlation."""
 
     def __init__(self, path: str | Path, *, writer: Callable[[Path, dict[str, Any]], None]) -> None:
         self.path = Path(path).expanduser().resolve(strict=False)
@@ -88,15 +90,19 @@ class NativeSessionStore:
         item = raw["sessions"].get(session_id)
         if item is None:
             return None
-        if not isinstance(item, dict):
-            raise BridgeError("invalid_config", "Native session store contains an invalid record")
-        return NativeSessionRecord(
-            session_id=session_id,
-            repo_alias=require_string(item, "repo_alias"),
-            repository_id=require_string(item, "repository_id"),
-            base_sha=validate_base_sha(require_string(item, "base_sha")),
-            created_at=require_string(item, "created_at"),
-        )
+        return self._record(session_id, item)
+
+    def find_by_correlation(self, correlation_id: str) -> tuple[NativeSessionRecord, ...]:
+        validate_session_id(correlation_id)
+        raw = self._read()
+        records: list[NativeSessionRecord] = []
+        for session_id, item in sorted(raw["sessions"].items()):
+            validate_session_id(session_id)
+            record = self._record(session_id, item)
+            correlation = record.repair_correlation
+            if correlation is not None and correlation.correlation_id == correlation_id:
+                records.append(record)
+        return tuple(records)
 
     def bind(self, record: NativeSessionRecord) -> NativeSessionRecord:
         validate_session_id(record.session_id)
@@ -110,6 +116,8 @@ class NativeSessionStore:
             "base_sha": record.base_sha,
             "created_at": record.created_at,
         }
+        if record.repair_correlation is not None:
+            candidate["repair_correlation"] = record.repair_correlation.as_dict()
         if existing is not None:
             if existing != candidate:
                 raise BridgeError("journal_conflict", "Native session identity collision")
@@ -119,6 +127,23 @@ class NativeSessionStore:
         sessions[record.session_id] = candidate
         self._writer(self.path, raw)
         return record
+
+    def _record(self, session_id: str, item: Any) -> NativeSessionRecord:
+        if not isinstance(item, dict):
+            raise BridgeError("invalid_config", "Native session store contains an invalid record")
+        correlation = parse_repair_correlation(
+            item.get("repair_correlation"),
+            session_id=session_id,
+            field="native_session.repair_correlation",
+        )
+        return NativeSessionRecord(
+            session_id=session_id,
+            repo_alias=require_string(item, "repo_alias"),
+            repository_id=require_string(item, "repository_id"),
+            base_sha=validate_base_sha(require_string(item, "base_sha")),
+            created_at=require_string(item, "created_at"),
+            repair_correlation=correlation,
+        )
 
     def _read(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -195,6 +220,17 @@ class NativeActionComposer:
             validate_session_id(supplied_session_id)
             session_id = supplied_session_id
 
+        supplied_correlation = action.get("repair_correlation", _MISSING)
+        parsed_correlation = (
+            None
+            if supplied_correlation is _MISSING
+            else parse_repair_correlation(
+                supplied_correlation,
+                session_id=session_id,
+                field="action.repair_correlation",
+            )
+        )
+
         sequence = action.get("sequence", 1)
         if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence <= 0:
             raise BridgeError("invalid_payload", "sequence must be a positive integer")
@@ -212,6 +248,11 @@ class NativeActionComposer:
         if existing is None:
             if sequence != 1:
                 raise BridgeError("invalid_payload", "A new native session must begin at sequence 1")
+            self._validate_new_correlation(
+                repo_alias=repo_alias,
+                repository_id=repository.bridge_config.repository_id,
+                correlation=parsed_correlation,
+            )
             repository_context = self._repository_context(repository)
             if not repository_context.source_clean or repository_context.initial_state_hash is None:
                 raise BridgeError("dirty_source_checkout", "Trusted repository checkout must be clean")
@@ -223,6 +264,7 @@ class NativeActionComposer:
                     repository_id=repository.bridge_config.repository_id,
                     base_sha=repository_context.base_sha,
                     created_at=created_at,
+                    repair_correlation=parsed_correlation,
                 )
             )
             if supplied_state_hash is _MISSING and operation in _MUTATING_OPERATIONS:
@@ -232,6 +274,10 @@ class NativeActionComposer:
         else:
             if existing.repo_alias != repo_alias or existing.repository_id != repository.bridge_config.repository_id:
                 raise BridgeError("policy_denied", "Session is bound to a different repository alias")
+            if supplied_correlation is _MISSING:
+                parsed_correlation = existing.repair_correlation
+            elif parsed_correlation != existing.repair_correlation:
+                raise BridgeError("journal_conflict", "Session repair correlation cannot change")
             session_record = existing
             created_at = _utc_text(self.now_fn())
             expected_state_hash = None if supplied_state_hash is _MISSING else supplied_state_hash
@@ -263,6 +309,8 @@ class NativeActionComposer:
             "created_at": session_record.created_at,
             "expires_at": expires_at,
         }
+        if session_record.repair_correlation is not None:
+            manifest["repair_correlation"] = session_record.repair_correlation.as_dict()
         envelope = {
             "schema": LOCAL_ENVELOPE_SCHEMA,
             "submitted_at": created_at,
@@ -271,6 +319,50 @@ class NativeActionComposer:
             "command": command,
         }
         return repository, envelope
+
+    def _validate_new_correlation(
+        self,
+        *,
+        repo_alias: str,
+        repository_id: str,
+        correlation: RepairCorrelation | None,
+    ) -> None:
+        if correlation is None:
+            return
+        existing_group = self.session_store.find_by_correlation(correlation.correlation_id)
+        if correlation.role == "initial":
+            if existing_group:
+                raise BridgeError(
+                    "journal_conflict",
+                    "Repair correlation already has a bound session",
+                )
+            return
+
+        predecessor_id = correlation.predecessor_session_id
+        if predecessor_id is None:  # guarded by parse_repair_correlation
+            raise BridgeError("invalid_payload", "Repair correlation predecessor is missing")
+        predecessor = self.session_store.get(predecessor_id)
+        if predecessor is None:
+            raise BridgeError(
+                "invalid_payload",
+                "Repair predecessor is not bound in the native session store",
+            )
+        if predecessor.repo_alias != repo_alias or predecessor.repository_id != repository_id:
+            raise BridgeError(
+                "policy_denied",
+                "Repair predecessor belongs to a different repository alias",
+            )
+        predecessor_correlation = predecessor.repair_correlation
+        if predecessor_correlation is None:
+            raise BridgeError(
+                "invalid_payload",
+                "Repair predecessor has no explicit repair correlation",
+            )
+        if predecessor_correlation.correlation_id != correlation.correlation_id:
+            raise BridgeError(
+                "invalid_payload",
+                "Repair predecessor correlation_id does not match",
+            )
 
     def _repository_context(self, repository: RepositoryAlias) -> RepositoryContext:
         reader = GitObjectReader(repository.bridge_config.fixture_repo_path)

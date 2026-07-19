@@ -15,10 +15,13 @@ from .errors import OperatorApiError, OperatorErrorCode
 SESSION_HISTORY_SCHEMA = "bdb-session-history-v1"
 SESSION_SUMMARY_SCHEMA = "bdb-session-summary-v1"
 SESSION_ATTEMPT_SCHEMA = "bdb-session-attempt-v1"
+REPAIR_GROUP_SCHEMA = "bdb-repair-group-v1"
+REPAIR_CORRELATION_SCHEMA = "bdb-repair-correlation-v1"
 PROMOTION_RECEIPT_SCHEMA = "bdb-workspace-promotion-v1"
 WORKSPACE_STATE_SCHEMA = "bdb-workspace-loop-state-v1"
 MAX_SESSION_LIMIT = 100
 MAX_ATTEMPTS_PER_SESSION = 20
+MAX_MANIFEST_BYTES = 64 * 1024
 MAX_RESULT_BYTES = 64 * 1024
 MAX_RECEIPT_BYTES = 2 * 1024 * 1024
 _SAFE_SESSION = re.compile(r"^[A-Za-z0-9-]{1,80}$")
@@ -89,27 +92,33 @@ class SessionProjectionReader:
                 """
                 SELECT s.session_id, s.repository_id, s.base_sha, s.state,
                        s.created_at, s.updated_at,
-                       w.workspace_path, w.revision, w.state_hash
+                       w.workspace_path, w.revision, w.state_hash,
+                       si.manifest_json
                 FROM sessions s
                 LEFT JOIN workspaces w ON w.session_id = s.session_id
+                LEFT JOIN session_ingestion si ON si.session_id = s.session_id
                 ORDER BY s.updated_at DESC, s.session_id DESC
                 LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
             documents = [self._session_document(connection, row) for row in sessions]
+        repair_groups = _build_repair_groups(documents)
         return {
             "schema": SESSION_HISTORY_SCHEMA,
             "project_alias": self.alias,
             "generated_at": utc_now_iso(),
             "limit": limit,
             "sessions": documents,
+            "repair_groups": repair_groups,
             "read_only": True,
             "repair_relationships_inferred": False,
         }
 
     def _session_document(self, connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         session_id = str(row["session_id"])
+        warnings: list[str] = []
+        repair_correlation = _manifest_repair_correlation(row["manifest_json"], session_id, warnings)
         command_rows = connection.execute(
             """
             SELECT c.command_id, c.sequence, c.state, c.created_at, c.updated_at,
@@ -144,8 +153,12 @@ class SessionProjectionReader:
             "attempt_count": len(selected),
             "attempts_truncated": truncated,
             "attempts": attempts,
-            "repair_group_id": None,
+            "repair_group_id": (
+                repair_correlation["correlation_id"] if repair_correlation is not None else None
+            ),
+            "repair_correlation": repair_correlation,
             "repair_relationship_inferred": False,
+            "warnings": warnings,
         }
 
     def _attempt_document(self, session_id: str, row: sqlite3.Row) -> dict[str, Any]:
@@ -260,6 +273,141 @@ class SessionProjectionReader:
         finally:
             if connection is not None:
                 connection.close()
+
+
+def _manifest_repair_correlation(
+    manifest_json: Any,
+    session_id: str,
+    warnings: list[str],
+) -> dict[str, Any] | None:
+    if manifest_json is None:
+        return None
+    if not isinstance(manifest_json, str) or len(manifest_json.encode("utf-8", errors="replace")) > MAX_MANIFEST_BYTES:
+        warnings.append("Session manifest exceeds the projection limit")
+        return None
+    try:
+        manifest = json.loads(manifest_json)
+    except (UnicodeError, json.JSONDecodeError):
+        warnings.append("Session manifest is invalid JSON")
+        return None
+    if not isinstance(manifest, dict):
+        warnings.append("Session manifest is not an object")
+        return None
+    value = manifest.get("repair_correlation")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        warnings.append("Repair correlation is not an object")
+        return None
+    if set(value) - {"schema", "correlation_id", "role", "predecessor_session_id"}:
+        warnings.append("Repair correlation contains unsupported keys")
+        return None
+    if value.get("schema") != REPAIR_CORRELATION_SCHEMA:
+        warnings.append("Repair correlation schema is unsupported")
+        return None
+    correlation_id = value.get("correlation_id")
+    role = value.get("role")
+    predecessor = value.get("predecessor_session_id")
+    if not isinstance(correlation_id, str) or _SAFE_SESSION.fullmatch(correlation_id) is None:
+        warnings.append("Repair correlation ID is invalid")
+        return None
+    if role not in {"initial", "repair"}:
+        warnings.append("Repair correlation role is invalid")
+        return None
+    if role == "initial" and predecessor is not None:
+        warnings.append("Initial repair correlation cannot have a predecessor")
+        return None
+    if role == "repair":
+        if not isinstance(predecessor, str) or _SAFE_SESSION.fullmatch(predecessor) is None:
+            warnings.append("Repair correlation predecessor is invalid")
+            return None
+        if predecessor == session_id:
+            warnings.append("Repair correlation cannot reference the current session")
+            return None
+    return {
+        "schema": REPAIR_CORRELATION_SCHEMA,
+        "correlation_id": correlation_id,
+        "role": role,
+        "predecessor_session_id": predecessor,
+    }
+
+
+def _build_repair_groups(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for session in sessions:
+        correlation = session.get("repair_correlation")
+        if isinstance(correlation, dict):
+            grouped.setdefault(str(correlation["correlation_id"]), []).append(session)
+
+    groups: list[dict[str, Any]] = []
+    for correlation_id, members in sorted(grouped.items()):
+        by_id = {str(member["session_id"]): member for member in members}
+        initials = [
+            member for member in members
+            if member["repair_correlation"]["role"] == "initial"
+        ]
+        repairs = [
+            member for member in members
+            if member["repair_correlation"]["role"] == "repair"
+        ]
+        warnings: list[str] = []
+        initial_id = str(initials[0]["session_id"]) if len(initials) == 1 else None
+        if len(initials) != 1:
+            warnings.append("Repair group must contain exactly one initial session")
+        if not repairs:
+            warnings.append("Repair group has no repair session")
+        edges: list[dict[str, str]] = []
+        for repair in repairs:
+            repair_id = str(repair["session_id"])
+            predecessor = repair["repair_correlation"]["predecessor_session_id"]
+            if predecessor not in by_id:
+                warnings.append(f"Repair predecessor is not present in the bounded result: {repair_id}")
+                continue
+            edges.append({"predecessor_session_id": predecessor, "repair_session_id": repair_id})
+        if initial_id is not None:
+            for repair in repairs:
+                repair_id = str(repair["session_id"])
+                if not _reaches_initial(repair_id, initial_id, by_id):
+                    warnings.append(f"Repair chain does not reach the initial session: {repair_id}")
+        verified = not warnings and initial_id is not None and bool(repairs)
+        groups.append(
+            {
+                "schema": REPAIR_GROUP_SCHEMA,
+                "correlation_id": correlation_id,
+                "verified": verified,
+                "initial_session_id": initial_id,
+                "repair_session_ids": [str(member["session_id"]) for member in repairs],
+                "session_ids": [str(member["session_id"]) for member in members],
+                "edges": edges,
+                "warnings": warnings,
+                "relationship_inferred": False,
+            }
+        )
+    return groups
+
+
+def _reaches_initial(
+    session_id: str,
+    initial_id: str,
+    by_id: dict[str, dict[str, Any]],
+) -> bool:
+    current = session_id
+    visited: set[str] = set()
+    while current != initial_id:
+        if current in visited:
+            return False
+        visited.add(current)
+        session = by_id.get(current)
+        if session is None:
+            return False
+        correlation = session.get("repair_correlation")
+        if not isinstance(correlation, dict) or correlation.get("role") != "repair":
+            return False
+        predecessor = correlation.get("predecessor_session_id")
+        if not isinstance(predecessor, str):
+            return False
+        current = predecessor
+    return True
 
 
 def _resolve_runtime_dir(config: dict[str, Any]) -> Path | None:

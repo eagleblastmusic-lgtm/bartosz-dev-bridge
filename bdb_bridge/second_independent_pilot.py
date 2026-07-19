@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,7 @@ def execute_pilot(
     python_executable: str,
     timeout: float,
 ) -> dict[str, Any]:
+    correlation_id = str(uuid.uuid4())
     report: dict[str, Any] = {
         "schema": "bdb-second-independent-pilot-report-v1",
         "status": "failed",
@@ -70,6 +72,10 @@ def execute_pilot(
         "profile_id": PROFILE_ID,
         "repo_alias": ALIAS,
         "user_interventions_between_attempts": 0,
+        "repair_correlation": {
+            "schema": "bdb-repair-correlation-v1",
+            "correlation_id": correlation_id,
+        },
     }
     report_path = root / "second-independent-pilot-report.json"
     stdout_path = root / "bridge.stdout.log"
@@ -157,6 +163,12 @@ def execute_pilot(
             request_id="inventory2-initial-attempt",
             repo_alias=ALIAS,
             profile_id=PROFILE_ID,
+            repair_correlation={
+                "schema": "bdb-repair-correlation-v1",
+                "correlation_id": correlation_id,
+                "role": "initial",
+                "predecessor_session_id": None,
+            },
             operations=[
                 create_file("inventory/parser.py", fixture_data["parser_failed"]),
                 create_file("inventory/report.py", fixture_data["report_module"]),
@@ -193,6 +205,12 @@ def execute_pilot(
             request_id="inventory2-repair-attempt",
             repo_alias=ALIAS,
             profile_id=PROFILE_ID,
+            repair_correlation={
+                "schema": "bdb-repair-correlation-v1",
+                "correlation_id": correlation_id,
+                "role": "repair",
+                "predecessor_session_id": first_session_id,
+            },
             operations=[
                 create_file("inventory/parser.py", fixture_data["parser_repaired"]),
                 create_file("inventory/report.py", fixture_data["report_module"]),
@@ -212,6 +230,8 @@ def execute_pilot(
 
         second_command_id = str(second_response["command_id"])
         second_session_id = second_command_id.split(":", 1)[0]
+        if second_session_id == first_session_id:
+            raise RuntimeError("Repair attempt must use a distinct session")
         result_path = (
             Path(config.direct_result_dir)
             / "sessions"
@@ -275,6 +295,7 @@ def execute_pilot(
                     "rollback_performed": first_result.get("data", {}).get("rollback_performed"),
                     "analysis": analysis.as_dict(),
                     "workspace_clean_after_rollback": True,
+                    "repair_role": "initial",
                 },
                 "repair_attempt": {
                     "command_id": second_command_id,
@@ -284,6 +305,15 @@ def execute_pilot(
                     "checkpoint_state": second_result.get("data", {}).get("checkpoint_state"),
                     "profile_id": second_data.get("profile_id", PROFILE_ID),
                     "changed_files": second_result.get("changed_files"),
+                    "repair_role": "repair",
+                    "predecessor_session_id": first_session_id,
+                },
+                "repair_correlation": {
+                    "schema": "bdb-repair-correlation-v1",
+                    "correlation_id": correlation_id,
+                    "initial_session_id": first_session_id,
+                    "repair_session_id": second_session_id,
+                    "verified": True,
                 },
                 "promotion": promotion.as_dict(),
                 "final_tests": {

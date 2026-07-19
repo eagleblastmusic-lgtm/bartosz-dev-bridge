@@ -156,8 +156,9 @@ def submit_patch(
     timeout: float,
     repo_alias: str = ALIAS,
     profile_id: str = "poc_pytest",
+    repair_correlation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    action = {
+    action: dict[str, Any] = {
         "schema": "bdb-action-v1",
         "repo_alias": repo_alias,
         "operation": "multi_file_patch",
@@ -167,6 +168,8 @@ def submit_patch(
             "patch": {"schema": "bdb-multi-file-patch-v1", "operations": operations},
         },
     }
+    if repair_correlation is not None:
+        action["repair_correlation"] = repair_correlation
     request = {
         "schema": "bdb-native-request-v1",
         "request_id": request_id,

@@ -20,7 +20,7 @@ def application() -> QApplication:
     return QApplication.instance() or QApplication(["test-session-history-view"])
 
 
-def test_session_history_view_opens_only_explicit_validated_paths(tmp_path: Path) -> None:
+def test_session_history_view_shows_explicit_repair_chain_and_opens_only_validated_paths(tmp_path: Path) -> None:
     app = application()
     root, _, _, _ = workspace_fixture(tmp_path)
     snapshot = SessionHistoryService(
@@ -35,6 +35,12 @@ def test_session_history_view_opens_only_explicit_validated_paths(tmp_path: Path
 
     assert opened == []
     assert widget.session_count == 2
+    assert widget.repair_group_count == 1
+    assert widget.table.item(0, 7).text() == "NAPRAWA"
+    assert widget.table.item(1, 7).text() == "START"
+    assert "repair_group" in widget.details.toPlainText()
+    assert '"verified": true' in widget.details.toPlainText()
+    assert "jawnego correlation ID" in widget.feedback_label.text()
     assert widget.open_result_button.isEnabled() is True
     assert widget.open_receipt_button.isEnabled() is True
     assert widget.open_folder_button.isEnabled() is True
@@ -49,10 +55,14 @@ def test_session_history_view_opens_only_explicit_validated_paths(tmp_path: Path
     assert opened[0] == selected.result_file.path
     assert opened[1] == selected.receipt_file.path
     assert opened[2] == str(Path(selected.result_file.path or "").parent)
+    report = widget.smoke_report()
+    assert report["session_repair_group_count"] == 1
+    assert report["session_verified_repair_group_count"] == 1
+    assert report["session_repair_relationships_explicit_only"] is True
     widget.close()
 
 
-def test_failed_unpromoted_session_disables_receipt_action(tmp_path: Path) -> None:
+def test_failed_initial_session_disables_receipt_and_shows_verified_group(tmp_path: Path) -> None:
     app = application()
     root, _, _, _ = workspace_fixture(tmp_path)
     snapshot = SessionHistoryService(
@@ -66,11 +76,13 @@ def test_failed_unpromoted_session_disables_receipt_action(tmp_path: Path) -> No
     widget.table.selectRow(1)
     app.processEvents()
 
+    assert widget.table.item(1, 7).text() == "START"
     assert widget.open_result_button.isEnabled() is True
     assert widget.open_receipt_button.isEnabled() is False
     assert widget.open_folder_button.isEnabled() is True
     assert "rolled_back" in widget.details.toPlainText()
-    assert "repair_relationship_inferred" in widget.details.toPlainText()
+    assert '"role": "initial"' in widget.details.toPlainText()
+    assert '"relationship_inferred": false' in widget.details.toPlainText()
     widget.close()
 
 
@@ -82,7 +94,10 @@ def test_empty_session_history_smoke_is_read_only() -> None:
     assert report["session_history_view_present"] is True
     assert report["session_history_read_only"] is True
     assert report["session_history_loaded"] is False
+    assert report["session_repair_group_count"] == 0
+    assert report["session_verified_repair_group_count"] == 0
     assert report["session_repair_relationships_inferred"] is False
+    assert report["session_repair_relationships_explicit_only"] is True
     assert widget.open_result_button.isEnabled() is False
     assert widget.open_receipt_button.isEnabled() is False
     widget.close()

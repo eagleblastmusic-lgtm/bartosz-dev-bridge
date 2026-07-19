@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,12 +34,17 @@ from .workspace_promoter import WorkspacePromoter
 
 
 def execute_pilot(*, repo_root: Path, root: Path, python_executable: str, timeout: float) -> dict[str, Any]:
+    correlation_id = str(uuid.uuid4())
     report: dict[str, Any] = {
         "schema": "bdb-one-message-repair-pilot-report-v1",
         "status": "failed",
         "task": "Add safe_divide to calculator2 and return None for division by zero",
         "started_at": canonical_time(datetime.now(timezone.utc)),
         "user_interventions_between_attempts": 0,
+        "repair_correlation": {
+            "schema": "bdb-repair-correlation-v1",
+            "correlation_id": correlation_id,
+        },
     }
     report_path = root / "one-message-repair-report.json"
     stdout_path = root / "bridge.stdout.log"
@@ -86,6 +92,12 @@ def execute_pilot(*, repo_root: Path, root: Path, python_executable: str, timeou
             python_executable=python_executable,
             native_config=native_config_path,
             request_id="calculator2-initial-attempt",
+            repair_correlation={
+                "schema": "bdb-repair-correlation-v1",
+                "correlation_id": correlation_id,
+                "role": "initial",
+                "predecessor_session_id": None,
+            },
             operations=[
                 replacement("src/calculator.py", fixture_data["source_before"], fixture_data["source_failed"]),
                 replacement("tests/test_calculator.py", fixture_data["tests_before"], fixture_data["tests_after"]),
@@ -113,6 +125,12 @@ def execute_pilot(*, repo_root: Path, root: Path, python_executable: str, timeou
             python_executable=python_executable,
             native_config=native_config_path,
             request_id="calculator2-repair-attempt",
+            repair_correlation={
+                "schema": "bdb-repair-correlation-v1",
+                "correlation_id": correlation_id,
+                "role": "repair",
+                "predecessor_session_id": first_session_id,
+            },
             operations=[
                 replacement("src/calculator.py", fixture_data["source_before"], fixture_data["source_repaired"]),
                 replacement("tests/test_calculator.py", fixture_data["tests_before"], fixture_data["tests_after"]),
@@ -131,6 +149,8 @@ def execute_pilot(*, repo_root: Path, root: Path, python_executable: str, timeou
 
         second_command_id = str(second_response["command_id"])
         second_session_id = second_command_id.split(":", 1)[0]
+        if second_session_id == first_session_id:
+            raise RuntimeError("Repair attempt must use a distinct session")
         result_path = Path(config.direct_result_dir) / "sessions" / second_session_id / "results" / "000001.json"
         if not result_path.is_file():
             raise RuntimeError("Durable successful result is missing")
@@ -174,6 +194,7 @@ def execute_pilot(*, repo_root: Path, root: Path, python_executable: str, timeou
                     "rollback_performed": first_result.get("data", {}).get("rollback_performed"),
                     "analysis": analysis.as_dict(),
                     "workspace_clean_after_rollback": True,
+                    "repair_role": "initial",
                 },
                 "repair_attempt": {
                     "command_id": second_command_id,
@@ -182,6 +203,15 @@ def execute_pilot(*, repo_root: Path, root: Path, python_executable: str, timeou
                     "exit_code": second_result.get("exit_code"),
                     "checkpoint_state": second_result.get("data", {}).get("checkpoint_state"),
                     "changed_files": second_result.get("changed_files"),
+                    "repair_role": "repair",
+                    "predecessor_session_id": first_session_id,
+                },
+                "repair_correlation": {
+                    "schema": "bdb-repair-correlation-v1",
+                    "correlation_id": correlation_id,
+                    "initial_session_id": first_session_id,
+                    "repair_session_id": second_session_id,
+                    "verified": True,
                 },
                 "promotion": promotion.as_dict(),
                 "final_tests": {"exit_code": final_tests.returncode, "stdout_tail": str(final_tests.stdout)[-2000:]},
