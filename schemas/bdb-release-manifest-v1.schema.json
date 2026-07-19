@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-release-manifest-v1",
+  "title": "BDB Control Center manual release artifact manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "product", "version", "channel", "platform", "source_commit",
+    "built_at", "python_version", "entrypoint", "artifact", "distribution", "signature"
+  ],
+  "properties": {
+    "schema": { "const": "bdb-release-manifest-v1" },
+    "product": { "const": "BDB Control Center" },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$" },
+    "channel": { "const": "manual-artifact" },
+    "platform": { "const": "windows-x86_64" },
+    "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "built_at": { "type": "string", "format": "date-time" },
+    "python_version": { "type": "string", "minLength": 1 },
+    "entrypoint": { "const": "BDB-Control-Center.exe" },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "size_bytes", "sha256"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[^/\\\\]+\\.zip$" },
+        "size_bytes": { "type": "integer", "minimum": 1, "maximum": 2147483648 },
+        "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["auto_download", "auto_install", "published_release"],
+      "properties": {
+        "auto_download": { "const": false },
+        "auto_install": { "const": false },
+        "published_release": { "const": false }
+      }
+    },
+    "signature": { "type": "null" }
+  }
+}
