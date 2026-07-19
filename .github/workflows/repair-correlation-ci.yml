@@ -38,7 +38,7 @@ jobs:
       - name: Native action persistence
         run: python -m pytest -q tests/test_native_action_repair_correlation.py
       - name: Operator projection
-        run: python -m pytest -q tests/test_operator_session_projection.py tests/test_operator_session_projection_boundaries.py
+        run: python -m pytest -q tests/test_operator_session_projection.py tests/test_operator_session_projection_safety.py
       - name: Strict GUI model
         env:
           QT_QPA_PLATFORM: offscreen
