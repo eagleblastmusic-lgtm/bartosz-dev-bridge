@@ -17,6 +17,7 @@ ADR-y opisują decyzje architektoniczne, których kolejne etapy nie powinny zmie
 | [0011](0011-explicit-sanitized-diagnostics-export.md) | Accepted | Diagnostyka jest bounded i read-only, a sanitizowany ZIP powstaje wyłącznie po jawnym wyborze ścieżki. |
 | [0012](0012-two-gate-project-prepare-wizard.md) | Accepted | Kreator projektu najpierw buduje niemutujący plan, a Prepare uruchamia dopiero po świeżym acknowledgement i osobnym potwierdzeniu. |
 | [0013](0013-event-driven-local-tray.md) | Accepted | Tray i lokalne powiadomienia reagują wyłącznie na sygnały GUI, bez pollingu, backendu i automatycznych mutacji. |
+| [0014](0014-manual-verified-release-artifacts.md) | Accepted | Pakiet Windows powstaje wyłącznie ręcznie, przechodzi smoke i jest wiązany z commitem przez zamknięty manifest SHA-256 bez publikacji i self-update. |
 
 Dokument nadrzędny P02: [BDB Control Center — zamrożone granice](../BDB_CONTROL_CENTER_BOUNDARIES.md).
 
