@@ -48,29 +48,47 @@ jobs:
           python -m pytest -vv
           tests/test_gui_skeleton_contract.py
           tests/test_gui_technology_spike_contract.py
-      - name: Bisect tests CA-CF
+      - name: Bisect command tests
         shell: bash
         run: |
           shopt -s nullglob
-          files=(tests/test_[cC][a-fA-F]*.py)
+          files=(tests/test_command*.py)
           ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
-      - name: Bisect tests CG-CL
+      - name: Bisect config tests
         shell: bash
         run: |
           shopt -s nullglob
-          files=(tests/test_[cC][g-lG-L]*.py)
+          files=(tests/test_config*.py)
           ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
-      - name: Bisect tests CM-CR
+      - name: Bisect content tests
         shell: bash
         run: |
           shopt -s nullglob
-          files=(tests/test_[cC][m-rM-R]*.py)
+          files=(tests/test_content*.py)
           ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
-      - name: Bisect tests CS-CZ
+      - name: Bisect contract tests
         shell: bash
         run: |
           shopt -s nullglob
-          files=(tests/test_[cC][s-zS-Z]*.py)
+          files=(tests/test_contract*.py)
+          ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
+      - name: Bisect control tests
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(tests/test_control*.py)
+          ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
+      - name: Bisect current tests
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(tests/test_current*.py)
+          ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
+      - name: Bisect other CO tests
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(tests/test_co*.py)
           ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
       - name: Report first remaining repository-wide regression
         run: python -m pytest -x --tb=line -q
