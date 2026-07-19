@@ -2,13 +2,16 @@ name: Control Center GUI CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, gpt-work/control-center-operation-flow]
     paths:
       - ".github/workflows/gui-technology-spike.yml"
       - "pyproject.toml"
       - "bdb_gui/**"
+      - "bdb_operator/**"
       - "spikes/gui/**"
       - "tests/test_gui_*.py"
+      - "tests/test_operator_session_projection*.py"
+      - "tests/session_projection_fixture.py"
       - "schemas/bdb-gui-*.schema.json"
       - "schemas/bdb-control-center-smoke-v1.schema.json"
       - "docs/BDB_GUI_TECHNOLOGY_SPIKE.md"
@@ -28,6 +31,8 @@ on:
       - "docs/adr/0012-two-gate-project-prepare-wizard.md"
       - "docs/adr/0013-event-driven-local-tray.md"
       - "docs/adr/README.md"
+  push:
+    branches: [gpt-work/control-center-session-receipts]
 
 permissions:
   contents: read
@@ -45,9 +50,9 @@ jobs:
           cache: pip
       - name: Install optional GUI dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev,gui]"
-      - name: Compile GUI packages and probe
+      - name: Compile GUI and operator packages
         run: |
-          python -m compileall -q bdb_gui
+          python -m compileall -q bdb_gui bdb_operator
           python -m py_compile spikes/gui/pyside6_probe.py
       - name: Run P05-P11 architecture and schema contracts
         env: { QT_QPA_PLATFORM: offscreen }
@@ -79,13 +84,22 @@ jobs:
           tests/test_gui_current_operation_window.py
           tests/test_gui_operation_flow.py
           tests/test_gui_current_operation_flow_view.py
-      - name: Run bounded Journal history tests
+      - name: Run bounded Journal event history tests
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
           python -m pytest -vv
           tests/test_gui_history_service.py
           tests/test_gui_history_view.py
           tests/test_gui_history_window.py
+      - name: Run bounded session and receipt history tests
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: >-
+          python -m pytest -vv
+          tests/test_operator_session_projection.py
+          tests/test_operator_session_projection_safety.py
+          tests/test_gui_session_history.py
+          tests/test_gui_session_history_view.py
+          tests/test_gui_session_history_window.py
       - name: Run diagnostics collection and export tests
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
@@ -157,9 +171,18 @@ jobs:
             $data.current_operation_loaded -ne $false -or
             $data.operation_flow_present -ne $true -or
             $data.operation_flow_status -ne "pending" -or
+            $data.history_tabs_present -ne $true -or
             $data.history_view_present -ne $true -or
             $data.history_read_only -ne $true -or
             $data.history_loaded -ne $false -or
+            $data.session_history_view_present -ne $true -or
+            $data.session_history_read_only -ne $true -or
+            $data.session_history_loaded -ne $false -or
+            $data.session_history_count -ne 0 -or
+            $data.session_result_open_explicit -ne $true -or
+            $data.session_receipt_open_explicit -ne $true -or
+            $data.session_folder_open_explicit -ne $true -or
+            $data.session_repair_relationships_inferred -ne $false -or
             $data.diagnostics_view_present -ne $true -or
             $data.diagnostics_collect_explicit -ne $true -or
             $data.diagnostics_export_explicit -ne $true -or
@@ -172,6 +195,6 @@ jobs:
             $data.timed_out -ne $false
           ) {
             $data | ConvertTo-Json -Depth 8 | Write-Host
-            throw "Control Center smoke report violates the P12 contract"
+            throw "Control Center smoke report violates the session history contract"
           }
           $data | ConvertTo-Json -Depth 8 | Write-Host
