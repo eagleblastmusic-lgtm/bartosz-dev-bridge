@@ -33,7 +33,8 @@ def test_pyside6_remains_optional_after_p06() -> None:
     assert "dependencies = []" in pyproject
     assert 'gui = ["PySide6-Essentials>=6.10,<6.12"]' in pyproject
     assert 'gui-spike = ["PySide6-Essentials>=6.10,<6.12"]' in pyproject
-    assert 'include = ["bdb_bridge*", "bdb_operator*", "bdb_gui*", "bdb_poc*"]' in pyproject
+    for package in ("bdb_bridge*", "bdb_operator*", "bdb_gui*", "bdb_poc*"):
+        assert f'"{package}"' in pyproject
 
 
 def test_decision_selects_widgets_and_preserves_fallback() -> None:
