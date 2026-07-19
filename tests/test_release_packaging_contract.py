@@ -83,6 +83,19 @@ def test_release_workflow_is_manual_and_does_not_publish() -> None:
         assert forbidden not in workflow
 
 
+def test_release_smoke_waits_for_windowed_process_and_reports_failure_details() -> None:
+    workflow = read(ROOT / ".github" / "workflows" / "control-center-release-artifact.yml")
+    assert workflow.count("shell: pwsh") == 3
+    assert "shell: powershell" not in workflow
+    assert "[System.Diagnostics.ProcessStartInfo]::new()" in workflow
+    assert "$startInfo.UseShellExecute = $false" in workflow
+    assert "$process.WaitForExit()" in workflow
+    assert "$smokeExitCode = $process.ExitCode" in workflow
+    assert "Test-Path -LiteralPath $report -PathType Leaf" in workflow
+    assert 'Write-Host "=== BUNDLED SMOKE REPORT ==="' in workflow
+    assert "produced no report" in workflow
+
+
 def test_packaged_entrypoint_and_package_discovery_are_explicit() -> None:
     entry = read(ROOT / "packaging" / "windows" / "control_center_entry.py")
     pyproject = read(ROOT / "pyproject.toml")
