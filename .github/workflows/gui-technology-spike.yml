@@ -18,6 +18,7 @@ on:
       - "docs/BDB_CONTROL_CENTER_HISTORY.md"
       - "docs/BDB_CONTROL_CENTER_DIAGNOSTICS.md"
       - "docs/BDB_CONTROL_CENTER_PROJECT_WIZARD.md"
+      - "docs/BDB_CONTROL_CENTER_TRAY_NOTIFICATIONS.md"
       - "docs/adr/0006-pyside6-qt-widgets-for-control-center-mvp.md"
       - "docs/adr/0007-read-only-asynchronous-gui-bootstrap.md"
       - "docs/adr/0008-explicit-serialized-process-controls.md"
@@ -25,6 +26,7 @@ on:
       - "docs/adr/0010-bounded-manual-journal-history.md"
       - "docs/adr/0011-explicit-sanitized-diagnostics-export.md"
       - "docs/adr/0012-two-gate-project-prepare-wizard.md"
+      - "docs/adr/0013-event-driven-local-tray.md"
       - "docs/adr/README.md"
 
 permissions:
@@ -35,7 +37,6 @@ jobs:
     name: Control Center / Windows / Python 3.12
     runs-on: windows-latest
     timeout-minutes: 25
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,9 +49,8 @@ jobs:
         run: |
           python -m compileall -q bdb_gui
           python -m py_compile spikes/gui/pyside6_probe.py
-      - name: Run GUI architecture and schema contracts
-        env:
-          QT_QPA_PLATFORM: offscreen
+      - name: Run P05-P11 architecture and schema contracts
+        env: { QT_QPA_PLATFORM: offscreen }
         run: >-
           python -m pytest -vv
           tests/test_gui_skeleton_contract.py
@@ -58,36 +58,34 @@ jobs:
           tests/test_gui_project_prepare_architecture.py
           tests/test_gui_schema_contract.py
           tests/test_gui_technology_spike_contract.py
+      - name: Run P12 tray architecture contract
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv tests/test_gui_tray_architecture.py
       - name: Run read-only bootstrap unit tests
-        env:
-          QT_QPA_PLATFORM: offscreen
+        env: { QT_QPA_PLATFORM: offscreen }
         run: python -m pytest -vv tests/test_gui_bootstrap_service.py
       - name: Run explicit process control tests
-        env:
-          QT_QPA_PLATFORM: offscreen
+        env: { QT_QPA_PLATFORM: offscreen }
         run: >-
           python -m pytest -vv
           tests/test_gui_project_operations.py
           tests/test_gui_process_controls.py
       - name: Run current operation projection tests
-        env:
-          QT_QPA_PLATFORM: offscreen
+        env: { QT_QPA_PLATFORM: offscreen }
         run: >-
           python -m pytest -vv
           tests/test_gui_current_operation_service.py
           tests/test_gui_current_operation_view.py
           tests/test_gui_current_operation_window.py
       - name: Run bounded Journal history tests
-        env:
-          QT_QPA_PLATFORM: offscreen
+        env: { QT_QPA_PLATFORM: offscreen }
         run: >-
           python -m pytest -vv
           tests/test_gui_history_service.py
           tests/test_gui_history_view.py
           tests/test_gui_history_window.py
       - name: Run diagnostics collection and export tests
-        env:
-          QT_QPA_PLATFORM: offscreen
+        env: { QT_QPA_PLATFORM: offscreen }
         run: >-
           python -m pytest -vv
           tests/test_gui_diagnostics_service.py
@@ -95,25 +93,24 @@ jobs:
           tests/test_gui_diagnostics_view.py
           tests/test_gui_diagnostics_window.py
       - name: Run two-gate project Prepare wizard tests
-        env:
-          QT_QPA_PLATFORM: offscreen
+        env: { QT_QPA_PLATFORM: offscreen }
         run: >-
           python -m pytest -vv
           tests/test_gui_project_prepare_service.py
           tests/test_gui_projects_view.py
           tests/test_gui_project_prepare_window.py
+      - name: Run tray and notification tests
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv tests/test_gui_tray_controller.py
       - name: Run P05 PySide6 probe regression
-        env:
-          QT_QPA_PLATFORM: offscreen
+        env: { QT_QPA_PLATFORM: offscreen }
         run: python -m pytest -vv tests/test_gui_pyside6_probe.py
       - name: Run production Control Center smoke tests
-        env:
-          QT_QPA_PLATFORM: offscreen
+        env: { QT_QPA_PLATFORM: offscreen }
         run: python -m pytest -vv tests/test_gui_control_center_smoke.py
       - name: Preserve the P05 technology probe gate
         shell: powershell
-        env:
-          QT_QPA_PLATFORM: offscreen
+        env: { QT_QPA_PLATFORM: offscreen }
         run: |
           $report = Join-Path $env:RUNNER_TEMP "pyside6-probe.json"
           python spikes/gui/pyside6_probe.py --headless-smoke --json-out $report
@@ -131,8 +128,7 @@ jobs:
           $data | ConvertTo-Json -Depth 8 | Write-Host
       - name: Run production Control Center headless smoke
         shell: powershell
-        env:
-          QT_QPA_PLATFORM: offscreen
+        env: { QT_QPA_PLATFORM: offscreen }
         run: |
           $workspaces = Join-Path $env:RUNNER_TEMP "bdb-control-center-workspaces"
           $report = Join-Path $env:RUNNER_TEMP "bdb-control-center-smoke.json"
@@ -165,12 +161,13 @@ jobs:
             $data.diagnostics_export_explicit -ne $true -or
             $data.diagnostics_snapshot_loaded -ne $false -or
             $data.diagnostics_export_completed -ne $false -or
+            $data.tray_created -ne $false -or
             $data.mutation_operations_invoked -ne 0 -or
             $data.operator_network_listener -ne $false -or
             $data.event_loop_exit_code -ne 0 -or
             $data.timed_out -ne $false
           ) {
             $data | ConvertTo-Json -Depth 8 | Write-Host
-            throw "Control Center smoke report violates the P11 contract"
+            throw "Control Center smoke report violates the P12 contract"
           }
           $data | ConvertTo-Json -Depth 8 | Write-Host
