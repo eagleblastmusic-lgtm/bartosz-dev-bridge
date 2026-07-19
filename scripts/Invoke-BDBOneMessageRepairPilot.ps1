@@ -11,7 +11,7 @@ $pythonPath = (Get-Command $Python).Source
 $rootPath = [System.IO.Path]::GetFullPath($Root)
 
 & $pythonPath `
-    (Join-Path $PSScriptRoot "run_one_message_repair_pilot.py") `
+    (Join-Path $PSScriptRoot "one_message_repair_pilot.py") `
     --python $pythonPath `
     --root $rootPath `
     --timeout $TimeoutSeconds
