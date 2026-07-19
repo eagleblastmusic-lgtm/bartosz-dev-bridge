@@ -5,7 +5,12 @@ from typing import Any, Type
 
 
 def install_multi_file_patch_lifecycle_bootstrap(runtime_cls: Type[object]) -> None:
-    """Create the default preserve record once, without overwriting operator state."""
+    """Install fixed profile composition and the default preserve lifecycle record."""
+
+    from .execution import ExecutionCoordinator
+    from .fixed_test_profile_support import install_fixed_test_profile_support
+
+    install_fixed_test_profile_support(ExecutionCoordinator, runtime_cls)
 
     if getattr(runtime_cls, "_ghb2d_lifecycle_bootstrap_installed", False):
         return
