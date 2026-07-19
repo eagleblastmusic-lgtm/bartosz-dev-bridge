@@ -52,6 +52,7 @@ class DashboardWidget(QWidget):
         self._project_available = False
         self._busy = False
         self._idle_feedback = "Wybierz projekt, aby odczytać status."
+        self._pending_control_feedback: str | None = None
         self._build_ui()
         self.set_project_available(False)
 
@@ -63,6 +64,7 @@ class DashboardWidget(QWidget):
         self._project_available = bool(available)
         self._update_control_enabled_state()
         if not available:
+            self._pending_control_feedback = None
             self.project_label.setText("Wybierz przygotowany projekt")
             self.overall_label.setText("BRAK PROJEKTU")
             self.bridge_card.update_value("—", "Brak wybranego workspace")
@@ -88,15 +90,24 @@ class DashboardWidget(QWidget):
 
     def apply_status(self, snapshot: ProjectStatusSnapshot) -> None:
         self.set_busy(False)
+        pending_feedback = self._pending_control_feedback
+        self._pending_control_feedback = None
         if not snapshot.ok:
             self.overall_label.setText("STATUS NIEDOSTĘPNY")
             self.bridge_card.update_value("BŁĄD", snapshot.error_code or "unknown")
             self.native_card.update_value("—", "Nie odczytano")
             self.promoter_card.update_value("—", "Nie odczytano")
             self.source_card.update_value("—", "Nie odczytano")
-            self._set_idle_feedback(
-                snapshot.error_message or "Nie udało się odczytać statusu."
-            )
+            if pending_feedback:
+                self._set_idle_feedback(
+                    f"{pending_feedback}. Status potwierdzający jest niedostępny: "
+                    f"{snapshot.error_code or 'unknown'} — "
+                    f"{snapshot.error_message or 'brak szczegółów'}"
+                )
+            else:
+                self._set_idle_feedback(
+                    snapshot.error_message or "Nie udało się odczytać statusu."
+                )
             return
 
         self.overall_label.setText(snapshot.overall_status or "UNKNOWN")
@@ -106,10 +117,9 @@ class DashboardWidget(QWidget):
         )
         self.bridge_card.update_value(snapshot.bridge_status or "UNKNOWN", bridge_detail)
 
-        native_detail = snapshot.native_armed_until or "Brak terminu uzbrojenia"
         self.native_card.update_value(
             _bool_value(snapshot.native_armed, "UZBROJONY", "ROZBROJONY"),
-            native_detail,
+            _native_host_detail(snapshot.native_armed, snapshot.native_armed_until),
         )
 
         promoter_detail = (
@@ -125,25 +135,33 @@ class DashboardWidget(QWidget):
             _bool_value(snapshot.source_clean, "CZYSTE", "ZMIANY LOKALNE"),
             source_detail,
         )
-        self._set_idle_feedback(
-            "Status pobrany tylko do odczytu. Nie wykonano żadnej operacji sterującej."
-        )
+        if pending_feedback:
+            self._set_idle_feedback(
+                f"{pending_feedback}. Status potwierdzający: "
+                f"{snapshot.overall_status or 'UNKNOWN'}."
+            )
+        else:
+            self._set_idle_feedback(
+                "Status pobrany tylko do odczytu. Nie wykonano żadnej operacji sterującej."
+            )
 
     def apply_control_result(self, result: ControlResult) -> None:
         if result.ok:
-            action_label = {
+            feedback = {
                 "start": "Start zakończony",
                 "stop": "Stop zakończony",
                 "rearm": "Native Host ponownie uzbrojony",
             }[result.action]
-            self._set_idle_feedback(
-                f"{action_label}. Trwa odświeżanie statusu potwierdzającego wynik."
-            )
         else:
-            self._set_idle_feedback(
+            feedback = (
                 f"Operacja {result.action} nie powiodła się: "
-                f"{result.error_code or 'unknown'} — {result.error_message or 'brak szczegółów'}"
+                f"{result.error_code or 'unknown'} — "
+                f"{result.error_message or 'brak szczegółów'}"
             )
+        self._pending_control_feedback = feedback
+        self._set_idle_feedback(
+            f"{feedback}. Trwa odświeżanie statusu potwierdzającego wynik."
+        )
 
     def smoke_report(self) -> dict[str, Any]:
         return {
@@ -278,6 +296,14 @@ def _bool_label(label: str, value: bool | None) -> str | None:
     if value is None:
         return None
     return f"{label}: {'tak' if value else 'nie'}"
+
+
+def _native_host_detail(armed: bool | None, armed_until: str | None) -> str:
+    if armed is True:
+        return armed_until or "Termin uzbrojenia niedostępny"
+    if armed is False:
+        return "Brak aktywnego terminu uzbrojenia"
+    return "Stan uzbrojenia nieznany"
 
 
 def _join_details(*values: str | None) -> str:
