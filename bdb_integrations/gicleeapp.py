@@ -163,7 +163,7 @@ class GicleeAppIntegration:
 
 def _resolve_git_dir(source: Path) -> Path:
     if not source.is_dir():
-        raise ValueError("source_repo must be an existing directory")
+        raise ValueError("source_repo must be an existing Git checkout directory")
     marker = source / ".git"
     if marker.is_dir():
         return marker.resolve()
