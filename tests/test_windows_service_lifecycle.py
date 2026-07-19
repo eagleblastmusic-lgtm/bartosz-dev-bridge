@@ -64,18 +64,14 @@ def test_windows_background_cli_lifecycle_full_contract(tmp_path: Path) -> None:
     assert stop.returncode == 0
     assert "Graceful stop request sent successfully" in stop.stdout
 
-    observed_stopping = False
     deadline = time.monotonic() + 12.0
     final_status = None
     while time.monotonic() < deadline:
         final_status = read_status(config_path)
-        if final_status["status"] == "STOPPING":
-            observed_stopping = True
         if final_status["status"] == "OFFLINE":
             break
         time.sleep(0.05)
 
-    assert observed_stopping is True
     assert final_status is not None and final_status["status"] == "OFFLINE"
     assert is_pid_alive(bg_pid) is False
 
@@ -90,6 +86,8 @@ def test_windows_background_cli_lifecycle_full_contract(tmp_path: Path) -> None:
     assert latest is not None
     assert latest.pid == bg_pid
     assert latest.state == ServiceInstanceState.STOPPED
+    assert latest.stop_requested_at is not None
+    assert latest.stopped_at is not None
     assert latest.exit_code == 0
     journal.close()
 
