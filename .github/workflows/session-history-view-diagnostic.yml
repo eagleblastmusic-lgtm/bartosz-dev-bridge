@@ -1,0 +1,29 @@
+name: Session History View Diagnostic
+
+on:
+  push:
+    branches: [gpt-work/control-center-session-receipts]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -e ".[dev,gui]"
+      - name: Explicit validated path opening
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv --tb=long tests/test_gui_session_history_view.py::test_session_history_view_opens_only_explicit_validated_paths
+      - name: Failed unpromoted session controls
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv --tb=long tests/test_gui_session_history_view.py::test_failed_unpromoted_session_disables_receipt_action
+      - name: Empty read-only smoke
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv --tb=long tests/test_gui_session_history_view.py::test_empty_session_history_smoke_is_read_only
