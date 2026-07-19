@@ -1,0 +1,50 @@
+{
+  "schema": "bdb-gicleeapp-integration-v1",
+  "integration_id": "gicleeapp",
+  "display_name": "GicleeApp / Shopify theme",
+  "repository": {
+    "full_name": "eagleblastmusic-lgtm/gicleeart",
+    "default_branch_hint": "master",
+    "identity_verification_required_before_prepare": true
+  },
+  "project": {
+    "alias": "gicleeart",
+    "kind": "shopify_theme",
+    "allowed_paths": [
+      "README.md",
+      "assets/**",
+      "blocks/**",
+      "config/settings_schema.json",
+      "layout/**",
+      "locales/**",
+      "sections/**",
+      "snippets/**",
+      "templates/**",
+      "tests/**",
+      "scripts/**"
+    ],
+    "forbidden_scope_hints": [
+      ".env",
+      ".env.*",
+      ".git/**",
+      "config/settings_data.json",
+      "**/*secret*",
+      "**/*token*",
+      "**/*.pem",
+      "**/*.key"
+    ]
+  },
+  "execution": {
+    "plan_only": true,
+    "prepare_automatic": false,
+    "start_automatic": false,
+    "merge_automatic": false,
+    "deploy_automatic": false,
+    "operator_api_is_execution_boundary": true
+  },
+  "ownership": {
+    "integration_owner": "DevMaster",
+    "application_repository_owner": "GicleeApp",
+    "changes_to_application_repository": false
+  }
+}

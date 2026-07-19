@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bdb-gicleeapp-integration-v1",
+  "title": "BDB GicleeApp integration descriptor v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "integration_id", "display_name", "repository", "project", "execution", "ownership"],
+  "properties": {
+    "schema": { "const": "bdb-gicleeapp-integration-v1" },
+    "integration_id": { "const": "gicleeapp" },
+    "display_name": { "const": "GicleeApp / Shopify theme" },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["full_name", "default_branch_hint", "identity_verification_required_before_prepare"],
+      "properties": {
+        "full_name": { "const": "eagleblastmusic-lgtm/gicleeart" },
+        "default_branch_hint": { "const": "master" },
+        "identity_verification_required_before_prepare": { "const": true }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alias", "kind", "allowed_paths", "forbidden_scope_hints"],
+      "properties": {
+        "alias": { "const": "gicleeart" },
+        "kind": { "const": "shopify_theme" },
+        "allowed_paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "forbidden_scope_hints": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plan_only", "prepare_automatic", "start_automatic", "merge_automatic", "deploy_automatic", "operator_api_is_execution_boundary"],
+      "properties": {
+        "plan_only": { "const": true },
+        "prepare_automatic": { "const": false },
+        "start_automatic": { "const": false },
+        "merge_automatic": { "const": false },
+        "deploy_automatic": { "const": false },
+        "operator_api_is_execution_boundary": { "const": true }
+      }
+    },
+    "ownership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["integration_owner", "application_repository_owner", "changes_to_application_repository"],
+      "properties": {
+        "integration_owner": { "const": "DevMaster" },
+        "application_repository_owner": { "const": "GicleeApp" },
+        "changes_to_application_repository": { "const": false }
+      }
+    }
+  }
+}

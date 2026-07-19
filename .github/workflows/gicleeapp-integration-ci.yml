@@ -1,0 +1,42 @@
+name: GicleeApp Integration CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/gicleeapp-integration-ci.yml"
+      - "pyproject.toml"
+      - "bdb_integrations/**"
+      - "integrations/gicleeapp.json"
+      - "schemas/bdb-gicleeapp-integration-v1.schema.json"
+      - "schemas/bdb-gicleeapp-prepare-plan-v1.schema.json"
+      - "tests/test_gicleeapp_*.py"
+      - "tests/test_control_center_architecture_contract.py"
+      - "docs/BDB_GICLEEAPP_INTEGRATION.md"
+      - "docs/adr/0016-plan-only-gicleeapp-integration.md"
+
+permissions:
+  contents: read
+
+jobs:
+  integration-contract:
+    name: GicleeApp contract / Python 3.12
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Compile integration package
+        run: python -m compileall -q bdb_integrations
+      - name: Run GicleeApp plan builder tests
+        run: python -m pytest -vv tests/test_gicleeapp_integration.py
+      - name: Run descriptor and architecture gates
+        run: >-
+          python -m pytest -vv
+          tests/test_gicleeapp_integration_contract.py
+          tests/test_control_center_architecture_contract.py
