@@ -6,7 +6,7 @@ on:
       version:
         description: "Semantic version for the unsigned manual artifact"
         required: true
-        default: "0.2.0"
+        default: "0.2.1"
         type: string
 
 permissions:
@@ -119,4 +119,3 @@ jobs:
           path: release/
           if-no-files-found: error
           retention-days: 14
-          compression-level: 0

@@ -1,6 +1,6 @@
 # BDB Control Center — P07 status i sterowanie procesami
 
-Status: IMPLEMENTED ON BRANCH
+Status: IMPLEMENTED; UX STABILIZATION 0.2.1 ON BRANCH
 
 ## Cel
 
@@ -62,6 +62,18 @@ GUI nie implementuje własnej procedury zatrzymania. Korzysta z istniejącego op
 
 Start i re-arm przyjmują wyłącznie liczbę całkowitą od 1 do 60 minut. Wartość domyślna to 30 minut.
 
+Pole Operator API `armed_until` może pozostać historycznie w odpowiedzi po wygaśnięciu lub rozbrojeniu. Dashboard interpretuje je wyłącznie razem z `armed`:
+
+- gdy `armed=true`, pokazuje aktywny termin lub informację, że termin jest niedostępny;
+- gdy `armed=false`, pokazuje `Brak aktywnego terminu uzbrojenia` i nie eksponuje historycznej daty jako aktywnej;
+- gdy stan jest nieznany, nie zgaduje terminu.
+
+## Informacja zwrotna po operacji
+
+W 0.2.1 wynik `start`, `stop` albo `rearm` pozostaje widoczny podczas kontrolnego odczytu i po jego zakończeniu. Zwykły komunikat read-only nie może zastąpić wyniku ostatniej operacji sterującej.
+
+Po udanej operacji dashboard pokazuje wynik oraz końcowy `overall_status`. Jeżeli kontrolny odczyt statusu nie powiedzie się, dashboard zachowuje wynik operacji i jawnie informuje, że status potwierdzający jest niedostępny.
+
 ## Poza zakresem P07
 
 - bieżąca operacja i jej postęp — P08;
@@ -82,5 +94,7 @@ P07 wymaga:
 - testu anulowania potwierdzenia;
 - testu jednej potwierdzonej operacji i statusu końcowego;
 - testu blokady podwójnego kliknięcia;
+- zachowania wyniku operacji po kontrolnym odczycie statusu;
+- ukrycia historycznego `armed_until`, gdy Native Host jest rozbrojony;
 - zachowania headless smoke z `mutation_operations_invoked=0`;
 - pełnego Bridge CI i Control Center GUI CI.

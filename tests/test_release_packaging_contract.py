@@ -83,6 +83,16 @@ def test_release_workflow_is_manual_and_does_not_publish() -> None:
         assert forbidden not in workflow
 
 
+def test_release_version_is_aligned_for_0_2_1() -> None:
+    workflow = read(ROOT / ".github" / "workflows" / "control-center-release-artifact.yml")
+    pyproject = read(ROOT / "pyproject.toml")
+    module_manifest = json.loads(read(ROOT / "manifests" / "bartosz-dev-bridge.module.json"))
+
+    assert 'default: "0.2.1"' in workflow
+    assert 'version = "0.2.1"' in pyproject
+    assert module_manifest["version"] == "0.2.1"
+
+
 def test_release_smoke_waits_for_windowed_process_and_reports_failure_details() -> None:
     workflow = read(ROOT / ".github" / "workflows" / "control-center-release-artifact.yml")
     assert workflow.count("shell: pwsh") == 3
