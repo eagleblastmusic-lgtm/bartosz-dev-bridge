@@ -48,29 +48,29 @@ jobs:
           python -m pytest -vv
           tests/test_gui_skeleton_contract.py
           tests/test_gui_technology_spike_contract.py
-      - name: Bisect tests A-F
+      - name: Bisect tests A
         shell: bash
         run: |
           shopt -s nullglob
-          files=(tests/test_[a-fA-F]*.py)
+          files=(tests/test_[aA]*.py)
           ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
-      - name: Bisect tests G-L
+      - name: Bisect tests B
         shell: bash
         run: |
           shopt -s nullglob
-          files=(tests/test_[g-lG-L]*.py)
+          files=(tests/test_[bB]*.py)
           ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
-      - name: Bisect tests M-R
+      - name: Bisect tests C
         shell: bash
         run: |
           shopt -s nullglob
-          files=(tests/test_[m-rM-R]*.py)
+          files=(tests/test_[cC]*.py)
           ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
-      - name: Bisect tests S-Z
+      - name: Bisect tests D-F
         shell: bash
         run: |
           shopt -s nullglob
-          files=(tests/test_[s-zS-Z]*.py)
+          files=(tests/test_[d-fD-F]*.py)
           ((${#files[@]} == 0)) || python -m pytest -q "${files[@]}"
       - name: Report first remaining repository-wide regression
         run: python -m pytest -x --tb=line -q
