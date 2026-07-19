@@ -7,7 +7,7 @@ Status: IMPLEMENTED ON BRANCH
 Ekran `History` udostępnia dwa rozdzielone, ręcznie odświeżane widoki:
 
 1. `Zdarzenia Journalu` — techniczna, stronicowana historia eventów;
-2. `Sesje i receipts` — bounded podsumowania sesji, prób, trwałych wyników, checkpointów i promocji.
+2. `Sesje i receipts` — bounded podsumowania sesji, prób, trwałych wyników, checkpointów, promocji i jawnych grup naprawczych.
 
 Oba widoki korzystają wyłącznie z publicznego Operator API. GUI nie otwiera SQLite, nie wykonuje SQL i nie modyfikuje trwałego stanu.
 
@@ -67,6 +67,7 @@ Operacja `sessions` nie uruchamia PowerShella ani żadnego procesu. Operator otw
 
 - maksymalnie 100 sesji na żądanie;
 - maksymalnie 20 prób na sesję;
+- manifest sesji do 64 KiB;
 - trwały wynik do 64 KiB;
 - receipt do 2 MiB;
 - tylko kanoniczne ścieżki zadeklarowane przez konfigurację projektu;
@@ -81,13 +82,16 @@ Operator zwraca:
 
 - `bdb-session-history-v1`;
 - `bdb-session-summary-v1`;
-- `bdb-session-attempt-v1`.
+- `bdb-session-attempt-v1`;
+- `bdb-repair-correlation-v1` — jawna relacja przypisana do sesji;
+- `bdb-repair-group-v1` — bounded, zweryfikowana grupa sesji.
 
 GUI mapuje je do:
 
 - `bdb-gui-session-history-v1`;
 - `bdb-gui-session-summary-v1`;
-- `bdb-gui-session-attempt-v1`.
+- `bdb-gui-session-attempt-v1`;
+- `bdb-gui-repair-group-v1`.
 
 Każda próba może pokazać:
 
@@ -102,6 +106,42 @@ Każda próba może pokazać:
 - status receipt;
 - source commit, parent commit i promoted_at dla zweryfikowanej promocji.
 
+### Jawne relacje naprawcze
+
+Warstwa wykonawcza może przy utworzeniu sesji zapisać:
+
+```json
+{
+  "schema": "bdb-repair-correlation-v1",
+  "correlation_id": "<safe-id>",
+  "role": "initial | repair",
+  "predecessor_session_id": null
+}
+```
+
+Dla roli `repair` predecessor jest wymagany i musi wskazywać inną sesję. Correlation zostaje trwale związane z Native Session Store i manifestem sesji, a ingestion waliduje je ponownie przed zapisem manifestu w Journalu.
+
+Brak correlation pozostaje prawidłowy dla kompatybilności wstecznej i oznacza brak powiązania. Po związaniu correlation z sesją nie może zostać zmienione.
+
+Operator buduje grupę wyłącznie z jawnych obiektów zapisanych w manifestach. Grupa otrzymuje `verified=true` tylko wtedy, gdy:
+
+- ma dokładnie jedną sesję `initial`;
+- ma co najmniej jedną sesję `repair`;
+- każdy predecessor znajduje się w bounded odpowiedzi;
+- każdy łańcuch repair dochodzi do initial;
+- nie ma cyklu.
+
+Jeżeli limit odpowiedzi odetnie część łańcucha albo manifest jest niespójny, grupa pozostaje widoczna jako niezweryfikowana z ostrzeżeniem. System nie uzupełnia brakujących elementów heurystycznie.
+
+Control Center pokazuje w kolumnie `Łańcuch`:
+
+- `START` — zweryfikowana sesja initial;
+- `NAPRAWA` — zweryfikowana sesja repair;
+- `NIEZWERYF.` — correlation istnieje, ale bounded grupa nie przeszła pełnej walidacji;
+- `—` — brak jawnego correlation.
+
+Operator i GUI zawsze publikują `repair_relationships_inferred=false` albo równoważne `relationship_inferred=false`. Czas, alias projektu, nazwy plików, podobieństwo diffu i kolejność nie tworzą relacji.
+
 ### Jawne otwieranie lokalnych artefaktów
 
 Przyciski:
@@ -111,17 +151,6 @@ Przyciski:
 - `Otwórz katalog`;
 
 są aktywne wyłącznie dla artefaktów, które Operator wcześniej zwalidował jako kanoniczne, istniejące i poprawne. Nic nie otwiera się automatycznie przy starcie, zmianie projektu ani odświeżeniu.
-
-### Brak zgadywania relacji naprawczej
-
-Obecny Journal nie posiada ogólnego, trwałego identyfikatora łączącego oddzielną nieudaną sesję z późniejszą sesją naprawczą. Dlatego:
-
-- każda sesja jest pokazywana osobno;
-- `repair_relationships_inferred=false`;
-- GUI odrzuca odpowiedź, która próbuje podać inferowaną relację;
-- kolejność czasowa, nazwy, alias projektu i podobne pliki nie są podstawą do łączenia sesji.
-
-Pełny widok `failure → rollback → repair → receipt` między różnymi sesjami wymaga przyszłego jawnego correlation ID zapisywanego przez silnik wykonawczy.
 
 ## Brak pollingu i serializacja
 
@@ -139,4 +168,5 @@ Workery historii zdarzeń i sesji są objęte tym samym mechanizmem `one active 
 - automatyczny polling;
 - zdalny transport;
 - inferowanie relacji naprawczych między sesjami;
-- tworzenie correlation ID w istniejących historycznych danych.
+- retroaktywne tworzenie correlation ID w istniejących historycznych danych;
+- ręczna edycja correlation z poziomu GUI.
