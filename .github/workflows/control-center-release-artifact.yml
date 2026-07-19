@@ -1,0 +1,97 @@
+name: Control Center Release Artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Semantic version for the unsigned manual artifact"
+        required: true
+        default: "0.2.0"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-artifact:
+    name: Build verified Windows artifact
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install build dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev,gui,release]"
+      - name: Run release manifest and architecture tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -m pytest -vv
+          tests/test_release_manifest.py
+          tests/test_release_packaging_contract.py
+      - name: Build one-directory Control Center
+        shell: powershell
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --windowed `
+            --onedir `
+            --name BDB-Control-Center `
+            --paths . `
+            --collect-submodules bdb_gui `
+            --collect-submodules bdb_operator `
+            --collect-submodules bdb_bridge `
+            --add-data "scripts;scripts" `
+            packaging/windows/control_center_entry.py
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
+      - name: Smoke the bundled executable
+        shell: powershell
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $workspaces = Join-Path $env:RUNNER_TEMP "bdb-release-smoke-workspaces"
+          $report = Join-Path $env:RUNNER_TEMP "bdb-release-smoke.json"
+          New-Item -ItemType Directory -Path $workspaces -Force | Out-Null
+          & .\dist\BDB-Control-Center\BDB-Control-Center.exe `
+            --workspaces-root $workspaces `
+            --headless-smoke `
+            --json-out $report
+          if ($LASTEXITCODE -ne 0) { throw "Bundled Control Center smoke failed" }
+          $data = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+          if (
+            $data.status -ne "success" -or
+            $data.read_only_startup -ne $true -or
+            $data.mutation_operations_invoked -ne 0 -or
+            $data.tray_created -ne $false
+          ) {
+            $data | ConvertTo-Json -Depth 8 | Write-Host
+            throw "Bundled smoke violates the Control Center contract"
+          }
+      - name: Create ZIP and manifest
+        shell: powershell
+        run: |
+          $release = Join-Path $PWD "release"
+          New-Item -ItemType Directory -Path $release -Force | Out-Null
+          $zip = Join-Path $release "BDB-Control-Center-windows-x86_64-${{ inputs.version }}.zip"
+          Compress-Archive -Path .\dist\BDB-Control-Center -DestinationPath $zip -CompressionLevel Optimal
+          python scripts/build_release_manifest.py create `
+            --artifact $zip `
+            --version "${{ inputs.version }}" `
+            --source-commit "$env:GITHUB_SHA" `
+            --output (Join-Path $release "bdb-release-manifest-v1.json")
+          if ($LASTEXITCODE -ne 0) { throw "Release manifest creation failed" }
+          python scripts/build_release_manifest.py verify `
+            --artifact $zip `
+            --manifest (Join-Path $release "bdb-release-manifest-v1.json")
+          if ($LASTEXITCODE -ne 0) { throw "Release artifact verification failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bdb-control-center-windows-${{ inputs.version }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
