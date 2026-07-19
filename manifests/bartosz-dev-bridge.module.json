@@ -1,0 +1,39 @@
+{
+  "schema": "bartosz-os-module-manifest-v1",
+  "module_id": "devmaster.bartosz-dev-bridge",
+  "display_name": "Bartosz Dev Bridge",
+  "version": "0.2.0",
+  "responsibility": "local_code_edit_test_promote_bridge",
+  "owner_module": "DevMaster",
+  "source_repository": "eagleblastmusic-lgtm/bartosz-dev-bridge",
+  "transport": {
+    "kind": "in_process",
+    "local_only": true,
+    "network_listener": false
+  },
+  "operations": {
+    "read": ["capabilities", "list_projects", "status", "events", "current_operation", "logs"],
+    "mutation": ["prepare", "start", "stop", "rearm"],
+    "arbitrary_shell": false,
+    "auto_merge": false,
+    "auto_deploy": false
+  },
+  "mutation_policy": {
+    "adapter_default": "disabled",
+    "requires_adapter_enablement": true,
+    "requires_request_authorization": true,
+    "implicit_mutation": false
+  },
+  "state": {
+    "adapter_persists_state": false,
+    "operator_api_is_execution_boundary": true,
+    "github_is_code_source_of_truth": true,
+    "bartosz_os_core_is_source_of_truth": false
+  },
+  "contracts": {
+    "request": "bdb-bartosz-os-request-v1",
+    "response": "bdb-bartosz-os-response-v1",
+    "operator_response": "bdb-operator-response-v1",
+    "event": "bdb-event-v1"
+  }
+}
