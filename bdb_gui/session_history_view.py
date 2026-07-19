@@ -20,7 +20,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .session_history import SessionAttempt, SessionHistorySnapshot, SessionSummary
+from .session_history import (
+    RepairGroupSummary,
+    SessionAttempt,
+    SessionHistorySnapshot,
+    SessionSummary,
+)
 
 
 PathOpener = Callable[[str], bool]
@@ -36,6 +41,7 @@ class SessionHistoryWidget(QWidget):
         self._project_available = False
         self._busy = False
         self._sessions: list[SessionSummary] = []
+        self._groups_by_session: dict[str, RepairGroupSummary] = {}
         self._last_snapshot: SessionHistorySnapshot | None = None
         self._selected_session: SessionSummary | None = None
         self._selected_attempt: SessionAttempt | None = None
@@ -49,6 +55,10 @@ class SessionHistoryWidget(QWidget):
     @property
     def session_count(self) -> int:
         return len(self._sessions)
+
+    @property
+    def repair_group_count(self) -> int:
+        return len({group.correlation_id for group in self._groups_by_session.values()})
 
     def set_project_available(self, available: bool) -> None:
         self._project_available = bool(available)
@@ -76,28 +86,40 @@ class SessionHistoryWidget(QWidget):
         self.set_busy(False)
         if not snapshot.ok:
             self._sessions = []
+            self._groups_by_session = {}
             self._render_rows()
             self.feedback_label.setText(
                 f"{snapshot.error_code or 'unknown'} — {snapshot.error_message or 'brak szczegółów'}"
             )
             return
         self._sessions = list(snapshot.sessions)
+        self._groups_by_session = {
+            session_id: group
+            for group in snapshot.repair_groups
+            for session_id in group.session_ids
+        }
         self._render_rows()
+        verified = sum(1 for group in snapshot.repair_groups if group.verified)
         self.feedback_label.setText(
-            f"Sesje: {len(self._sessions)} · limit: {snapshot.limit}. "
-            "Relacje naprawcze między różnymi sesjami nie są zgadywane."
+            f"Sesje: {len(self._sessions)} · grupy naprawcze: {len(snapshot.repair_groups)} "
+            f"(zweryfikowane: {verified}) · limit: {snapshot.limit}. "
+            "Relacje są pokazywane wyłącznie z jawnego correlation ID."
         )
 
     def smoke_report(self) -> dict[str, Any]:
+        groups = () if self._last_snapshot is None else self._last_snapshot.repair_groups
         return {
             "session_history_view_present": True,
             "session_history_read_only": True,
             "session_history_loaded": self._last_snapshot is not None,
             "session_history_count": len(self._sessions),
+            "session_repair_group_count": len(groups),
+            "session_verified_repair_group_count": sum(1 for group in groups if group.verified),
             "session_result_open_explicit": True,
             "session_receipt_open_explicit": True,
             "session_folder_open_explicit": True,
             "session_repair_relationships_inferred": False,
+            "session_repair_relationships_explicit_only": True,
         }
 
     def _build_ui(self) -> None:
@@ -115,8 +137,8 @@ class SessionHistoryWidget(QWidget):
         self.project_label.setObjectName("HeroText")
         self.project_label.setWordWrap(True)
         notice = QLabel(
-            "Każda sesja jest pokazywana osobno. Control Center nie łączy automatycznie "
-            "nieudanej sesji z późniejszą sesją naprawczą."
+            "Powiązanie START → NAPRAWA jest pokazywane tylko wtedy, gdy silnik zapisał "
+            "wersjonowany correlation ID i dokładny predecessor session ID."
         )
         notice.setObjectName("SessionHistoryNotice")
         notice.setWordWrap(True)
@@ -141,10 +163,19 @@ class SessionHistoryWidget(QWidget):
 
         content = QHBoxLayout()
         content.setSpacing(12)
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 8)
         self.table.setObjectName("SessionHistoryTable")
         self.table.setHorizontalHeaderLabels(
-            ["Zaktualizowano", "Session", "Stan", "Próby", "Wynik", "Checkpoint", "Promocja"]
+            [
+                "Zaktualizowano",
+                "Session",
+                "Stan",
+                "Próby",
+                "Wynik",
+                "Checkpoint",
+                "Promocja",
+                "Łańcuch",
+            ]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
@@ -153,7 +184,7 @@ class SessionHistoryWidget(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for column in range(2, 7):
+        for column in range(2, 8):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         self.table.itemSelectionChanged.connect(self._render_selection)
         content.addWidget(self.table, 3)
@@ -162,7 +193,7 @@ class SessionHistoryWidget(QWidget):
         details_panel.setObjectName("SessionHistoryDetailsPanel")
         details_layout = QVBoxLayout(details_panel)
         details_layout.setContentsMargins(14, 12, 14, 12)
-        details_title = QLabel("Podsumowanie wybranej sesji")
+        details_title = QLabel("Podsumowanie wybranej sesji i łańcucha")
         details_title.setObjectName("HistorySectionTitle")
         self.details = QTextEdit()
         self.details.setObjectName("SessionHistoryDetails")
@@ -205,6 +236,7 @@ class SessionHistoryWidget(QWidget):
                 latest.result_status if latest and latest.result_status else "—",
                 latest.checkpoint_state if latest and latest.checkpoint_state else "—",
                 latest.promotion_status if latest else "—",
+                self._repair_label(session),
             )
             for column, value in enumerate(values):
                 self.table.setItem(row, column, QTableWidgetItem(value))
@@ -215,6 +247,15 @@ class SessionHistoryWidget(QWidget):
             self._selected_attempt = None
             self.details.setPlainText("Brak sesji dla wybranego projektu.")
             self._update_open_buttons()
+
+    def _repair_label(self, session: SessionSummary) -> str:
+        correlation = session.repair_correlation
+        if correlation is None:
+            return "—"
+        group = self._groups_by_session.get(session.session_id)
+        if group is None or not group.verified:
+            return "NIEZWERYF."
+        return "START" if correlation.role == "initial" else "NAPRAWA"
 
     def _render_selection(self) -> None:
         rows = self.table.selectionModel().selectedRows()
@@ -228,9 +269,12 @@ class SessionHistoryWidget(QWidget):
             return
         self._selected_session = self._sessions[row]
         self._selected_attempt = self._selected_session.latest_attempt
-        self.details.setPlainText(
-            json.dumps(self._selected_session.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
-        )
+        group = self._groups_by_session.get(self._selected_session.session_id)
+        document = {
+            "session": self._selected_session.to_dict(),
+            "repair_group": group.to_dict() if group is not None else None,
+        }
+        self.details.setPlainText(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True))
         self._update_open_buttons()
 
     def _open_result(self) -> None:
@@ -263,6 +307,7 @@ class SessionHistoryWidget(QWidget):
 
     def _reset(self) -> None:
         self._sessions = []
+        self._groups_by_session = {}
         self._last_snapshot = None
         self._selected_session = None
         self._selected_attempt = None
