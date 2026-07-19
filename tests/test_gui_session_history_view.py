@@ -21,6 +21,7 @@ def application() -> QApplication:
 
 
 def test_session_history_view_opens_only_explicit_validated_paths(tmp_path: Path) -> None:
+    app = application()
     root, _, _, _ = workspace_fixture(tmp_path)
     snapshot = SessionHistoryService(
         OperatorApi(repo_root=tmp_path, platform_name="posix")
@@ -30,7 +31,7 @@ def test_session_history_view_opens_only_explicit_validated_paths(tmp_path: Path
     widget.set_project("sample", str(root))
 
     widget.apply_snapshot(snapshot)
-    application().processEvents()
+    app.processEvents()
 
     assert opened == []
     assert widget.session_count == 2
@@ -43,7 +44,7 @@ def test_session_history_view_opens_only_explicit_validated_paths(tmp_path: Path
     widget.open_result_button.click()
     widget.open_receipt_button.click()
     widget.open_folder_button.click()
-    application().processEvents()
+    app.processEvents()
 
     assert opened[0] == selected.result_file.path
     assert opened[1] == selected.receipt_file.path
@@ -52,6 +53,7 @@ def test_session_history_view_opens_only_explicit_validated_paths(tmp_path: Path
 
 
 def test_failed_unpromoted_session_disables_receipt_action(tmp_path: Path) -> None:
+    app = application()
     root, _, _, _ = workspace_fixture(tmp_path)
     snapshot = SessionHistoryService(
         OperatorApi(repo_root=tmp_path, platform_name="posix")
@@ -59,10 +61,10 @@ def test_failed_unpromoted_session_disables_receipt_action(tmp_path: Path) -> No
     widget = SessionHistoryWidget(path_opener=lambda path: True)
     widget.set_project("sample", str(root))
     widget.apply_snapshot(snapshot)
-    application().processEvents()
+    app.processEvents()
 
     widget.table.selectRow(1)
-    application().processEvents()
+    app.processEvents()
 
     assert widget.open_result_button.isEnabled() is True
     assert widget.open_receipt_button.isEnabled() is False
@@ -73,6 +75,7 @@ def test_failed_unpromoted_session_disables_receipt_action(tmp_path: Path) -> No
 
 
 def test_empty_session_history_smoke_is_read_only() -> None:
+    application()
     widget = SessionHistoryWidget(path_opener=lambda path: True)
     report = widget.smoke_report()
 
