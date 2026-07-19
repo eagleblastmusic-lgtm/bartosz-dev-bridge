@@ -119,9 +119,18 @@ Warstwa wykonawcza może przy utworzeniu sesji zapisać:
 }
 ```
 
-Dla roli `repair` predecessor jest wymagany i musi wskazywać inną sesję. Correlation zostaje trwale związane z Native Session Store i manifestem sesji, a ingestion waliduje je ponownie przed zapisem manifestu w Journalu.
+Dla roli `initial` predecessor musi być `null`, a dane `correlation_id` może zostać związane tylko z jedną sesją initial.
 
-Brak correlation pozostaje prawidłowy dla kompatybilności wstecznej i oznacza brak powiązania. Po związaniu correlation z sesją nie może zostać zmienione.
+Dla roli `repair` predecessor jest wymagany i musi wskazywać inną sesję, która:
+
+- już istnieje w tym samym Native Session Store;
+- należy do tego samego `repo_alias` i `repository_id`;
+- posiada jawne correlation;
+- posiada dokładnie ten sam `correlation_id`.
+
+Brakujący predecessor, drugi initial, różne correlation ID albo predecessor z innego repozytorium są odrzucane przed związaniem nowej sesji repair.
+
+Correlation zostaje trwale związane z Native Session Store i manifestem sesji, a ingestion waliduje je ponownie przed zapisem manifestu w Journalu. Brak correlation pozostaje prawidłowy dla kompatybilności wstecznej i oznacza brak powiązania. Po związaniu correlation z sesją nie może zostać zmienione.
 
 Operator buduje grupę wyłącznie z jawnych obiektów zapisanych w manifestach. Grupa otrzymuje `verified=true` tylko wtedy, gdy:
 
