@@ -13,11 +13,16 @@ def initialize_calculator2(root: Path) -> dict[str, Any]:
     fixture = root / "calculator2"
     fixture.mkdir()
     git(fixture, "init")
+    git(fixture, "config", "core.autocrlf", "false")
     git(fixture, "config", "user.name", "BDB One Message Pilot")
     git(fixture, "config", "user.email", "one-message-pilot@example.invalid")
     (fixture / "src").mkdir()
     (fixture / "tests").mkdir()
     (fixture / "src" / "__init__.py").write_text("", encoding="utf-8")
+    (fixture / ".gitignore").write_text(
+        ".pytest_cache/\n__pycache__/\n*.pyc\n",
+        encoding="utf-8",
+    )
 
     source_before = b"def add(left: int, right: int) -> int:\n    return left + right\n"
     tests_before = (
