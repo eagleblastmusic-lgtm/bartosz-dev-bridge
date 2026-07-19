@@ -86,18 +86,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     application.setOrganizationName("Bartosz Dev Bridge")
     application.setQuitOnLastWindowClosed(args.headless_smoke)
 
-    common = {
-        "bootstrap_service": BootstrapService(),
-        "operations_service": ProjectOperationsService(),
-        "workspaces_root": workspaces_root,
-        "auto_load_status": not args.headless_smoke,
-    }
     tray_controller: TrayController | None = None
     if args.headless_smoke:
         # Smoke never creates a tray icon and never changes close semantics.
-        window = ProjectControlCenterWindow(**common)
+        window = ProjectControlCenterWindow(
+            bootstrap_service=BootstrapService(),
+            operations_service=ProjectOperationsService(),
+            workspaces_root=workspaces_root,
+            auto_load_status=not args.headless_smoke,
+        )
     else:
-        window = TrayProjectControlCenterWindow(**common)
+        window = TrayProjectControlCenterWindow(
+            bootstrap_service=BootstrapService(),
+            operations_service=ProjectOperationsService(),
+            workspaces_root=workspaces_root,
+            auto_load_status=not args.headless_smoke,
+        )
         tray_controller = TrayController(application, window)
         window.install_tray_controller(tray_controller)
         tray_controller.start()
