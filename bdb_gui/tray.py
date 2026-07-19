@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Literal, Protocol
 
-from PySide6.QtCore import QObject, Slot
+from PySide6.QtCore import QObject, QTimer, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QStyle, QSystemTrayIcon
 
@@ -14,6 +14,7 @@ ExitChoiceProvider = Callable[[], ExitChoice]
 
 class TrayWindow(Protocol):
     control_finished: object
+    dashboard_ready: object
     diagnostics_export_finished: object
     prepare_finished: object
 
@@ -89,6 +90,7 @@ class TrayController(QObject):
         self._notification_sink = notification_sink
         self._quit_requested = False
         self._quit_after_stop = False
+        self._quit_when_idle = False
         self._hidden_notice_sent = False
         available = QSystemTrayIcon.isSystemTrayAvailable() if available_override is None else available_override
         self.available = bool(available)
@@ -110,6 +112,7 @@ class TrayController(QObject):
         self.tray.activated.connect(self._activated)
 
         window.control_finished.connect(self._on_control_finished)  # type: ignore[attr-defined]
+        window.dashboard_ready.connect(self._complete_quit_when_idle)  # type: ignore[attr-defined]
         window.prepare_finished.connect(self._on_prepare_finished)  # type: ignore[attr-defined]
         window.diagnostics_export_finished.connect(self._on_export_finished)  # type: ignore[attr-defined]
 
@@ -180,9 +183,16 @@ class TrayController(QObject):
         if self._quit_after_stop and getattr(result, "action", None) == "stop":
             self._quit_after_stop = False
             if bool(getattr(result, "ok", False)):
-                self.complete_quit()
+                self._quit_when_idle = True
+                QTimer.singleShot(0, self._complete_quit_when_idle)
             else:
                 self.show_window()
+
+    @Slot()
+    def _complete_quit_when_idle(self) -> None:
+        if self._quit_when_idle and not self._window.has_active_task():
+            self._quit_when_idle = False
+            self.complete_quit()
 
     @Slot(object)
     def _on_prepare_finished(self, result: object) -> None:
