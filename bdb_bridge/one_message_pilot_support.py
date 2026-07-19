@@ -154,14 +154,16 @@ def submit_patch(
     request_id: str,
     operations: list[dict[str, Any]],
     timeout: float,
+    repo_alias: str = ALIAS,
+    profile_id: str = "poc_pytest",
 ) -> dict[str, Any]:
     action = {
         "schema": "bdb-action-v1",
-        "repo_alias": ALIAS,
+        "repo_alias": repo_alias,
         "operation": "multi_file_patch",
         "expected_revision": 0,
         "payload": {
-            "profile_id": "poc_pytest",
+            "profile_id": profile_id,
             "patch": {"schema": "bdb-multi-file-patch-v1", "operations": operations},
         },
     }
