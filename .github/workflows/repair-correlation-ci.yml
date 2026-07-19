@@ -1,0 +1,159 @@
+name: Repair Correlation CI
+
+on:
+  pull_request:
+    branches: [gpt-work/control-center-session-receipts]
+    paths:
+      - ".github/workflows/repair-correlation-ci.yml"
+      - "bdb_bridge/**"
+      - "bdb_gui/**"
+      - "bdb_operator/**"
+      - "scripts/**"
+      - "tests/**"
+      - "docs/**"
+      - "pyproject.toml"
+  push:
+    branches: [gpt-work/repair-correlation-id]
+
+permissions:
+  contents: read
+
+jobs:
+  focused-contracts:
+    name: Correlation contracts and GUI / Windows / Python 3.12
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install GUI test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev,gui]"
+      - name: Compile correlation layers
+        run: python -m compileall -q bdb_bridge bdb_operator bdb_gui
+      - name: Repair correlation contract
+        run: python -m pytest -q tests/test_repair_correlation.py
+      - name: Native action persistence
+        run: python -m pytest -q tests/test_native_action_repair_correlation.py
+      - name: Operator projection
+        run: python -m pytest -q tests/test_operator_session_projection.py tests/test_operator_session_projection_boundaries.py
+      - name: Strict GUI model
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q tests/test_gui_session_history.py
+      - name: Visible repair chain
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q tests/test_gui_session_history_view.py tests/test_gui_session_history_window.py
+
+  full-test:
+    name: Full pytest / ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.11"
+          - os: windows-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.14"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Compile changed packages
+        run: python -m compileall -q bdb_bridge bdb_gui bdb_operator
+      - name: Run full test suite
+        run: python -m pytest -q
+
+  calculator2-pilot:
+    name: Windows / Python 3.14 / calculator2 correlated repair
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Run correlated calculator2 pilot
+        shell: powershell
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "bdb-correlated-calculator2"
+          .\scripts\Invoke-BDBOneMessageRepairPilot.ps1 `
+            -Python (Get-Command python).Source `
+            -Root $root `
+            -TimeoutSeconds 180
+          $reportPath = Join-Path $root "one-message-repair-report.json"
+          $report = Get-Content $reportPath -Raw | ConvertFrom-Json
+          if ($report.status -ne "pass") { throw "Calculator2 correlated pilot did not pass" }
+          if ($report.repair_correlation.schema -ne "bdb-repair-correlation-v1") { throw "Correlation schema missing" }
+          if ($report.repair_correlation.verified -ne $true) { throw "Correlation was not verified" }
+          if ($report.repair_correlation.initial_session_id -ne $report.initial_attempt.session_id) { throw "Initial session mismatch" }
+          if ($report.repair_correlation.repair_session_id -ne $report.repair_attempt.session_id) { throw "Repair session mismatch" }
+          if ($report.repair_attempt.predecessor_session_id -ne $report.initial_attempt.session_id) { throw "Predecessor mismatch" }
+          if ($report.initial_attempt.repair_role -ne "initial" -or $report.repair_attempt.repair_role -ne "repair") { throw "Repair roles are invalid" }
+          if ($report.user_interventions_between_attempts -ne 0 -or $report.source_checkout_clean -ne $true) { throw "Autonomy or cleanliness failed" }
+          "PILOT_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: calculator2-correlated-repair-evidence
+          path: ${{ env.PILOT_ROOT }}
+          if-no-files-found: error
+          retention-days: 14
+
+  inventory2-pilot:
+    name: Windows / Python 3.14 / inventory2 correlated repair
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Run correlated inventory2 pilot
+        shell: powershell
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "bdb-correlated-inventory2"
+          .\scripts\Invoke-BDBSecondIndependentPilot.ps1 `
+            -Python (Get-Command python).Source `
+            -Root $root `
+            -TimeoutSeconds 180
+          $reportPath = Join-Path $root "second-independent-pilot-report.json"
+          $report = Get-Content $reportPath -Raw | ConvertFrom-Json
+          if ($report.status -ne "pass") { throw "Inventory2 correlated pilot did not pass" }
+          if ($report.profile_id -ne "poc_unittest" -or $report.repo_alias -ne "inventory2") { throw "Independent profile changed" }
+          if ($report.repair_correlation.schema -ne "bdb-repair-correlation-v1") { throw "Correlation schema missing" }
+          if ($report.repair_correlation.verified -ne $true) { throw "Correlation was not verified" }
+          if ($report.repair_correlation.initial_session_id -ne $report.initial_attempt.session_id) { throw "Initial session mismatch" }
+          if ($report.repair_correlation.repair_session_id -ne $report.repair_attempt.session_id) { throw "Repair session mismatch" }
+          if ($report.repair_attempt.predecessor_session_id -ne $report.initial_attempt.session_id) { throw "Predecessor mismatch" }
+          if ($report.initial_attempt.repair_role -ne "initial" -or $report.repair_attempt.repair_role -ne "repair") { throw "Repair roles are invalid" }
+          if ($report.user_interventions_between_attempts -ne 0 -or $report.source_checkout_clean -ne $true) { throw "Autonomy or cleanliness failed" }
+          "PILOT_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: inventory2-correlated-repair-evidence
+          path: ${{ env.PILOT_ROOT }}
+          if-no-files-found: error
+          retention-days: 14
