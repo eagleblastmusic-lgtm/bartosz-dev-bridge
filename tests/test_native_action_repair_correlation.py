@@ -222,7 +222,7 @@ def test_repair_requires_existing_predecessor(tmp_path: Path) -> None:
         )
 
     assert error.value.code == "invalid_payload"
-    assert "not bound" in error.value.message
+    assert "not bound" in str(error.value)
     assert not store_path.exists()
 
 
@@ -240,7 +240,7 @@ def test_repair_requires_matching_predecessor_correlation(tmp_path: Path) -> Non
         )
 
     assert error.value.code == "invalid_payload"
-    assert "does not match" in error.value.message
+    assert "does not match" in str(error.value)
 
 
 def test_second_initial_with_same_correlation_is_rejected(tmp_path: Path) -> None:
@@ -257,7 +257,7 @@ def test_second_initial_with_same_correlation_is_rejected(tmp_path: Path) -> Non
         )
 
     assert error.value.code == "journal_conflict"
-    assert "already has" in error.value.message
+    assert "already has" in str(error.value)
 
 
 def test_repair_predecessor_must_belong_to_same_repository_alias(tmp_path: Path) -> None:
@@ -275,7 +275,7 @@ def test_repair_predecessor_must_belong_to_same_repository_alias(tmp_path: Path)
         )
 
     assert error.value.code == "policy_denied"
-    assert "different repository alias" in error.value.message
+    assert "different repository alias" in str(error.value)
 
 
 def test_uncorrelated_native_session_remains_backward_compatible(tmp_path: Path) -> None:
