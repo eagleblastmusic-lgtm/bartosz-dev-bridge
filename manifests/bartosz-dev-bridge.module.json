@@ -2,7 +2,7 @@
   "schema": "bartosz-os-module-manifest-v1",
   "module_id": "devmaster.bartosz-dev-bridge",
   "display_name": "Bartosz Dev Bridge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "responsibility": "local_code_edit_test_promote_bridge",
   "owner_module": "DevMaster",
   "source_repository": "eagleblastmusic-lgtm/bartosz-dev-bridge",
