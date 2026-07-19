@@ -22,6 +22,13 @@ def test_one_message_repair_pilot_keeps_the_bounded_contract() -> None:
     assert "merge_pull_request" not in combined
 
 
+def test_one_message_repair_pilot_has_bounded_startup_grace() -> None:
+    entrypoint = (ROOT / "scripts" / "one_message_repair_pilot.py").read_text(encoding="utf-8")
+
+    assert 'description == "Bridge RUNNING"' in entrypoint
+    assert "time.sleep(1.0)" in entrypoint
+
+
 def test_one_message_repair_pilot_has_a_powershell_entrypoint() -> None:
     wrapper = (ROOT / "scripts" / "Invoke-BDBOneMessageRepairPilot.ps1").read_text(
         encoding="utf-8"
