@@ -108,9 +108,13 @@ def test_prepare_result_schema_requires_one_explicit_mutation() -> None:
     assert properties["mutation_operations_invoked"] == {"const": 1}
 
 
-def test_control_center_smoke_preserves_zero_mutation_startup_gate() -> None:
+def test_control_center_smoke_preserves_0_3_0_zero_mutation_gate() -> None:
     schema = load("bdb-control-center-smoke-v1.schema.json")
     properties = schema["properties"]
+    assert "application_version" in schema["required"]
+    assert properties["application_version"]["pattern"] == (
+        "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"
+    )
     assert properties["read_only_startup"] == {"const": True}
     assert properties["mutation_operations_invoked"] == {"const": 0}
     assert properties["confirmation_required"] == {"const": True}
@@ -119,5 +123,10 @@ def test_control_center_smoke_preserves_zero_mutation_startup_gate() -> None:
     assert properties["prepare_confirmation_required"] == {"const": True}
     assert properties["current_operation_read_only"] == {"const": True}
     assert properties["history_read_only"] == {"const": True}
+    assert properties["session_history_read_only"] == {"const": True}
+    assert properties["session_result_open_explicit"] == {"const": True}
+    assert properties["session_receipt_open_explicit"] == {"const": True}
+    assert properties["session_folder_open_explicit"] == {"const": True}
+    assert properties["session_repair_relationships_inferred"] == {"const": False}
     assert properties["diagnostics_collect_explicit"] == {"const": True}
     assert properties["diagnostics_export_explicit"] == {"const": True}
