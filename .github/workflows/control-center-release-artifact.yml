@@ -25,7 +25,7 @@ jobs:
           cache: pip
       - name: Install build dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev,gui,release]"
-      - name: Validate requested version against source identity
+      - name: Validate source identity and acceptance entrypoint
         shell: pwsh
         run: |
           $requested = "${{ inputs.version }}"
@@ -36,6 +36,18 @@ jobs:
             if ($candidate.Trim() -ne $requested) {
               throw "Requested version $requested does not match source version $candidate"
             }
+          }
+
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/Invoke-BDBControlCenterArtifactAcceptance.ps1"),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            throw "Acceptance script has PowerShell syntax errors"
           }
       - name: Run release manifest and architecture tests
         env:
@@ -120,13 +132,14 @@ jobs:
           ) {
             throw "Bundled smoke violates the Control Center 0.3.0 contract"
           }
-      - name: Create ZIP and manifest
+      - name: Create ZIP, manifest and acceptance receipt
         shell: pwsh
         run: |
           $release = Join-Path $PWD "release"
           New-Item -ItemType Directory -Path $release -Force | Out-Null
           $zip = Join-Path $release "BDB-Control-Center-windows-x86_64-${{ inputs.version }}.zip"
           $manifestPath = Join-Path $release "bdb-release-manifest-v1.json"
+          $acceptanceScript = Join-Path $release "Invoke-BDBControlCenterArtifactAcceptance.ps1"
           Compress-Archive -Path .\dist\BDB-Control-Center -DestinationPath $zip -CompressionLevel Optimal
           python scripts/build_release_manifest.py create `
             --artifact $zip `
@@ -150,6 +163,13 @@ jobs:
           ) {
             throw "Release manifest identity or distribution policy is invalid"
           }
+
+          Copy-Item -LiteralPath "scripts/Invoke-BDBControlCenterArtifactAcceptance.ps1" -Destination $acceptanceScript
+          & $acceptanceScript `
+            -ReleaseDirectory $release `
+            -ExpectedVersion "${{ inputs.version }}" `
+            -ExpectedSourceCommit "$env:GITHUB_SHA"
+          if ($LASTEXITCODE -ne 0) { throw "Self-contained artifact acceptance failed" }
       - uses: actions/upload-artifact@v4
         with:
           name: bdb-control-center-windows-${{ inputs.version }}
