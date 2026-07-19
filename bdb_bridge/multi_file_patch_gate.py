@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .fixed_test_profiles import ALLOWED_FIXED_TEST_PROFILES, PYTEST_PROFILE
 from .models import BridgeErrorCode
 from .multi_file_patch_models import MULTI_FILE_PATCH_SCHEMA
 from .multi_file_patch_parser import parse_multi_file_patch
@@ -9,7 +10,8 @@ from .protocol import BridgeError
 
 
 MULTI_FILE_PATCH_OPERATION = "multi_file_patch"
-MULTI_FILE_PATCH_PROFILE = "poc_pytest"
+MULTI_FILE_PATCH_PROFILE = PYTEST_PROFILE
+MULTI_FILE_PATCH_PROFILES = ALLOWED_FIXED_TEST_PROFILES
 
 
 def _canonical_hash(value: object, field: str) -> str:
@@ -40,10 +42,12 @@ def validate_multi_file_patch_command(document: dict[str, Any]) -> None:
             f"multi_file_patch payload keys mismatch; missing={sorted(expected_keys - actual_keys)} "
             f"unexpected={sorted(actual_keys - expected_keys)}",
         )
-    if payload.get("profile_id") != MULTI_FILE_PATCH_PROFILE:
+    profile_id = payload.get("profile_id")
+    if profile_id not in MULTI_FILE_PATCH_PROFILES:
         raise BridgeError(
             BridgeErrorCode.POLICY_DENIED,
-            f"multi_file_patch profile_id must be exactly {MULTI_FILE_PATCH_PROFILE}",
+            "multi_file_patch profile_id must be one of the fixed local profiles: "
+            + ", ".join(sorted(MULTI_FILE_PATCH_PROFILES)),
         )
     patch = payload.get("patch")
     if not isinstance(patch, dict) or patch.get("schema") != MULTI_FILE_PATCH_SCHEMA:
