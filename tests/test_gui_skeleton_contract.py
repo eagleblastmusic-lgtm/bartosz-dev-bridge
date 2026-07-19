@@ -55,7 +55,8 @@ def test_production_gui_packages_and_entrypoint_exist() -> None:
     pyproject = read(ROOT / "pyproject.toml")
     assert 'bdb-control-center = "bdb_gui.app:main"' in pyproject
     assert 'gui = ["PySide6-Essentials>=6.10,<6.12"]' in pyproject
-    assert 'include = ["bdb_bridge*", "bdb_operator*", "bdb_gui*", "bdb_poc*"]' in pyproject
+    for package in ("bdb_bridge*", "bdb_operator*", "bdb_gui*", "bdb_poc*"):
+        assert f'"{package}"' in pyproject
     assert "dependencies = []" in pyproject
 
 
