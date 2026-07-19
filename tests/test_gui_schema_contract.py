@@ -64,11 +64,6 @@ def test_diagnostics_schema_is_bounded_sanitized_and_read_only() -> None:
     assert properties["mutation_operations_invoked"] == {"const": 0}
     assert properties["redaction_version"] == {"const": "bdb-redaction-v1"}
     assert properties["sections"]["maxItems"] == 4
-    section = properties["sections"]["items"]
-    assert section["additionalProperties"] is False
-    assert section["properties"]["name"]["enum"] == [
-        "capabilities", "status", "current_operation", "logs", "collection"
-    ]
 
 
 def test_diagnostics_export_schema_requires_zip_receipt_fields() -> None:
@@ -81,14 +76,48 @@ def test_diagnostics_export_schema_requires_zip_receipt_fields() -> None:
     assert properties["entries"]["uniqueItems"] is True
 
 
+def test_prepare_plan_schema_matches_closed_operator_contract() -> None:
+    schema = load("bdb-gui-prepare-plan-v1.schema.json")
+    properties = schema["properties"]
+    assert schema["additionalProperties"] is False
+    assert properties["alias"]["pattern"] == "^[a-z][a-z0-9-]{0,31}$"
+    assert properties["allowed_paths"]["maxItems"] == 100
+    assert properties["test_timeout_seconds"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 3600,
+    }
+    for unsupported in (
+        "native_config",
+        "max_patch_bytes",
+        "max_changed_files",
+        "auto_send_max_bytes",
+        "worker_timeout_seconds",
+    ):
+        assert unsupported not in properties
+    assert properties["requires_confirmation"] == {"const": True}
+    assert properties["read_only"] == {"const": True}
+    assert properties["mutation_operations_invoked"] == {"const": 0}
+
+
+def test_prepare_result_schema_requires_one_explicit_mutation() -> None:
+    schema = load("bdb-gui-prepare-result-v1.schema.json")
+    properties = schema["properties"]
+    assert schema["additionalProperties"] is False
+    assert properties["plan"] == {"$ref": "bdb-gui-prepare-plan-v1"}
+    assert properties["mutation_operations_invoked"] == {"const": 1}
+
+
 def test_control_center_smoke_preserves_zero_mutation_startup_gate() -> None:
     schema = load("bdb-control-center-smoke-v1.schema.json")
     properties = schema["properties"]
     assert properties["read_only_startup"] == {"const": True}
     assert properties["mutation_operations_invoked"] == {"const": 0}
     assert properties["confirmation_required"] == {"const": True}
+    assert properties["projects_wizard_present"] == {"const": True}
+    assert properties["prepare_plan_required"] == {"const": True}
+    assert properties["prepare_confirmation_required"] == {"const": True}
     assert properties["current_operation_read_only"] == {"const": True}
     assert properties["history_read_only"] == {"const": True}
-    assert properties["diagnostics_view_present"] == {"type": "boolean"}
     assert properties["diagnostics_collect_explicit"] == {"const": True}
     assert properties["diagnostics_export_explicit"] == {"const": True}

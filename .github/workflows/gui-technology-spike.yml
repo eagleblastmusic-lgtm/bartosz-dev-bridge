@@ -17,12 +17,14 @@ on:
       - "docs/BDB_CONTROL_CENTER_CURRENT_OPERATION.md"
       - "docs/BDB_CONTROL_CENTER_HISTORY.md"
       - "docs/BDB_CONTROL_CENTER_DIAGNOSTICS.md"
+      - "docs/BDB_CONTROL_CENTER_PROJECT_WIZARD.md"
       - "docs/adr/0006-pyside6-qt-widgets-for-control-center-mvp.md"
       - "docs/adr/0007-read-only-asynchronous-gui-bootstrap.md"
       - "docs/adr/0008-explicit-serialized-process-controls.md"
       - "docs/adr/0009-read-only-current-operation-view.md"
       - "docs/adr/0010-bounded-manual-journal-history.md"
       - "docs/adr/0011-explicit-sanitized-diagnostics-export.md"
+      - "docs/adr/0012-two-gate-project-prepare-wizard.md"
       - "docs/adr/README.md"
 
 permissions:
@@ -53,6 +55,7 @@ jobs:
           python -m pytest -vv
           tests/test_gui_skeleton_contract.py
           tests/test_gui_diagnostics_architecture.py
+          tests/test_gui_project_prepare_architecture.py
           tests/test_gui_schema_contract.py
           tests/test_gui_technology_spike_contract.py
       - name: Run read-only bootstrap unit tests
@@ -91,6 +94,14 @@ jobs:
           tests/test_gui_diagnostics_export.py
           tests/test_gui_diagnostics_view.py
           tests/test_gui_diagnostics_window.py
+      - name: Run two-gate project Prepare wizard tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -m pytest -vv
+          tests/test_gui_project_prepare_service.py
+          tests/test_gui_projects_view.py
+          tests/test_gui_project_prepare_window.py
       - name: Run P05 PySide6 probe regression
         env:
           QT_QPA_PLATFORM: offscreen
@@ -139,6 +150,10 @@ jobs:
             $data.project_count -ne 0 -or
             $data.action_controls_present -ne $true -or
             $data.confirmation_required -ne $true -or
+            $data.projects_wizard_present -ne $true -or
+            $data.prepare_plan_required -ne $true -or
+            $data.prepare_confirmation_required -ne $true -or
+            $data.prepare_plan_loaded -ne $false -or
             $data.current_operation_view_present -ne $true -or
             $data.current_operation_read_only -ne $true -or
             $data.current_operation_loaded -ne $false -or
@@ -156,6 +171,6 @@ jobs:
             $data.timed_out -ne $false
           ) {
             $data | ConvertTo-Json -Depth 8 | Write-Host
-            throw "Control Center smoke report violates the P10 contract"
+            throw "Control Center smoke report violates the P11 contract"
           }
           $data | ConvertTo-Json -Depth 8 | Write-Host
