@@ -20,6 +20,7 @@ from .protocol import (
     validate_session_id,
     validate_strict_utc_timestamp,
 )
+from .repair_correlation import parse_repair_correlation
 from .serializers import sha256_text
 
 
@@ -71,6 +72,13 @@ def parse_manifest_envelope(content: str, *, source_path: str) -> dict[str, Any]
             BridgeErrorCode.INVALID_MANIFEST,
             "Manifest expires_at must be after created_at",
         )
+    correlation = parse_repair_correlation(
+        parsed.get("repair_correlation"),
+        session_id=session_id,
+        field="manifest.repair_correlation",
+    )
+    if correlation is not None:
+        parsed["repair_correlation"] = correlation.as_dict()
     return parsed
 
 
