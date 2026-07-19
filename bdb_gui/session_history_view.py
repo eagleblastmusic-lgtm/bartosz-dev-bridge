@@ -247,7 +247,11 @@ class SessionHistoryWidget(QWidget):
         attempt = self._selected_attempt
         if attempt is None:
             return
-        source = attempt.result_file.path or attempt.receipt_file.path
+        source = None
+        if attempt.result_file.valid and attempt.result_file.path:
+            source = attempt.result_file.path
+        elif attempt.receipt_file.valid and attempt.receipt_file.path:
+            source = attempt.receipt_file.path
         if source:
             self._open(str(Path(source).parent), "katalog")
 
@@ -277,7 +281,7 @@ class SessionHistoryWidget(QWidget):
         enabled = self._project_available and not self._busy and attempt is not None
         result_ok = bool(enabled and attempt and attempt.result_file.valid and attempt.result_file.path)
         receipt_ok = bool(enabled and attempt and attempt.receipt_file.valid and attempt.receipt_file.path)
-        folder_ok = bool(enabled and attempt and (attempt.result_file.path or attempt.receipt_file.path))
+        folder_ok = result_ok or receipt_ok
         self.open_result_button.setEnabled(result_ok)
         self.open_receipt_button.setEnabled(receipt_ok)
         self.open_folder_button.setEnabled(folder_ok)
