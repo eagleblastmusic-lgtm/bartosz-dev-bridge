@@ -57,7 +57,7 @@ jobs:
       - name: Run P05-P11 architecture and schema contracts
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
-          python -m pytest -vv
+          python -m pytest -vv --tb=short
           tests/test_gui_skeleton_contract.py
           tests/test_gui_diagnostics_architecture.py
           tests/test_gui_project_prepare_architecture.py
@@ -66,20 +66,20 @@ jobs:
           tests/test_gui_technology_spike_contract.py
       - name: Run P12 tray architecture contract
         env: { QT_QPA_PLATFORM: offscreen }
-        run: python -m pytest -vv tests/test_gui_tray_architecture.py
+        run: python -m pytest -vv --tb=short tests/test_gui_tray_architecture.py
       - name: Run read-only bootstrap unit tests
         env: { QT_QPA_PLATFORM: offscreen }
-        run: python -m pytest -vv tests/test_gui_bootstrap_service.py
+        run: python -m pytest -vv --tb=short tests/test_gui_bootstrap_service.py
       - name: Run explicit process control tests
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
-          python -m pytest -vv
+          python -m pytest -vv --tb=short
           tests/test_gui_project_operations.py
           tests/test_gui_process_controls.py
       - name: Run current operation projection tests
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
-          python -m pytest -vv
+          python -m pytest -vv --tb=short
           tests/test_gui_current_operation_service.py
           tests/test_gui_current_operation_view.py
           tests/test_gui_current_operation_window.py
@@ -88,23 +88,29 @@ jobs:
       - name: Run bounded Journal event history tests
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
-          python -m pytest -vv
+          python -m pytest -vv --tb=short
           tests/test_gui_history_service.py
           tests/test_gui_history_view.py
           tests/test_gui_history_window.py
-      - name: Run bounded session and receipt history tests
+      - name: Run session projection tests
         env: { QT_QPA_PLATFORM: offscreen }
-        run: >-
-          python -m pytest -vv
-          tests/test_operator_session_projection.py
-          tests/test_operator_session_projection_safety.py
-          tests/test_gui_session_history.py
-          tests/test_gui_session_history_view.py
-          tests/test_gui_session_history_window.py
+        run: python -m pytest -vv --tb=short tests/test_operator_session_projection.py
+      - name: Run session projection safety tests
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv --tb=short tests/test_operator_session_projection_safety.py
+      - name: Run GUI session model tests
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv --tb=short tests/test_gui_session_history.py
+      - name: Run GUI session view tests
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv --tb=short tests/test_gui_session_history_view.py
+      - name: Run GUI session window tests
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv --tb=short tests/test_gui_session_history_window.py
       - name: Run diagnostics collection and export tests
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
-          python -m pytest -vv
+          python -m pytest -vv --tb=short
           tests/test_gui_diagnostics_service.py
           tests/test_gui_diagnostics_export.py
           tests/test_gui_diagnostics_view.py
@@ -112,19 +118,19 @@ jobs:
       - name: Run two-gate project Prepare wizard tests
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
-          python -m pytest -vv
+          python -m pytest -vv --tb=short
           tests/test_gui_project_prepare_service.py
           tests/test_gui_projects_view.py
           tests/test_gui_project_prepare_window.py
       - name: Run tray and notification tests
         env: { QT_QPA_PLATFORM: offscreen }
-        run: python -m pytest -vv tests/test_gui_tray_controller.py
+        run: python -m pytest -vv --tb=short tests/test_gui_tray_controller.py
       - name: Run P05 PySide6 probe regression
         env: { QT_QPA_PLATFORM: offscreen }
-        run: python -m pytest -vv tests/test_gui_pyside6_probe.py
+        run: python -m pytest -vv --tb=short tests/test_gui_pyside6_probe.py
       - name: Run production Control Center smoke tests
         env: { QT_QPA_PLATFORM: offscreen }
-        run: python -m pytest -vv tests/test_gui_control_center_smoke.py
+        run: python -m pytest -vv --tb=short tests/test_gui_control_center_smoke.py
       - name: Preserve the P05 technology probe gate
         shell: powershell
         env: { QT_QPA_PLATFORM: offscreen }
