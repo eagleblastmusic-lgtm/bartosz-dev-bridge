@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 
@@ -60,14 +59,6 @@ def test_operator_projection_is_bounded_and_read_only() -> None:
 
 def test_view_requires_explicit_user_actions_to_open_paths() -> None:
     source = read(GUI / "session_history_view.py")
-    tree = ast.parse(source)
-    constructor = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "__init__"
-        and isinstance(getattr(node, "parent", None), ast.ClassDef)
-    ) if False else None
     assert 'QPushButton("Otwórz wynik")' in source
     assert 'QPushButton("Otwórz receipt")' in source
     assert 'QPushButton("Otwórz katalog")' in source
@@ -80,13 +71,14 @@ def test_view_requires_explicit_user_actions_to_open_paths() -> None:
     assert "self._open_folder()" not in source
 
 
-def test_session_window_uses_existing_single_worker_gate() -> None:
+def test_session_window_uses_existing_single_worker_gate_without_correlation_logic() -> None:
     source = read(GUI / "session_history_window.py")
     assert "if self._has_active_task():" in source
     assert "self._thread_pool.start(worker)" in source
     assert "super()._has_active_task() or self._session_history_worker is not None" in source
     assert "self.session_history_view.set_busy(busy, message)" in source
-    assert "repair_relationships_inferred" not in source.lower() or True
+    for forbidden in ("repair_group_id", "correlation_id", "infer_repair", "guess_repair"):
+        assert forbidden not in source
 
 
 def test_product_entrypoint_does_not_auto_read_sessions_or_open_files() -> None:
