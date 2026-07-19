@@ -47,6 +47,21 @@ Dla aktywnej komendy pokazywane są:
 
 Brak aktywnej komendy jest pełnoprawnym stanem `BRAK AKTYWNEJ OPERACJI`, nie błędem.
 
+## Czytelny przebieg operacji
+
+Control Center tłumaczy bieżącą projekcję na sześć prostych etapów:
+
+1. zadanie przyjęte;
+2. izolowany workspace;
+3. zmiana kodu;
+4. testy;
+5. wynik i checkpoint;
+6. zakończenie sesji.
+
+Każdy etap ma jeden z czterech statusów: `OCZEKUJE`, `TRWA`, `GOTOWE` albo `BŁĄD`.
+
+Model `bdb_gui.operation_flow` jest czystą funkcją nad `OperationDetails`. Nie czyta plików, nie wykonuje poleceń i nie zmienia Journalu. Nie prezentuje rollbacku, poprawki, promocji ani receipt jako wykonanych, jeżeli bieżąca projekcja nie zawiera takich danych. Zakończone sesje, łączenie kilku prób naprawczych i receipt pozostają osobną, późniejszą projekcją.
+
 ## Odświeżanie
 
 Widok nie używa timera ani pollingu. Odczyt następuje:
@@ -63,6 +78,7 @@ Ogólny headless smoke nie posiada rzeczywistego projektu ani Journalu. Potwierd
 
 - obecność widoku;
 - obecność jawnego przycisku odświeżania;
+- obecność sześciostopniowego panelu przebiegu w stanie `pending`;
 - deklarację read-only;
 - `mutation_operations_invoked=0`.
 
@@ -74,4 +90,5 @@ Odczyty aktywnego i pustego Journalu są testowane osobno z wstrzykniętym Opera
 - logi i eksport diagnostyczny — P10;
 - automatyczny polling — celowo niewprowadzony;
 - sterowanie komendą, anulowanie lub retry — poza kontraktem P08;
-- edycja Journalu — zabroniona.
+- edycja Journalu — zabroniona;
+- łączenie wielu sesji w jeden failure → rollback → repair → receipt — kolejny etap operacyjnego raportowania.

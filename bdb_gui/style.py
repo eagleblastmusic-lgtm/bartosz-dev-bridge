@@ -19,7 +19,7 @@ QMainWindow, #AppShell, #Content { background: #f4f6f8; color: #172033; }
 #RefreshButton:hover { background: #eef2f7; }
 #RefreshButton:disabled { color: #94a3b8; background: #eef2f7; }
 #StatusCard, #HeroPanel, #RuntimeCard, #ControlPanel, #PlaceholderPanel,
-#OperationHeroPanel, #OperationDetailsPanel, #HistoryHeroPanel,
+#OperationHeroPanel, #OperationFlowPanel, #OperationDetailsPanel, #HistoryHeroPanel,
 #HistoryFiltersPanel, #HistoryDetailsPanel, #DiagnosticsHeroPanel,
 #DiagnosticsToolbar {
     background: #ffffff; border: 1px solid #dfe5ec; border-radius: 12px;
@@ -35,6 +35,22 @@ QMainWindow, #AppShell, #Content { background: #f4f6f8; color: #172033; }
     color: #1d4ed8; background: #eff6ff; border: 1px solid #bfdbfe;
     border-radius: 7px; padding: 6px 10px; font-size: 11px; font-weight: 800;
 }
+#OperationFlowSummary { color: #334155; font-size: 11px; }
+#OperationFlowStep {
+    background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
+}
+#OperationFlowStepTitle { color: #172033; font-size: 11px; font-weight: 700; min-width: 145px; }
+#OperationFlowStepDetail { color: #64748b; font-size: 10px; }
+#OperationFlowStepStatus {
+    color: #475569; background: #e2e8f0; border-radius: 6px; padding: 4px 7px;
+    font-size: 9px; font-weight: 800;
+}
+#OperationFlowStep[flowStatus="active"] { background: #eff6ff; border-color: #bfdbfe; }
+#OperationFlowStep[flowStatus="active"] #OperationFlowStepStatus { color: #1d4ed8; background: #dbeafe; }
+#OperationFlowStep[flowStatus="success"] { background: #f0fdf4; border-color: #bbf7d0; }
+#OperationFlowStep[flowStatus="success"] #OperationFlowStepStatus { color: #166534; background: #dcfce7; }
+#OperationFlowStep[flowStatus="failed"] { background: #fef2f2; border-color: #fecaca; }
+#OperationFlowStep[flowStatus="failed"] #OperationFlowStepStatus { color: #991b1b; background: #fee2e2; }
 #OperationFieldValue, #HistoryDetails, #DiagnosticsDetails {
     color: #1e293b; font-size: 11px; font-family: Consolas;
 }

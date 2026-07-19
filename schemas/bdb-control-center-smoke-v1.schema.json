@@ -37,6 +37,8 @@
     "current_operation_refresh_present": { "type": "boolean" },
     "current_operation_loaded": { "type": "boolean" },
     "current_operation_active": { "type": ["boolean", "null"] },
+    "operation_flow_present": { "type": "boolean" },
+    "operation_flow_status": { "enum": ["pending", "active", "success", "failed"] },
     "history_view_present": { "type": "boolean" },
     "history_read_only": { "const": true },
     "history_pagination_present": { "type": "boolean" },

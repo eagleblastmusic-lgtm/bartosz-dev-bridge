@@ -77,6 +77,8 @@ jobs:
           tests/test_gui_current_operation_service.py
           tests/test_gui_current_operation_view.py
           tests/test_gui_current_operation_window.py
+          tests/test_gui_operation_flow.py
+          tests/test_gui_current_operation_flow_view.py
       - name: Run bounded Journal history tests
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
@@ -153,6 +155,8 @@ jobs:
             $data.current_operation_view_present -ne $true -or
             $data.current_operation_read_only -ne $true -or
             $data.current_operation_loaded -ne $false -or
+            $data.operation_flow_present -ne $true -or
+            $data.operation_flow_status -ne "pending" -or
             $data.history_view_present -ne $true -or
             $data.history_read_only -ne $true -or
             $data.history_loaded -ne $false -or
