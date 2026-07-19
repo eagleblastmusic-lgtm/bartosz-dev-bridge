@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from bdb_operator import OperatorApi, OperatorResponse
+from bdb_operator.observability import MAX_LOG_BYTES
 
 
 GUI_DIAGNOSTICS_SCHEMA = "bdb-gui-diagnostics-v1"
@@ -23,7 +24,7 @@ GUI_DIAGNOSTICS_EXPORT_SCHEMA = "bdb-gui-diagnostics-export-v1"
 DIAGNOSTICS_ARCHIVE_SCHEMA = "bdb-diagnostics-archive-v1"
 REDACTION_VERSION = "bdb-redaction-v1"
 MAX_DIAGNOSTIC_LOG_LINES = 200
-MAX_DIAGNOSTIC_LOG_BYTES = 262_144
+MAX_DIAGNOSTIC_LOG_BYTES = MAX_LOG_BYTES
 
 _SECRET_KEY = re.compile(
     r"(?i)(token|password|passwd|secret|cookie|authorization|api[_-]?key|access[_-]?key|private[_-]?key)"
