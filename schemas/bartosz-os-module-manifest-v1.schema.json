@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bartosz-os-module-manifest-v1",
+  "title": "Bartosz OS module manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "module_id", "display_name", "version", "responsibility",
+    "owner_module", "source_repository", "transport", "operations",
+    "mutation_policy", "state", "contracts"
+  ],
+  "properties": {
+    "schema": { "const": "bartosz-os-module-manifest-v1" },
+    "module_id": { "const": "devmaster.bartosz-dev-bridge" },
+    "display_name": { "const": "Bartosz Dev Bridge" },
+    "version": { "type": "string", "minLength": 1 },
+    "responsibility": { "const": "local_code_edit_test_promote_bridge" },
+    "owner_module": { "const": "DevMaster" },
+    "source_repository": { "const": "eagleblastmusic-lgtm/bartosz-dev-bridge" },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "local_only", "network_listener"],
+      "properties": {
+        "kind": { "const": "in_process" },
+        "local_only": { "const": true },
+        "network_listener": { "const": false }
+      }
+    },
+    "operations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["read", "mutation", "arbitrary_shell", "auto_merge", "auto_deploy"],
+      "properties": {
+        "read": {
+          "const": ["capabilities", "list_projects", "status", "events", "current_operation", "logs"]
+        },
+        "mutation": { "const": ["prepare", "start", "stop", "rearm"] },
+        "arbitrary_shell": { "const": false },
+        "auto_merge": { "const": false },
+        "auto_deploy": { "const": false }
+      }
+    },
+    "mutation_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter_default", "requires_adapter_enablement", "requires_request_authorization", "implicit_mutation"],
+      "properties": {
+        "adapter_default": { "const": "disabled" },
+        "requires_adapter_enablement": { "const": true },
+        "requires_request_authorization": { "const": true },
+        "implicit_mutation": { "const": false }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter_persists_state", "operator_api_is_execution_boundary", "github_is_code_source_of_truth", "bartosz_os_core_is_source_of_truth"],
+      "properties": {
+        "adapter_persists_state": { "const": false },
+        "operator_api_is_execution_boundary": { "const": true },
+        "github_is_code_source_of_truth": { "const": true },
+        "bartosz_os_core_is_source_of_truth": { "const": false }
+      }
+    },
+    "contracts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request", "response", "operator_response", "event"],
+      "properties": {
+        "request": { "const": "bdb-bartosz-os-request-v1" },
+        "response": { "const": "bdb-bartosz-os-response-v1" },
+        "operator_response": { "const": "bdb-operator-response-v1" },
+        "event": { "const": "bdb-event-v1" }
+      }
+    }
+  }
+}
