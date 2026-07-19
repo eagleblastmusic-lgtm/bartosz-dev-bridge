@@ -25,7 +25,10 @@ jobs:
       - name: Validate pilot sources
         run: |
           python -m py_compile bdb_bridge/repair_loop.py
-          python -m py_compile scripts/run_one_message_repair_pilot.py
+          python -m py_compile bdb_bridge/one_message_pilot_support.py
+          python -m py_compile bdb_bridge/one_message_pilot_fixture.py
+          python -m py_compile bdb_bridge/one_message_pilot.py
+          python -m py_compile scripts/one_message_repair_pilot.py
           python -m pytest -q tests/test_repair_loop.py tests/test_one_message_repair_pilot_contract.py
       - name: Validate PowerShell entrypoint syntax
         shell: powershell
