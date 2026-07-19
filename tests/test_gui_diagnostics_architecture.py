@@ -31,12 +31,13 @@ def test_p10_artifacts_exist() -> None:
 def test_diagnostics_collection_uses_only_bounded_public_operator_reads() -> None:
     source = read(GUI / "diagnostics.py")
     assert "from bdb_operator import OperatorApi, OperatorResponse" in source
+    assert "from bdb_operator.observability import MAX_LOG_BYTES" in source
     assert "self._operator.capabilities()" in source
     assert "self._operator.status(root)" in source
     assert "self._operator.current_operation(root)" in source
     assert "self._operator.logs(" in source
     assert "MAX_DIAGNOSTIC_LOG_LINES = 200" in source
-    assert "MAX_DIAGNOSTIC_LOG_BYTES = 262_144" in source
+    assert "MAX_DIAGNOSTIC_LOG_BYTES = MAX_LOG_BYTES" in source
     for forbidden in (
         ".start(",
         ".stop(",
@@ -72,7 +73,7 @@ def test_export_is_local_atomic_and_explicitly_excludes_source_data() -> None:
 def test_secret_redaction_is_applied_before_serialization() -> None:
     source = read(GUI / "diagnostics.py")
     for marker in (
-        "REDACTION_VERSION = \"bdb-redaction-v1\"",
+        'REDACTION_VERSION = "bdb-redaction-v1"',
         "_SECRET_KEY",
         "_SECRET_ASSIGNMENT",
         "_BEARER",

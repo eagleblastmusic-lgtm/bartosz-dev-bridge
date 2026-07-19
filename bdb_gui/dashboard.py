@@ -51,6 +51,7 @@ class DashboardWidget(QWidget):
         self.setObjectName("DashboardPage")
         self._project_available = False
         self._busy = False
+        self._idle_feedback = "Wybierz projekt, aby odczytać status."
         self._build_ui()
         self.set_project_available(False)
 
@@ -68,6 +69,7 @@ class DashboardWidget(QWidget):
             self.native_card.update_value("—", "Brak wybranego workspace")
             self.promoter_card.update_value("—", "Brak wybranego workspace")
             self.source_card.update_value("—", "Brak wybranego workspace")
+            self._set_idle_feedback("Wybierz projekt, aby odczytać status.")
 
     def set_project(self, alias: str, workspace_root: str) -> None:
         self.project_label.setText(f"{alias} · {workspace_root}")
@@ -78,6 +80,8 @@ class DashboardWidget(QWidget):
         self._update_control_enabled_state()
         if message:
             self.feedback_label.setText(message)
+        elif not busy:
+            self.feedback_label.setText(self._idle_feedback)
         self.feedback_label.setProperty("busy", busy)
         self.feedback_label.style().unpolish(self.feedback_label)
         self.feedback_label.style().polish(self.feedback_label)
@@ -90,7 +94,9 @@ class DashboardWidget(QWidget):
             self.native_card.update_value("—", "Nie odczytano")
             self.promoter_card.update_value("—", "Nie odczytano")
             self.source_card.update_value("—", "Nie odczytano")
-            self.feedback_label.setText(snapshot.error_message or "Nie udało się odczytać statusu.")
+            self._set_idle_feedback(
+                snapshot.error_message or "Nie udało się odczytać statusu."
+            )
             return
 
         self.overall_label.setText(snapshot.overall_status or "UNKNOWN")
@@ -101,9 +107,14 @@ class DashboardWidget(QWidget):
         self.bridge_card.update_value(snapshot.bridge_status or "UNKNOWN", bridge_detail)
 
         native_detail = snapshot.native_armed_until or "Brak terminu uzbrojenia"
-        self.native_card.update_value(_bool_value(snapshot.native_armed, "UZBROJONY", "ROZBROJONY"), native_detail)
+        self.native_card.update_value(
+            _bool_value(snapshot.native_armed, "UZBROJONY", "ROZBROJONY"),
+            native_detail,
+        )
 
-        promoter_detail = f"PID {snapshot.promoter_pid}" if snapshot.promoter_pid is not None else "Brak PID"
+        promoter_detail = (
+            f"PID {snapshot.promoter_pid}" if snapshot.promoter_pid is not None else "Brak PID"
+        )
         self.promoter_card.update_value(
             _bool_value(snapshot.promoter_running, "DZIAŁA", "ZATRZYMANY"),
             promoter_detail,
@@ -114,7 +125,7 @@ class DashboardWidget(QWidget):
             _bool_value(snapshot.source_clean, "CZYSTE", "ZMIANY LOKALNE"),
             source_detail,
         )
-        self.feedback_label.setText(
+        self._set_idle_feedback(
             "Status pobrany tylko do odczytu. Nie wykonano żadnej operacji sterującej."
         )
 
@@ -125,11 +136,11 @@ class DashboardWidget(QWidget):
                 "stop": "Stop zakończony",
                 "rearm": "Native Host ponownie uzbrojony",
             }[result.action]
-            self.feedback_label.setText(
+            self._set_idle_feedback(
                 f"{action_label}. Trwa odświeżanie statusu potwierdzającego wynik."
             )
         else:
-            self.feedback_label.setText(
+            self._set_idle_feedback(
                 f"Operacja {result.action} nie powiodła się: "
                 f"{result.error_code or 'unknown'} — {result.error_message or 'brak szczegółów'}"
             )
@@ -236,12 +247,17 @@ class DashboardWidget(QWidget):
         row.addStretch(1)
         control_layout.addLayout(row)
 
-        self.feedback_label = QLabel("Wybierz projekt, aby odczytać status.")
+        self.feedback_label = QLabel(self._idle_feedback)
         self.feedback_label.setObjectName("ControlFeedback")
         self.feedback_label.setWordWrap(True)
         control_layout.addWidget(self.feedback_label)
         layout.addWidget(control_panel)
         layout.addStretch(1)
+
+    def _set_idle_feedback(self, message: str) -> None:
+        self._idle_feedback = message
+        if not self._busy:
+            self.feedback_label.setText(message)
 
     def _update_control_enabled_state(self) -> None:
         enabled = self._project_available and not self._busy

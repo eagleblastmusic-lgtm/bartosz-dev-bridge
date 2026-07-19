@@ -20,6 +20,7 @@ from bdb_gui.tray import (  # noqa: E402
 
 class FakeWindow(QObject):
     control_finished = Signal(object)
+    dashboard_ready = Signal()
     prepare_finished = Signal(object)
     diagnostics_export_finished = Signal(object)
 
@@ -113,7 +114,7 @@ def test_leave_exit_closes_panel_without_stop() -> None:
     assert window.force_closed is True
 
 
-def test_stop_exit_waits_for_successful_stop_result() -> None:
+def test_stop_exit_waits_for_post_stop_refresh_to_be_idle() -> None:
     app = application()
     window = FakeWindow()
     controller = TrayController(
@@ -128,7 +129,13 @@ def test_stop_exit_waits_for_successful_stop_result() -> None:
     assert window.stop_started is True
     assert window.force_closed is False
 
+    window.active = True
     window.control_finished.emit(SimpleNamespace(action="stop", ok=True, project_alias="alpha"))
+    app.processEvents()
+    assert window.force_closed is False
+
+    window.active = False
+    window.dashboard_ready.emit()
     app.processEvents()
     assert window.force_closed is True
 

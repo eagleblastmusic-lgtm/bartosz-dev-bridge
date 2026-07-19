@@ -11,6 +11,7 @@ class OperatorErrorCode(StrEnum):
     WORKSPACE_STATE_INVALID = "workspace_state_invalid"
     OPERATOR_SCRIPT_MISSING = "operator_script_missing"
     EXECUTABLE_MISSING = "executable_missing"
+    POWERSHELL_VERSION_UNSUPPORTED = "powershell_version_unsupported"
     COMMAND_FAILED = "command_failed"
     COMMAND_TIMEOUT = "command_timeout"
     INVALID_RESPONSE = "invalid_response"
