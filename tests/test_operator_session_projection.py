@@ -5,7 +5,7 @@ from pathlib import Path
 from bdb_operator import OperatorApi, SESSION_HISTORY_SCHEMA
 from bdb_operator.session_projection import SessionProjectionReader
 
-from .session_projection_fixture import FAILED_SESSION, SUCCESS_SESSION, workspace_fixture
+from session_projection_fixture import FAILED_SESSION, SUCCESS_SESSION, workspace_fixture
 
 
 def test_session_projection_shows_failed_and_promoted_sessions_without_linking_them(tmp_path: Path) -> None:
