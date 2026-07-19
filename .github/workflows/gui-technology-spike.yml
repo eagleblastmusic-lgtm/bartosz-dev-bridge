@@ -61,6 +61,7 @@ jobs:
           tests/test_gui_skeleton_contract.py
           tests/test_gui_diagnostics_architecture.py
           tests/test_gui_project_prepare_architecture.py
+          tests/test_gui_session_history_architecture.py
           tests/test_gui_schema_contract.py
           tests/test_gui_technology_spike_contract.py
       - name: Run P12 tray architecture contract
