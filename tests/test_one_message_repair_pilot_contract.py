@@ -29,6 +29,15 @@ def test_one_message_repair_pilot_has_bounded_startup_grace() -> None:
     assert "time.sleep(1.0)" in entrypoint
 
 
+def test_one_message_repair_pilot_normalizes_only_known_stop_messages() -> None:
+    entrypoint = (ROOT / "scripts" / "one_message_repair_pilot.py").read_text(encoding="utf-8")
+
+    assert "_STOP_MESSAGES = frozenset" in entrypoint
+    assert "Graceful stop request sent successfully." in entrypoint
+    assert "pilot.load_json_output = _load_json_or_stop_message" in entrypoint
+    assert "if text in _STOP_MESSAGES" in entrypoint
+
+
 def test_one_message_repair_pilot_has_a_powershell_entrypoint() -> None:
     wrapper = (ROOT / "scripts" / "Invoke-BDBOneMessageRepairPilot.ps1").read_text(
         encoding="utf-8"
