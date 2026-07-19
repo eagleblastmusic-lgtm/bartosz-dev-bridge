@@ -13,6 +13,7 @@ dependencies = []
 dev = ["pytest>=8,<9"]
 gui = ["PySide6-Essentials>=6.10,<6.12"]
 gui-spike = ["PySide6-Essentials>=6.10,<6.12"]
+release = ["PyInstaller>=6.14,<7"]
 
 [project.scripts]
 bdb = "bdb_bridge.cli:main"
@@ -21,7 +22,7 @@ bdb-operator = "bdb_operator.cli:main"
 bdb-control-center = "bdb_gui.app:main"
 
 [tool.setuptools.packages.find]
-include = ["bdb_bridge*", "bdb_operator*", "bdb_gui*", "bdb_poc*"]
+include = ["bdb_bridge*", "bdb_operator*", "bdb_gui*", "bdb_release*", "bdb_poc*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
