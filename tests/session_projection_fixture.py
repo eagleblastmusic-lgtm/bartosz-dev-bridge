@@ -8,6 +8,7 @@ from pathlib import Path
 
 FAILED_SESSION = "018f3f66-6cb3-4f66-9f2e-3d7647d1b701"
 SUCCESS_SESSION = "018f3f66-6cb3-4f66-9f2e-3d7647d1b702"
+CORRELATION_ID = "018f3f66-6cb3-4f66-9f2e-3d7647d1b700"
 NOW = "2026-07-19T18:00:00Z"
 
 
@@ -109,12 +110,42 @@ def create_journal(journal: Path, results: Path, promotions: Path) -> None:
           planned_after_content_sha256 TEXT NOT NULL, planned_after_state_hash TEXT NOT NULL,
           plan_sha256 TEXT NOT NULL, created_at TEXT NOT NULL
         );
+        CREATE TABLE session_ingestion (
+          session_id TEXT PRIMARY KEY, manifest_commit_sha TEXT NOT NULL,
+          manifest_sha256 TEXT NOT NULL, manifest_json TEXT NOT NULL,
+          manifest_created_at TEXT NOT NULL, manifest_expires_at TEXT NOT NULL,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
         """
     )
     failed = result_document(FAILED_SESSION, "failed", 1, "rolled_back", True, [])
     success = result_document(SUCCESS_SESSION, "success", 0, "committed", False, ["src/app.py"])
-    insert_session(connection, FAILED_SESSION, "aborted", failed, "2026-07-19T18:01:00Z")
-    insert_session(connection, SUCCESS_SESSION, "completed", success, "2026-07-19T18:02:00Z")
+    insert_session(
+        connection,
+        FAILED_SESSION,
+        "aborted",
+        failed,
+        "2026-07-19T18:01:00Z",
+        repair_correlation={
+            "schema": "bdb-repair-correlation-v1",
+            "correlation_id": CORRELATION_ID,
+            "role": "initial",
+            "predecessor_session_id": None,
+        },
+    )
+    insert_session(
+        connection,
+        SUCCESS_SESSION,
+        "completed",
+        success,
+        "2026-07-19T18:02:00Z",
+        repair_correlation={
+            "schema": "bdb-repair-correlation-v1",
+            "correlation_id": CORRELATION_ID,
+            "role": "repair",
+            "predecessor_session_id": FAILED_SESSION,
+        },
+    )
     connection.commit()
     connection.close()
 
@@ -147,10 +178,29 @@ def insert_session(
     state: str,
     result: dict[str, object],
     updated: str,
+    *,
+    repair_correlation: dict[str, object] | None = None,
 ) -> None:
     command_id = f"{session_id}:000001"
     result_bytes = (json.dumps(result, sort_keys=True) + "\n").encode("utf-8")
+    manifest: dict[str, object] = {
+        "schema_version": "1.1",
+        "session_id": session_id,
+        "repository_id": "repo-sample",
+        "base_sha": "a" * 40,
+        "allowed_paths": ["src/app.py"],
+        "created_at": NOW,
+        "expires_at": "2026-07-19T19:00:00Z",
+    }
+    if repair_correlation is not None:
+        manifest["repair_correlation"] = repair_correlation
+    manifest_json = json.dumps(manifest, sort_keys=True)
     connection.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)", (session_id, "repo-sample", "a" * 40, state, NOW, updated))
+    connection.execute(
+        "INSERT INTO session_ingestion VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (session_id, "a" * 40, sha256(manifest_json.encode("utf-8")), manifest_json, NOW,
+         "2026-07-19T19:00:00Z", NOW, updated),
+    )
     connection.execute(
         "INSERT INTO commands VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (command_id, session_id, 1, "sha256:command", json.dumps({"operation": "multi_file_patch"}), None,
