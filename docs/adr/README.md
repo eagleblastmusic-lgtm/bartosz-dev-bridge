@@ -20,6 +20,7 @@ ADR-y opisują decyzje architektoniczne, których kolejne etapy nie powinny zmie
 | [0014](0014-manual-verified-release-artifacts.md) | Accepted | Pakiet Windows powstaje wyłącznie ręcznie, przechodzi smoke i jest wiązany z commitem przez zamknięty manifest SHA-256 bez publikacji i self-update. |
 | [0015](0015-stateless-bartosz-os-adapter.md) | Accepted | Bartosz OS korzysta z bezstanowego adaptera in-process nad Operator API; mutacje są domyślnie wyłączone i wymagają dwóch bramek. |
 | [0016](0016-plan-only-gicleeapp-integration.md) | Accepted | Integracja GicleeApp tworzy wyłącznie read-only plan z bezpiecznym zakresem; nie wykonuje Prepare ani zmian w repozytorium aplikacji. |
+| [0017](0017-bounded-session-history-without-inferred-repair-links.md) | Accepted | Historia sesji i receipts jest bounded i read-only; relacje naprawcze między osobnymi sesjami nie są inferowane bez trwałego correlation ID. |
 
 Dokument nadrzędny P02: [BDB Control Center — zamrożone granice](../BDB_CONTROL_CENTER_BOUNDARIES.md).
 

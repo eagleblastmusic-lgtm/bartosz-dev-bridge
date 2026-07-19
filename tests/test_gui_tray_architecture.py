@@ -53,13 +53,16 @@ def test_close_to_tray_and_exit_are_distinct_paths() -> None:
     assert "_force_close_requested" in window
 
 
-def test_headless_smoke_never_creates_tray_and_keeps_explicit_constructor() -> None:
+def test_headless_smoke_never_creates_tray_and_uses_composed_explicit_windows() -> None:
     app = read(GUI / "app.py")
+    session_window = read(GUI / "session_history_window.py")
     assert "if args.headless_smoke:" in app
-    assert "window = ProjectControlCenterWindow(" in app
-    assert "window = TrayProjectControlCenterWindow(" in app
+    assert "window = SessionProjectControlCenterWindow(" in app
+    assert "window = SessionTrayProjectControlCenterWindow(" in app
+    assert "class SessionTrayProjectControlCenterWindow(SessionHistoryWindowMixin, TrayProjectControlCenterWindow)" in session_window
     assert "auto_load_status=not args.headless_smoke" in app
     assert '"tray_created": False' in app
+    assert "tray_controller.start()" in app
 
 
 def test_tray_modules_are_valid_python() -> None:

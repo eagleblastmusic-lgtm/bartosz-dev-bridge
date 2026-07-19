@@ -1,0 +1,152 @@
+name: Session History Full Regression
+
+on:
+  pull_request:
+    branches: [gpt-work/control-center-operation-flow]
+    paths:
+      - ".github/workflows/session-history-regression.yml"
+      - "bdb_bridge/**"
+      - "bdb_gui/**"
+      - "bdb_operator/**"
+      - "scripts/**"
+      - "tests/**"
+      - "schemas/**"
+      - "pyproject.toml"
+  push:
+    branches: [gpt-work/control-center-session-receipts]
+
+permissions:
+  contents: read
+
+jobs:
+  full-test:
+    name: Full pytest / ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.11"
+          - os: windows-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.14"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Compile changed packages
+        run: |
+          python -m compileall -q bdb_bridge bdb_gui bdb_operator
+          python -m py_compile scripts/one_message_repair_pilot.py
+      - name: Run full test suite
+        run: python -m pytest -q
+
+  one-message-pilot:
+    name: Windows / Python 3.14 / calculator2 repair
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Validate focused contracts
+        run: >-
+          python -m pytest -q
+          tests/test_repair_loop.py
+          tests/test_one_message_repair_pilot_contract.py
+          tests/test_one_message_pilot_fixture_contract.py
+          tests/test_one_message_pilot_report_contract.py
+          tests/test_one_message_pilot_no_remote_mutation.py
+      - name: Validate PowerShell entrypoint
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/Invoke-BDBOneMessageRepairPilot.ps1"),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+      - name: Run one-message repair pilot
+        shell: powershell
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "bdb-session-history-one-message"
+          .\scripts\Invoke-BDBOneMessageRepairPilot.ps1 `
+            -Python (Get-Command python).Source `
+            -Root $root `
+            -TimeoutSeconds 180
+          $report = Get-Content (Join-Path $root "one-message-repair-report.json") -Raw | ConvertFrom-Json
+          if ($report.status -ne "pass") { throw "One-message repair pilot did not pass" }
+          if ($report.attempt_count -ne 2 -or $report.user_interventions_between_attempts -ne 0) {
+            throw "One-message pilot did not prove the two-attempt autonomous loop"
+          }
+          if ($report.initial_attempt.rollback_performed -ne $true) { throw "Rollback was not proved" }
+          if ($report.repair_attempt.status -ne "success" -or $report.source_checkout_clean -ne $true) {
+            throw "Repair promotion did not finish cleanly"
+          }
+
+  second-pilot:
+    name: Windows / Python 3.14 / inventory2 repair
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Validate focused contracts
+        run: >-
+          python -m pytest -q
+          tests/test_fixed_test_profiles.py
+          tests/test_second_independent_pilot_contract.py
+          tests/test_ghb2d_final_editing_gate.py
+      - name: Validate PowerShell entrypoint
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/Invoke-BDBSecondIndependentPilot.ps1"),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+      - name: Run second independent pilot
+        shell: powershell
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "bdb-session-history-second-pilot"
+          .\scripts\Invoke-BDBSecondIndependentPilot.ps1 `
+            -Python (Get-Command python).Source `
+            -Root $root `
+            -TimeoutSeconds 180
+          $report = Get-Content (Join-Path $root "second-independent-pilot-report.json") -Raw | ConvertFrom-Json
+          if ($report.status -ne "pass") { throw "Second independent pilot did not pass" }
+          if ($report.profile_id -ne "poc_unittest" -or $report.repo_alias -ne "inventory2") {
+            throw "Second pilot did not use the independent profile and alias"
+          }
+          if ($report.attempt_count -ne 2 -or $report.user_interventions_between_attempts -ne 0) {
+            throw "Second pilot did not prove the two-attempt autonomous loop"
+          }
+          if ($report.initial_attempt.rollback_performed -ne $true) { throw "Rollback was not proved" }
+          if ($report.repair_attempt.status -ne "success" -or $report.source_checkout_clean -ne $true) {
+            throw "Second pilot promotion did not finish cleanly"
+          }

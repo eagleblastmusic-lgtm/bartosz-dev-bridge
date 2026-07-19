@@ -66,9 +66,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         from .bootstrap import BootstrapService
         from .operations import ProjectOperationsService
-        from .project_window import ProjectControlCenterWindow
+        from .session_history_window import (
+            SessionProjectControlCenterWindow,
+            SessionTrayProjectControlCenterWindow,
+        )
         from .tray import TrayController
-        from .tray_window import TrayProjectControlCenterWindow
     except ImportError as error:
         report = {
             "schema": SMOKE_SCHEMA,
@@ -88,15 +90,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     tray_controller: TrayController | None = None
     if args.headless_smoke:
-        # Smoke never creates a tray icon and never changes close semantics.
-        window = ProjectControlCenterWindow(
+        window = SessionProjectControlCenterWindow(
             bootstrap_service=BootstrapService(),
             operations_service=ProjectOperationsService(),
             workspaces_root=workspaces_root,
             auto_load_status=not args.headless_smoke,
         )
     else:
-        window = TrayProjectControlCenterWindow(
+        window = SessionTrayProjectControlCenterWindow(
             bootstrap_service=BootstrapService(),
             operations_service=ProjectOperationsService(),
             workspaces_root=workspaces_root,

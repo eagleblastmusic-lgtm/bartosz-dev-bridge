@@ -9,6 +9,7 @@ from .errors import OperatorApiError, OperatorErrorCode
 from .models import OperatorResponse
 from .observability import ObservabilityReader
 from .runner import CommandRunner
+from .session_projection import SessionProjectionReader
 
 
 POWERSHELL_REQUIRED_MAJOR = 7
@@ -16,7 +17,7 @@ POWERSHELL_VERSION_COMMAND = "$PSVersionTable.PSVersion.Major"
 
 
 class OperatorApi(ExecutionOperatorApi):
-    """Public Operator API including P03 execution and P04 read projections."""
+    """Public Operator API including P03 execution and bounded read projections."""
 
     def __init__(
         self,
@@ -45,9 +46,11 @@ class OperatorApi(ExecutionOperatorApi):
             "status",
             "events",
             "current_operation",
+            "sessions",
             "logs",
         ]
         data["event_schema"] = "bdb-event-v1"
+        data["session_history_schema"] = "bdb-session-history-v1"
         data["journal_access"] = "read_only"
         data["powershell"] = {
             "executable": self._powershell,
@@ -83,6 +86,24 @@ class OperatorApi(ExecutionOperatorApi):
             workspace_root,
             lambda reader: reader.current_operation(),
         )
+
+    def sessions(self, workspace_root: str | Path, *, limit: int = 20) -> OperatorResponse:
+        operation_id = str(uuid4())
+        alias: str | None = None
+        try:
+            reader = SessionProjectionReader.from_workspace_root(workspace_root)
+            alias = reader.alias
+            data = reader.list_sessions(limit=limit)
+            return OperatorResponse.success(
+                "sessions",
+                operation_id=operation_id,
+                project_alias=alias,
+                data=data,
+            )
+        except OperatorApiError as error:
+            return self._failure("sessions", operation_id, error, project_alias=alias)
+        except Exception as error:  # defensive public boundary
+            return self._unexpected_failure("sessions", operation_id, error, project_alias=alias)
 
     def logs(
         self,

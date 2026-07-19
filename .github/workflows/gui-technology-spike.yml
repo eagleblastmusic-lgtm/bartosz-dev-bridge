@@ -2,13 +2,16 @@ name: Control Center GUI CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, gpt-work/control-center-operation-flow]
     paths:
       - ".github/workflows/gui-technology-spike.yml"
       - "pyproject.toml"
       - "bdb_gui/**"
+      - "bdb_operator/**"
       - "spikes/gui/**"
       - "tests/test_gui_*.py"
+      - "tests/test_operator_session_projection*.py"
+      - "tests/session_projection_fixture.py"
       - "schemas/bdb-gui-*.schema.json"
       - "schemas/bdb-control-center-smoke-v1.schema.json"
       - "docs/BDB_GUI_TECHNOLOGY_SPIKE.md"
@@ -28,6 +31,8 @@ on:
       - "docs/adr/0012-two-gate-project-prepare-wizard.md"
       - "docs/adr/0013-event-driven-local-tray.md"
       - "docs/adr/README.md"
+  push:
+    branches: [gpt-work/control-center-session-receipts]
 
 permissions:
   contents: read
@@ -45,51 +50,67 @@ jobs:
           cache: pip
       - name: Install optional GUI dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev,gui]"
-      - name: Compile GUI packages and probe
+      - name: Compile GUI and operator packages
         run: |
-          python -m compileall -q bdb_gui
+          python -m compileall -q bdb_gui bdb_operator
           python -m py_compile spikes/gui/pyside6_probe.py
       - name: Run P05-P11 architecture and schema contracts
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
-          python -m pytest -vv
+          python -m pytest -vv --tb=short
           tests/test_gui_skeleton_contract.py
           tests/test_gui_diagnostics_architecture.py
           tests/test_gui_project_prepare_architecture.py
+          tests/test_gui_session_history_architecture.py
           tests/test_gui_schema_contract.py
           tests/test_gui_technology_spike_contract.py
       - name: Run P12 tray architecture contract
         env: { QT_QPA_PLATFORM: offscreen }
-        run: python -m pytest -vv tests/test_gui_tray_architecture.py
+        run: python -m pytest -vv --tb=short tests/test_gui_tray_architecture.py
       - name: Run read-only bootstrap unit tests
         env: { QT_QPA_PLATFORM: offscreen }
-        run: python -m pytest -vv tests/test_gui_bootstrap_service.py
+        run: python -m pytest -vv --tb=short tests/test_gui_bootstrap_service.py
       - name: Run explicit process control tests
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
-          python -m pytest -vv
+          python -m pytest -vv --tb=short
           tests/test_gui_project_operations.py
           tests/test_gui_process_controls.py
       - name: Run current operation projection tests
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
-          python -m pytest -vv
+          python -m pytest -vv --tb=short
           tests/test_gui_current_operation_service.py
           tests/test_gui_current_operation_view.py
           tests/test_gui_current_operation_window.py
           tests/test_gui_operation_flow.py
           tests/test_gui_current_operation_flow_view.py
-      - name: Run bounded Journal history tests
+      - name: Run bounded Journal event history tests
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
-          python -m pytest -vv
+          python -m pytest -vv --tb=short
           tests/test_gui_history_service.py
           tests/test_gui_history_view.py
           tests/test_gui_history_window.py
+      - name: Run session projection tests
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv --tb=short tests/test_operator_session_projection.py
+      - name: Run session projection safety tests
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv --tb=short tests/test_operator_session_projection_safety.py
+      - name: Run GUI session model tests
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv --tb=short tests/test_gui_session_history.py
+      - name: Run GUI session view tests
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv --tb=short tests/test_gui_session_history_view.py
+      - name: Run GUI session window tests
+        env: { QT_QPA_PLATFORM: offscreen }
+        run: python -m pytest -vv --tb=short tests/test_gui_session_history_window.py
       - name: Run diagnostics collection and export tests
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
-          python -m pytest -vv
+          python -m pytest -vv --tb=short
           tests/test_gui_diagnostics_service.py
           tests/test_gui_diagnostics_export.py
           tests/test_gui_diagnostics_view.py
@@ -97,19 +118,19 @@ jobs:
       - name: Run two-gate project Prepare wizard tests
         env: { QT_QPA_PLATFORM: offscreen }
         run: >-
-          python -m pytest -vv
+          python -m pytest -vv --tb=short
           tests/test_gui_project_prepare_service.py
           tests/test_gui_projects_view.py
           tests/test_gui_project_prepare_window.py
       - name: Run tray and notification tests
         env: { QT_QPA_PLATFORM: offscreen }
-        run: python -m pytest -vv tests/test_gui_tray_controller.py
+        run: python -m pytest -vv --tb=short tests/test_gui_tray_controller.py
       - name: Run P05 PySide6 probe regression
         env: { QT_QPA_PLATFORM: offscreen }
-        run: python -m pytest -vv tests/test_gui_pyside6_probe.py
+        run: python -m pytest -vv --tb=short tests/test_gui_pyside6_probe.py
       - name: Run production Control Center smoke tests
         env: { QT_QPA_PLATFORM: offscreen }
-        run: python -m pytest -vv tests/test_gui_control_center_smoke.py
+        run: python -m pytest -vv --tb=short tests/test_gui_control_center_smoke.py
       - name: Preserve the P05 technology probe gate
         shell: powershell
         env: { QT_QPA_PLATFORM: offscreen }
@@ -157,9 +178,18 @@ jobs:
             $data.current_operation_loaded -ne $false -or
             $data.operation_flow_present -ne $true -or
             $data.operation_flow_status -ne "pending" -or
+            $data.history_tabs_present -ne $true -or
             $data.history_view_present -ne $true -or
             $data.history_read_only -ne $true -or
             $data.history_loaded -ne $false -or
+            $data.session_history_view_present -ne $true -or
+            $data.session_history_read_only -ne $true -or
+            $data.session_history_loaded -ne $false -or
+            $data.session_history_count -ne 0 -or
+            $data.session_result_open_explicit -ne $true -or
+            $data.session_receipt_open_explicit -ne $true -or
+            $data.session_folder_open_explicit -ne $true -or
+            $data.session_repair_relationships_inferred -ne $false -or
             $data.diagnostics_view_present -ne $true -or
             $data.diagnostics_collect_explicit -ne $true -or
             $data.diagnostics_export_explicit -ne $true -or
@@ -172,6 +202,6 @@ jobs:
             $data.timed_out -ne $false
           ) {
             $data | ConvertTo-Json -Depth 8 | Write-Host
-            throw "Control Center smoke report violates the P12 contract"
+            throw "Control Center smoke report violates the session history contract"
           }
           $data | ConvertTo-Json -Depth 8 | Write-Host

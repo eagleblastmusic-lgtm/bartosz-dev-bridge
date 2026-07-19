@@ -20,16 +20,16 @@ QMainWindow, #AppShell, #Content { background: #f4f6f8; color: #172033; }
 #RefreshButton:disabled { color: #94a3b8; background: #eef2f7; }
 #StatusCard, #HeroPanel, #RuntimeCard, #ControlPanel, #PlaceholderPanel,
 #OperationHeroPanel, #OperationFlowPanel, #OperationDetailsPanel, #HistoryHeroPanel,
-#HistoryFiltersPanel, #HistoryDetailsPanel, #DiagnosticsHeroPanel,
-#DiagnosticsToolbar {
+#HistoryFiltersPanel, #HistoryDetailsPanel, #SessionHistoryHeroPanel,
+#SessionHistoryDetailsPanel, #DiagnosticsHeroPanel, #DiagnosticsToolbar {
     background: #ffffff; border: 1px solid #dfe5ec; border-radius: 12px;
 }
 #StatusCardTitle, #RuntimeCardTitle, #ControlTitle, #OperationSectionTitle,
 #HistorySectionTitle { color: #64748b; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
 #StatusCardValue, #RuntimeCardValue { color: #111827; font-size: 19px; font-weight: 700; }
 #StatusCardDetail, #RuntimeCardDetail, #ControlDescription, #HeroText, #PlaceholderText,
-#OperationFeedback, #OperationFieldLabel, #HistoryFeedback, #DiagnosticsHint,
-#DiagnosticsFeedback { color: #64748b; font-size: 11px; }
+#OperationFeedback, #OperationFieldLabel, #HistoryFeedback, #SessionHistoryFeedback,
+#SessionHistoryNotice, #DiagnosticsHint, #DiagnosticsFeedback { color: #64748b; font-size: 11px; }
 #HeroTitle, #PlaceholderTitle { color: #172033; font-size: 18px; font-weight: 700; }
 #OverallStatus, #OperationState, #DiagnosticsState {
     color: #1d4ed8; background: #eff6ff; border: 1px solid #bfdbfe;
@@ -51,16 +51,19 @@ QMainWindow, #AppShell, #Content { background: #f4f6f8; color: #172033; }
 #OperationFlowStep[flowStatus="success"] #OperationFlowStepStatus { color: #166534; background: #dcfce7; }
 #OperationFlowStep[flowStatus="failed"] { background: #fef2f2; border-color: #fecaca; }
 #OperationFlowStep[flowStatus="failed"] #OperationFlowStepStatus { color: #991b1b; background: #fee2e2; }
-#OperationFieldValue, #HistoryDetails, #DiagnosticsDetails {
+#OperationFieldValue, #HistoryDetails, #SessionHistoryDetails, #DiagnosticsDetails {
     color: #1e293b; font-size: 11px; font-family: Consolas;
 }
 #RefreshStatusButton, #StartButton, #StopButton, #RearmButton, #RefreshOperationButton,
-#RefreshHistoryButton, #LoadMoreHistoryButton, #CollectDiagnosticsButton,
-#ExportDiagnosticsButton {
+#RefreshHistoryButton, #LoadMoreHistoryButton, #RefreshSessionHistoryButton,
+#OpenSessionResultButton, #OpenSessionReceiptButton, #OpenSessionFolderButton,
+#CollectDiagnosticsButton, #ExportDiagnosticsButton {
     min-height: 34px; border-radius: 7px; padding: 0 14px; font-weight: 600;
 }
 #RefreshStatusButton, #RefreshOperationButton, #RefreshHistoryButton,
-#LoadMoreHistoryButton, #CollectDiagnosticsButton, #ExportDiagnosticsButton {
+#LoadMoreHistoryButton, #RefreshSessionHistoryButton, #OpenSessionResultButton,
+#OpenSessionReceiptButton, #OpenSessionFolderButton, #CollectDiagnosticsButton,
+#ExportDiagnosticsButton {
     background: #ffffff; border: 1px solid #cbd5e1; color: #1e293b;
 }
 #StartButton { background: #166534; border: 1px solid #14532d; color: #ffffff; }
@@ -71,10 +74,11 @@ QPushButton:disabled { background: #e5e7eb; border-color: #d1d5db; color: #9ca3a
 #ArmMinutesLabel { color: #475569; font-size: 11px; }
 #ControlFeedback { color: #475569; font-size: 11px; }
 #StatusLine { color: #64748b; font-size: 11px; }
-#HistoryTable, #DiagnosticsTable {
+#HistoryTabs::pane { border: 0; }
+#HistoryTable, #SessionHistoryTable, #DiagnosticsTable {
     background: #ffffff; border: 1px solid #dfe5ec; gridline-color: #e5e7eb;
 }
-#HistorySessionFilter, #HistoryCommandFilter, #HistoryLimitSpin {
+#HistorySessionFilter, #HistoryCommandFilter, #HistoryLimitSpin, #SessionHistoryLimitSpin {
     min-height: 32px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px;
 }
 """
