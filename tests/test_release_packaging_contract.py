@@ -12,12 +12,13 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_p13_artifacts_exist() -> None:
+def test_release_artifacts_exist() -> None:
     expected = (
         ROOT / "bdb_release" / "__init__.py",
         ROOT / "bdb_release" / "manifest.py",
         ROOT / "bdb_gui" / "version.py",
         ROOT / "scripts" / "build_release_manifest.py",
+        ROOT / "scripts" / "Invoke-BDBControlCenterArtifactAcceptance.ps1",
         ROOT / "packaging" / "windows" / "control_center_entry.py",
         ROOT / "schemas" / "bdb-release-manifest-v1.schema.json",
         ROOT / ".github" / "workflows" / "control-center-release-artifact.yml",
@@ -95,7 +96,7 @@ def test_release_version_is_aligned_for_0_3_0() -> None:
     assert 'version = "0.3.0"' in pyproject
     assert 'APPLICATION_VERSION = "0.3.0"' in version_module
     assert module_manifest["version"] == "0.3.0"
-    assert "Validate requested version against source identity" in workflow
+    assert "Validate source identity and acceptance entrypoint" in workflow
     assert "$applicationVersion" in workflow
     assert "$moduleVersion" in workflow
     assert "$projectVersion" in workflow
@@ -155,6 +156,49 @@ def test_release_manifest_is_rechecked_against_requested_identity() -> None:
     assert "$manifest.distribution.auto_install -ne $false" in workflow
     assert "$manifest.distribution.published_release -ne $false" in workflow
     assert "$null -ne $manifest.signature" in workflow
+
+
+def test_self_contained_acceptance_is_copied_invoked_and_uploaded() -> None:
+    workflow = read(ROOT / ".github" / "workflows" / "control-center-release-artifact.yml")
+    assert "Invoke-BDBControlCenterArtifactAcceptance.ps1" in workflow
+    assert "Copy-Item -LiteralPath" in workflow
+    assert "-ExpectedVersion \"${{ inputs.version }}\"" in workflow
+    assert "-ExpectedSourceCommit \"$env:GITHUB_SHA\"" in workflow
+    assert "Self-contained artifact acceptance failed" in workflow
+    assert "bdb-control-center-acceptance-v1.json" in read(
+        ROOT / "scripts" / "Invoke-BDBControlCenterArtifactAcceptance.ps1"
+    )
+
+
+def test_acceptance_script_is_local_non_installing_and_bounded() -> None:
+    script = read(ROOT / "scripts" / "Invoke-BDBControlCenterArtifactAcceptance.ps1")
+    lowered = script.lower()
+    required = (
+        "get-filehash",
+        "expand-archive",
+        "processstartinfo",
+        "--headless-smoke",
+        "mutation_operations_invoked",
+        "operation_flow_present",
+        "session_history_view_present",
+        "session_repair_relationships_inferred",
+        "remove-item",
+    )
+    for token in required:
+        assert token in lowered
+    for forbidden in (
+        "invoke-webrequest",
+        "start-bitstransfer",
+        "curl ",
+        "wget ",
+        "msiexec",
+        "winget",
+        "choco",
+        "set-executionpolicy -scope localmachine",
+        "runas",
+        "start-process -verb runas",
+    ):
+        assert forbidden not in lowered
 
 
 def test_packaged_entrypoint_and_package_discovery_are_explicit() -> None:
