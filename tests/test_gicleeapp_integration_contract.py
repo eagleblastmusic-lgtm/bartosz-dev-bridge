@@ -59,22 +59,28 @@ def test_integration_has_no_operator_git_network_or_write_surface() -> None:
         "subprocess", "socket", "socketserver", "http", "urllib", "requests",
         "aiohttp", "websockets", "sqlite3", "shutil",
     }
+    forbidden_calls = {"prepare", "start", "stop", "rearm", "write_text", "write_bytes", "open"}
+    observed_calls: set[str] = set()
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             roots = {alias.name.split(".", 1)[0] for alias in node.names}
         elif isinstance(node, ast.ImportFrom):
             roots = {(node.module or "").split(".", 1)[0]}
         else:
-            continue
+            roots = set()
         assert forbidden_roots.isdisjoint(roots)
         if isinstance(node, ast.ImportFrom):
             assert not (node.module or "").startswith(("bdb_operator", "bdb_bridge"))
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute):
+                observed_calls.add(node.func.attr)
+            elif isinstance(node.func, ast.Name):
+                observed_calls.add(node.func.id)
 
+    assert forbidden_calls.isdisjoint(observed_calls)
     lowered = source.lower()
-    for token in (
-        "operatorapi(", ".prepare(", ".start(", ".stop(", ".rearm(",
-        "write_text", "write_bytes", "open(", "git.exe", "powershell.exe", "shell=true",
-    ):
+    for token in ("operatorapi(", "git.exe", "powershell.exe", "shell=true"):
         assert token not in lowered
 
 
