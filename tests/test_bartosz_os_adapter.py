@@ -43,7 +43,11 @@ class FakeOperator:
 
     def prepare(self, workspace_root: str, **kwargs: object) -> OperatorResponse:
         self.calls.append(("prepare", workspace_root, kwargs))
-        return OperatorResponse.success("prepare", project_alias=str(kwargs["alias"]), data={"status": "prepared"})
+        return OperatorResponse.success(
+            "prepare",
+            project_alias=str(kwargs["alias"]),
+            data={"status": "prepared"},
+        )
 
     def start(self, workspace_root: str, **kwargs: object) -> OperatorResponse:
         self.calls.append(("start", workspace_root, kwargs))
@@ -65,6 +69,21 @@ def request(operation: str, parameters: dict[str, object], *, authorized: bool =
         parameters=parameters,
         mutation_authorized=authorized,
     )
+
+
+def test_request_round_trip_preserves_closed_v1_document() -> None:
+    original = request("events", {"workspace_root": "C:/w", "limit": 25})
+
+    restored = BartoszOsRequest.from_dict(original.to_dict())
+
+    assert restored == original
+    assert set(restored.to_dict()) == {
+        "schema",
+        "request_id",
+        "operation",
+        "parameters",
+        "mutation_authorized",
+    }
 
 
 def test_read_operation_routes_without_mutation_enablement(tmp_path: Path) -> None:
