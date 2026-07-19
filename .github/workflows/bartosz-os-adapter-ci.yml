@@ -1,0 +1,40 @@
+name: Bartosz OS Adapter CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/bartosz-os-adapter-ci.yml"
+      - "pyproject.toml"
+      - "bdb_bartosz_os/**"
+      - "bdb_operator/**"
+      - "manifests/bartosz-dev-bridge.module.json"
+      - "schemas/bartosz-os-module-manifest-v1.schema.json"
+      - "schemas/bdb-bartosz-os-request-v1.schema.json"
+      - "schemas/bdb-bartosz-os-response-v1.schema.json"
+      - "tests/test_bartosz_os_*.py"
+      - "docs/BDB_BARTOSZ_OS_ADAPTER.md"
+      - "docs/adr/0015-stateless-bartosz-os-adapter.md"
+
+permissions:
+  contents: read
+
+jobs:
+  adapter-contract:
+    name: Adapter contract / Python 3.12
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Compile adapter package
+        run: python -m compileall -q bdb_bartosz_os
+      - name: Run adapter routing and mutation gates
+        run: python -m pytest -vv tests/test_bartosz_os_adapter.py
+      - name: Run module manifest and architecture gates
+        run: python -m pytest -vv tests/test_bartosz_os_manifest_contract.py
