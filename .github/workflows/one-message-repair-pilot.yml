@@ -1,6 +1,9 @@
 name: One Message Repair Pilot
 
 on:
+  push:
+    branches:
+      - gpt-work/one-message-repair-pilot
   pull_request:
     branches:
       - main
