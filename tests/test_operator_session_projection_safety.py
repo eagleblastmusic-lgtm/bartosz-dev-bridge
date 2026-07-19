@@ -6,7 +6,7 @@ from pathlib import Path
 from bdb_operator import OperatorApi
 from bdb_operator.session_projection import SessionProjectionReader
 
-from .session_projection_fixture import SUCCESS_SESSION, workspace_fixture
+from session_projection_fixture import SUCCESS_SESSION, workspace_fixture
 
 
 def test_invalid_receipt_is_reported_without_hiding_the_session(tmp_path: Path) -> None:
