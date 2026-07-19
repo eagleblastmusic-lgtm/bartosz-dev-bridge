@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Literal, Protocol
 
-from PySide6.QtCore import QObject, QTimer, Slot
+from PySide6.QtCore import QObject, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QStyle, QSystemTrayIcon
 
@@ -183,8 +183,10 @@ class TrayController(QObject):
         if self._quit_after_stop and getattr(result, "action", None) == "stop":
             self._quit_after_stop = False
             if bool(getattr(result, "ok", False)):
+                # The main window synchronously starts its post-Stop status/current-
+                # operation refresh after this signal handler returns. Wait for the
+                # existing dashboard_ready completion signal; no timer or polling.
                 self._quit_when_idle = True
-                QTimer.singleShot(0, self._complete_quit_when_idle)
             else:
                 self.show_window()
 
