@@ -46,6 +46,14 @@ def test_real_repository_operations_touch_only_three_allowlisted_files() -> None
     assert failed[2]["content_base64"] == repaired[2]["content_base64"]
 
 
+def test_real_repository_fixture_enforces_one_newline_at_test_eof() -> None:
+    source = inspect.getsource(real_repo_pilot_fixture)
+
+    assert 'tests_text.rstrip() + square_tests.rstrip() + "\\n"' in source
+    assert 'tests_after.endswith("\\n\\n")' in source
+    assert "Generated real-repository test file has a blank line at EOF" in source
+
+
 def test_real_repository_fixture_removes_remote_and_never_pushes() -> None:
     source = inspect.getsource(real_repo_pilot_fixture)
     lowered = source.lower()
