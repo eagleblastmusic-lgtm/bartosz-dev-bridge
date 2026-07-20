@@ -11,6 +11,7 @@ READ_OPERATIONS = (
     "status",
     "events",
     "current_operation",
+    "sessions",
     "logs",
 )
 MUTATION_OPERATIONS = ("prepare", "start", "stop", "rearm")
@@ -58,5 +59,10 @@ def module_manifest() -> dict[str, Any]:
             "response": "bdb-bartosz-os-response-v1",
             "operator_response": "bdb-operator-response-v1",
             "event": "bdb-event-v1",
+            "session_history": "bdb-session-history-v1",
+            "repair_correlation": "bdb-repair-correlation-v1",
+            "repair_group": "bdb-repair-group-v1",
+            "control_center_smoke": "bdb-control-center-smoke-v1",
+            "release_manifest": "bdb-release-manifest-v1",
         },
     }
