@@ -39,7 +39,7 @@ def initialize_kalkulator(root: Path) -> dict[str, Any]:
     git(fixture, "config", "core.autocrlf", "false")
     git(fixture, "config", "user.name", "BDB Real Repository Pilot")
     git(fixture, "config", "user.email", "real-repo-pilot@example.invalid")
-    git(fixture, "checkout", "--detach", PINNED_SHA)
+    git(fixture, "checkout", "-B", "bdb-real-pilot", PINNED_SHA)
     if git(fixture, "rev-parse", "HEAD") != PINNED_SHA:
         raise RuntimeError("Pinned kalkulator commit was not checked out")
     if git(fixture, "status", "--porcelain=v1"):
