@@ -2,7 +2,7 @@ name: Real Repository Kalkulator Pilot
 
 on:
   pull_request:
-    branches: [gpt-work/control-center-0.3.0]
+    branches: [main, gpt-work/control-center-0.3.0]
     paths:
       - ".github/workflows/real-repository-kalkulator-pilot.yml"
       - "bdb_bridge/real_repo_pilot*.py"
