@@ -35,21 +35,23 @@ class SubprocessCommandRunner:
         with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(
             mode="w+b"
         ) as stderr_file:
-            run_options: dict[str, object] = {
-                "stdin": subprocess.DEVNULL,
-                "stdout": stdout_file,
-                "stderr": stderr_file,
-                "check": False,
-                "shell": False,
-                "timeout": timeout_seconds,
-            }
+            platform_options: dict[str, object] = {}
             if self._platform_name == "nt":
                 # Control Center is a GUI process. Without CREATE_NO_WINDOW,
                 # synchronous PowerShell/Python helpers can create a visible
                 # console window every time status, Start, Stop or Re-arm runs.
-                run_options["creationflags"] = WINDOWS_CREATE_NO_WINDOW
+                platform_options["creationflags"] = WINDOWS_CREATE_NO_WINDOW
 
-            completed = subprocess.run(list(args), **run_options)
+            completed = subprocess.run(
+                list(args),
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                check=False,
+                shell=False,
+                timeout=timeout_seconds,
+                **platform_options,
+            )
             stdout = _read_utf8(stdout_file)
             stderr = _read_utf8(stderr_file)
         return CompletedCommand(
