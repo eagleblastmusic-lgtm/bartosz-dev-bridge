@@ -3,10 +3,11 @@
   "$id": "bdb-control-center-smoke-v1",
   "title": "BDB Control Center headless smoke report v1",
   "type": "object",
-  "required": ["schema", "status"],
+  "required": ["schema", "status", "application_version"],
   "properties": {
     "schema": { "const": "bdb-control-center-smoke-v1" },
     "status": { "enum": ["success", "failed"] },
+    "application_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$" },
     "window_object_name": { "type": "string" },
     "window_constructed": { "type": "boolean" },
     "read_only_startup": { "const": true },

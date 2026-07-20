@@ -2,7 +2,7 @@
   "schema": "bartosz-os-module-manifest-v1",
   "module_id": "devmaster.bartosz-dev-bridge",
   "display_name": "Bartosz Dev Bridge",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "responsibility": "local_code_edit_test_promote_bridge",
   "owner_module": "DevMaster",
   "source_repository": "eagleblastmusic-lgtm/bartosz-dev-bridge",
@@ -12,7 +12,7 @@
     "network_listener": false
   },
   "operations": {
-    "read": ["capabilities", "list_projects", "status", "events", "current_operation", "logs"],
+    "read": ["capabilities", "list_projects", "status", "events", "current_operation", "sessions", "logs"],
     "mutation": ["prepare", "start", "stop", "rearm"],
     "arbitrary_shell": false,
     "auto_merge": false,
@@ -34,6 +34,11 @@
     "request": "bdb-bartosz-os-request-v1",
     "response": "bdb-bartosz-os-response-v1",
     "operator_response": "bdb-operator-response-v1",
-    "event": "bdb-event-v1"
+    "event": "bdb-event-v1",
+    "session_history": "bdb-session-history-v1",
+    "repair_correlation": "bdb-repair-correlation-v1",
+    "repair_group": "bdb-repair-group-v1",
+    "control_center_smoke": "bdb-control-center-smoke-v1",
+    "release_manifest": "bdb-release-manifest-v1"
   }
 }

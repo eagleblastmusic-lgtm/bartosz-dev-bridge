@@ -1,0 +1,125 @@
+name: Control Center 0.3.0 Candidate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/control-center-0.3.0-candidate.yml"
+      - ".github/workflows/control-center-release-artifact.yml"
+      - "bdb_gui/**"
+      - "bdb_operator/**"
+      - "bdb_bridge/**"
+      - "bdb_release/**"
+      - "manifests/**"
+      - "packaging/**"
+      - "schemas/**"
+      - "scripts/Invoke-BDBControlCenterArtifactAcceptance.ps1"
+      - "scripts/build_release_manifest.py"
+      - "tests/test_release_manifest.py"
+      - "tests/test_release_packaging_contract.py"
+      - "tests/test_gui_schema_contract.py"
+      - "tests/test_gui_control_center_smoke.py"
+      - "pyproject.toml"
+  push:
+    branches: [gpt-work/control-center-0.3.0]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-accept:
+    name: Windows / Python 3.12 / packaged acceptance
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install candidate dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev,gui,release]"
+      - name: Validate source identity and PowerShell syntax
+        shell: pwsh
+        run: |
+          $expected = "0.3.0"
+          $projectVersion = python -c "import pathlib,tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"
+          $applicationVersion = python -c "from bdb_gui.version import APPLICATION_VERSION; print(APPLICATION_VERSION)"
+          $moduleVersion = python -c "import json,pathlib; print(json.loads(pathlib.Path('manifests/bartosz-dev-bridge.module.json').read_text(encoding='utf-8'))['version'])"
+          foreach ($candidate in @($projectVersion, $applicationVersion, $moduleVersion)) {
+            if ($candidate.Trim() -ne $expected) {
+              throw "Source version $candidate does not match candidate version $expected"
+            }
+          }
+
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/Invoke-BDBControlCenterArtifactAcceptance.ps1"),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            throw "Acceptance script has PowerShell syntax errors"
+          }
+      - name: Run candidate contracts and source smoke
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -m pytest -vv
+          tests/test_release_manifest.py
+          tests/test_release_packaging_contract.py
+          tests/test_gui_schema_contract.py
+          tests/test_gui_control_center_smoke.py
+      - name: Build one-directory candidate
+        shell: pwsh
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --windowed `
+            --onedir `
+            --name BDB-Control-Center `
+            --paths . `
+            --collect-submodules bdb_gui `
+            --collect-submodules bdb_operator `
+            --collect-submodules bdb_bridge `
+            --add-data "scripts;scripts" `
+            packaging/windows/control_center_entry.py
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller candidate build failed" }
+      - name: Create and accept candidate artifact
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $release = Join-Path $PWD "candidate-release"
+          New-Item -ItemType Directory -Path $release -Force | Out-Null
+          $zip = Join-Path $release "BDB-Control-Center-windows-x86_64-0.3.0.zip"
+          $manifest = Join-Path $release "bdb-release-manifest-v1.json"
+          $acceptance = Join-Path $release "Invoke-BDBControlCenterArtifactAcceptance.ps1"
+
+          Compress-Archive -Path .\dist\BDB-Control-Center -DestinationPath $zip -CompressionLevel Optimal
+          python scripts/build_release_manifest.py create `
+            --artifact $zip `
+            --version "0.3.0" `
+            --source-commit "$env:GITHUB_SHA" `
+            --output $manifest
+          if ($LASTEXITCODE -ne 0) { throw "Candidate manifest creation failed" }
+          python scripts/build_release_manifest.py verify `
+            --artifact $zip `
+            --manifest $manifest
+          if ($LASTEXITCODE -ne 0) { throw "Candidate manifest verification failed" }
+
+          Copy-Item -LiteralPath "scripts/Invoke-BDBControlCenterArtifactAcceptance.ps1" -Destination $acceptance
+          & $acceptance `
+            -ReleaseDirectory $release `
+            -ExpectedVersion "0.3.0" `
+            -ExpectedSourceCommit "$env:GITHUB_SHA"
+          if ($LASTEXITCODE -ne 0) { throw "Candidate packaged acceptance failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bdb-control-center-0.3.0-candidate
+          path: candidate-release/
+          if-no-files-found: error
+          retention-days: 14

@@ -6,7 +6,7 @@ on:
       version:
         description: "Semantic version for the unsigned manual artifact"
         required: true
-        default: "0.2.1"
+        default: "0.3.0"
         type: string
 
 permissions:
@@ -25,6 +25,30 @@ jobs:
           cache: pip
       - name: Install build dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev,gui,release]"
+      - name: Validate source identity and acceptance entrypoint
+        shell: pwsh
+        run: |
+          $requested = "${{ inputs.version }}"
+          $projectVersion = python -c "import pathlib,tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"
+          $applicationVersion = python -c "from bdb_gui.version import APPLICATION_VERSION; print(APPLICATION_VERSION)"
+          $moduleVersion = python -c "import json,pathlib; print(json.loads(pathlib.Path('manifests/bartosz-dev-bridge.module.json').read_text(encoding='utf-8'))['version'])"
+          foreach ($candidate in @($projectVersion, $applicationVersion, $moduleVersion)) {
+            if ($candidate.Trim() -ne $requested) {
+              throw "Requested version $requested does not match source version $candidate"
+            }
+          }
+
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/Invoke-BDBControlCenterArtifactAcceptance.ps1"),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            throw "Acceptance script has PowerShell syntax errors"
+          }
       - name: Run release manifest and architecture tests
         env:
           QT_QPA_PLATFORM: offscreen
@@ -32,6 +56,8 @@ jobs:
           python -m pytest -vv
           tests/test_release_manifest.py
           tests/test_release_packaging_contract.py
+          tests/test_gui_schema_contract.py
+          tests/test_gui_control_center_smoke.py
       - name: Build one-directory Control Center
         shell: pwsh
         run: |
@@ -90,29 +116,60 @@ jobs:
           }
           if (
             $data.status -ne "success" -or
+            $data.application_version -ne "${{ inputs.version }}" -or
             $data.read_only_startup -ne $true -or
             $data.mutation_operations_invoked -ne 0 -or
-            $data.tray_created -ne $false
+            $data.tray_created -ne $false -or
+            $data.operation_flow_present -ne $true -or
+            $data.current_operation_read_only -ne $true -or
+            $data.history_tabs_present -ne $true -or
+            $data.session_history_view_present -ne $true -or
+            $data.session_history_read_only -ne $true -or
+            $data.session_result_open_explicit -ne $true -or
+            $data.session_receipt_open_explicit -ne $true -or
+            $data.session_folder_open_explicit -ne $true -or
+            $data.session_repair_relationships_inferred -ne $false
           ) {
-            throw "Bundled smoke violates the Control Center contract"
+            throw "Bundled smoke violates the Control Center 0.3.0 contract"
           }
-      - name: Create ZIP and manifest
+      - name: Create ZIP, manifest and acceptance receipt
         shell: pwsh
         run: |
           $release = Join-Path $PWD "release"
           New-Item -ItemType Directory -Path $release -Force | Out-Null
           $zip = Join-Path $release "BDB-Control-Center-windows-x86_64-${{ inputs.version }}.zip"
+          $manifestPath = Join-Path $release "bdb-release-manifest-v1.json"
+          $acceptanceScript = Join-Path $release "Invoke-BDBControlCenterArtifactAcceptance.ps1"
           Compress-Archive -Path .\dist\BDB-Control-Center -DestinationPath $zip -CompressionLevel Optimal
           python scripts/build_release_manifest.py create `
             --artifact $zip `
             --version "${{ inputs.version }}" `
             --source-commit "$env:GITHUB_SHA" `
-            --output (Join-Path $release "bdb-release-manifest-v1.json")
+            --output $manifestPath
           if ($LASTEXITCODE -ne 0) { throw "Release manifest creation failed" }
           python scripts/build_release_manifest.py verify `
             --artifact $zip `
-            --manifest (Join-Path $release "bdb-release-manifest-v1.json")
+            --manifest $manifestPath
           if ($LASTEXITCODE -ne 0) { throw "Release artifact verification failed" }
+
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          if (
+            $manifest.version -ne "${{ inputs.version }}" -or
+            $manifest.source_commit -ne "$env:GITHUB_SHA" -or
+            $manifest.distribution.auto_download -ne $false -or
+            $manifest.distribution.auto_install -ne $false -or
+            $manifest.distribution.published_release -ne $false -or
+            $null -ne $manifest.signature
+          ) {
+            throw "Release manifest identity or distribution policy is invalid"
+          }
+
+          Copy-Item -LiteralPath "scripts/Invoke-BDBControlCenterArtifactAcceptance.ps1" -Destination $acceptanceScript
+          & $acceptanceScript `
+            -ReleaseDirectory $release `
+            -ExpectedVersion "${{ inputs.version }}" `
+            -ExpectedSourceCommit "$env:GITHUB_SHA"
+          if ($LASTEXITCODE -ne 0) { throw "Self-contained artifact acceptance failed" }
       - uses: actions/upload-artifact@v4
         with:
           name: bdb-control-center-windows-${{ inputs.version }}

@@ -7,6 +7,8 @@ import platform
 from pathlib import Path
 from typing import Any, Sequence
 
+from .version import APPLICATION_VERSION
+
 
 SMOKE_SCHEMA = "bdb-control-center-smoke-v1"
 
@@ -36,6 +38,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _render_report(report: dict[str, Any], output_path: str | None) -> None:
+    report.setdefault("application_version", APPLICATION_VERSION)
     rendered = json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2)
     print(rendered)
     if output_path:
@@ -50,6 +53,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = {
             "schema": SMOKE_SCHEMA,
             "status": "failed",
+            "application_version": APPLICATION_VERSION,
             "error_code": "invalid_smoke_timeout",
             "error": "smoke-timeout-ms must be between 1000 and 120000",
         }
@@ -75,6 +79,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = {
             "schema": SMOKE_SCHEMA,
             "status": "failed",
+            "application_version": APPLICATION_VERSION,
             "error_code": "pyside6_missing",
             "error": str(error),
             "install_hint": 'python -m pip install -e ".[gui]"',
@@ -85,6 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     workspaces_root = str(Path(args.workspaces_root).expanduser().resolve(strict=False))
     application = QApplication.instance() or QApplication(["bdb-control-center"])
     application.setApplicationName("BDB Control Center")
+    application.setApplicationVersion(APPLICATION_VERSION)
     application.setOrganizationName("Bartosz Dev Bridge")
     application.setQuitOnLastWindowClosed(args.headless_smoke)
 
@@ -118,6 +124,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "schema": SMOKE_SCHEMA,
                 "status": "success" if report["bootstrap_ok"] else "failed",
+                "application_version": APPLICATION_VERSION,
                 "workspaces_root": workspaces_root,
                 "qt_version": qVersion(),
                 "pyside_version": PySide6.__version__,
@@ -138,6 +145,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "schema": SMOKE_SCHEMA,
                 "status": "failed",
+                "application_version": APPLICATION_VERSION,
                 "error_code": "bootstrap_timeout",
                 "workspaces_root": workspaces_root,
                 "bootstrap_completed": False,
@@ -159,6 +167,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.headless_smoke:
         report.setdefault("schema", SMOKE_SCHEMA)
         report.setdefault("status", "failed")
+        report.setdefault("application_version", APPLICATION_VERSION)
         report["event_loop_exit_code"] = exit_code
         report["timed_out"] = timed_out
         _render_report(report, args.json_out)

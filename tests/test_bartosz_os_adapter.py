@@ -37,6 +37,19 @@ class FakeOperator:
         self.calls.append(("current_operation", workspace_root))
         return OperatorResponse.success("current_operation", data={"active": False})
 
+    def sessions(self, workspace_root: str, **kwargs: object) -> OperatorResponse:
+        self.calls.append(("sessions", workspace_root, kwargs))
+        return OperatorResponse.success(
+            "sessions",
+            data={
+                "schema": "bdb-session-history-v1",
+                "sessions": [],
+                "repair_groups": [],
+                "read_only": True,
+                "repair_relationships_inferred": False,
+            },
+        )
+
     def logs(self, workspace_root: str, **kwargs: object) -> OperatorResponse:
         self.calls.append(("logs", workspace_root, kwargs))
         return OperatorResponse.success("logs", data={"sources": []})
@@ -98,6 +111,39 @@ def test_read_operation_routes_without_mutation_enablement(tmp_path: Path) -> No
     assert response.operator_response is not None
     assert response.operator_response["operation"] == "status"
     assert operator.calls == [("status", str(tmp_path))]
+
+
+def test_sessions_routes_bounded_read_only_projection_without_mutation_enablement(tmp_path: Path) -> None:
+    operator = FakeOperator()
+    adapter = BartoszOsAdapter(operator)
+
+    response = adapter.handle(
+        request("sessions", {"workspace_root": str(tmp_path), "limit": 25})
+    )
+
+    assert response.ok is True
+    assert response.adapter_persisted_state is False
+    assert response.network_listener is False
+    assert response.operator_response is not None
+    assert response.operator_response["operation"] == "sessions"
+    assert response.operator_response["data"]["read_only"] is True
+    assert response.operator_response["data"]["repair_relationships_inferred"] is False
+    assert operator.calls == [("sessions", str(tmp_path), {"limit": 25})]
+
+
+def test_sessions_rejects_unexpected_parameters_before_operator() -> None:
+    operator = FakeOperator()
+    response = BartoszOsAdapter(operator).handle(
+        request(
+            "sessions",
+            {"workspace_root": "C:/w", "limit": 10, "infer_repairs": True},
+        )
+    )
+
+    assert response.ok is False
+    assert response.error_code == "invalid_adapter_request"
+    assert "unexpected parameters" in (response.error_message or "")
+    assert operator.calls == []
 
 
 def test_mutation_is_disabled_by_default() -> None:

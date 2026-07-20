@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from bdb_bartosz_os import module_manifest
+from bdb_bartosz_os.manifest import MUTATION_OPERATIONS, READ_OPERATIONS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +59,34 @@ def test_manifest_declares_real_ownership_and_safety_boundaries() -> None:
     }
 
 
+def test_0_3_0_manifest_exposes_sessions_and_versioned_read_contracts() -> None:
+    manifest = module_manifest()
+
+    assert READ_OPERATIONS == (
+        "capabilities",
+        "list_projects",
+        "status",
+        "events",
+        "current_operation",
+        "sessions",
+        "logs",
+    )
+    assert MUTATION_OPERATIONS == ("prepare", "start", "stop", "rearm")
+    assert manifest["operations"]["read"] == list(READ_OPERATIONS)
+    assert manifest["operations"]["mutation"] == list(MUTATION_OPERATIONS)
+    assert manifest["contracts"] == {
+        "request": "bdb-bartosz-os-request-v1",
+        "response": "bdb-bartosz-os-response-v1",
+        "operator_response": "bdb-operator-response-v1",
+        "event": "bdb-event-v1",
+        "session_history": "bdb-session-history-v1",
+        "repair_correlation": "bdb-repair-correlation-v1",
+        "repair_group": "bdb-repair-group-v1",
+        "control_center_smoke": "bdb-control-center-smoke-v1",
+        "release_manifest": "bdb-release-manifest-v1",
+    }
+
+
 def test_manifest_and_adapter_schemas_are_closed() -> None:
     module_schema = json.loads(read(ROOT / "schemas" / "bartosz-os-module-manifest-v1.schema.json"))
     request_schema = json.loads(read(ROOT / "schemas" / "bdb-bartosz-os-request-v1.schema.json"))
@@ -66,7 +95,25 @@ def test_manifest_and_adapter_schemas_are_closed() -> None:
     assert module_schema["additionalProperties"] is False
     assert module_schema["properties"]["transport"]["additionalProperties"] is False
     assert module_schema["properties"]["operations"]["additionalProperties"] is False
+    assert module_schema["properties"]["operations"]["properties"]["read"]["const"] == list(READ_OPERATIONS)
+    contracts = module_schema["properties"]["contracts"]
+    assert contracts["additionalProperties"] is False
+    assert set(contracts["required"]) == {
+        "request",
+        "response",
+        "operator_response",
+        "event",
+        "session_history",
+        "repair_correlation",
+        "repair_group",
+        "control_center_smoke",
+        "release_manifest",
+    }
     assert request_schema["additionalProperties"] is False
+    assert request_schema["properties"]["operation"]["enum"] == [
+        *READ_OPERATIONS,
+        *MUTATION_OPERATIONS,
+    ]
     assert response_schema["additionalProperties"] is False
     assert response_schema["properties"]["adapter_persisted_state"] == {"const": False}
     assert response_schema["properties"]["network_listener"] == {"const": False}
@@ -106,4 +153,5 @@ def test_adapter_catalog_is_closed_and_mutations_default_off() -> None:
     assert '"mutation_adapter_disabled"' in source
     assert '"mutation_authorization_required"' in source
     assert 'MUTATION_OPERATIONS = ("prepare", "start", "stop", "rearm")' in manifest
+    assert 'if operation == "sessions":' in source
     assert "operation is outside the closed adapter catalog" in source
