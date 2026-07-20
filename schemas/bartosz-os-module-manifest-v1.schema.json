@@ -33,7 +33,7 @@
       "required": ["read", "mutation", "arbitrary_shell", "auto_merge", "auto_deploy"],
       "properties": {
         "read": {
-          "const": ["capabilities", "list_projects", "status", "events", "current_operation", "logs"]
+          "const": ["capabilities", "list_projects", "status", "events", "current_operation", "sessions", "logs"]
         },
         "mutation": { "const": ["prepare", "start", "stop", "rearm"] },
         "arbitrary_shell": { "const": false },
@@ -66,12 +66,21 @@
     "contracts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["request", "response", "operator_response", "event"],
+      "required": [
+        "request", "response", "operator_response", "event",
+        "session_history", "repair_correlation", "repair_group",
+        "control_center_smoke", "release_manifest"
+      ],
       "properties": {
         "request": { "const": "bdb-bartosz-os-request-v1" },
         "response": { "const": "bdb-bartosz-os-response-v1" },
         "operator_response": { "const": "bdb-operator-response-v1" },
-        "event": { "const": "bdb-event-v1" }
+        "event": { "const": "bdb-event-v1" },
+        "session_history": { "const": "bdb-session-history-v1" },
+        "repair_correlation": { "const": "bdb-repair-correlation-v1" },
+        "repair_group": { "const": "bdb-repair-group-v1" },
+        "control_center_smoke": { "const": "bdb-control-center-smoke-v1" },
+        "release_manifest": { "const": "bdb-release-manifest-v1" }
       }
     }
   }
