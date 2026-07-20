@@ -15,6 +15,7 @@ def read(name: str) -> str:
 def test_manifest_has_minimal_mv3_permissions() -> None:
     manifest = json.loads(read("manifest.json"))
     assert manifest["manifest_version"] == 3
+    assert manifest["version"] == "0.2.6"
     assert manifest["permissions"] == ["nativeMessaging", "storage"]
     assert manifest["host_permissions"] == ["https://chatgpt.com/*"]
     assert manifest["background"] == {"service_worker": "background_full_entry.js"}
@@ -23,6 +24,7 @@ def test_manifest_has_minimal_mv3_permissions() -> None:
         "content.js",
         "content_rerender.js",
         "content_auto_send.js",
+        "content_auto_retry.js",
     ]
     serialized = json.dumps(manifest)
     for forbidden in ("<all_urls>", "tabs", "debugger", "webRequest", "downloads"):
@@ -138,14 +140,32 @@ def test_auto_entry_synchronizes_loop_state_without_weakening_replay_guard() -> 
     assert "Oczekiwana iteracja" in popup
 
 
-def test_auto_send_requires_observed_composer_consumption() -> None:
+def test_auto_decision_retry_is_bounded_and_does_not_weaken_background_gates() -> None:
+    retry = read("content_auto_retry.js")
+    assert "BDB_AUTO_DECISION_RETRY_ATTEMPTS" in retry
+    assert "BDB_AUTO_DECISION_RETRY_MS" in retry
+    assert 'auto.reason === "non_sequential_iteration"' in retry
+    assert "auto.expectedIteration <= iteration" in retry
+    assert 'type: "BDB_CONSIDER_AUTO", action' in retry
+    assert "retryExhausted: true" in retry
+    assert "claimAutoReplay" not in retry
+    assert "chrome.storage" not in retry
+    assert "sendNativeMessage" not in retry
+
+
+def test_auto_send_requires_confirmed_multi_strategy_submission() -> None:
     companion = read("content_auto_send.js")
-    assert "BDB_AUTO_SEND_MAX_CLICKS" in companion
-    assert "bdbWaitForComposerConsumption" in companion
+    assert "BDB_AUTO_SEND_STRATEGIES" in companion
+    assert '"button_click"' in companion
+    assert '"request_submit"' in companion
+    assert '"enter_key"' in companion
+    assert "bdbWaitForSendConfirmation" in companion
+    assert "bdbUserMessageContains" in companion
+    assert "form.requestSubmit" in companion
+    assert 'new KeyboardEvent("keydown"' in companion
     assert "send_not_confirmed" in companion
-    assert "current.button.click()" in companion
     assert "markerStillPresent" in companion
-    assert "return { sent: true" not in companion.split("current.button.click();", 1)[1].split("if (await", 1)[0]
+    assert "confirmedVia" in companion
 
 
 def test_extension_contains_no_remote_scripts_or_inline_script() -> None:

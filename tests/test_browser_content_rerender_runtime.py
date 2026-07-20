@@ -168,7 +168,8 @@ def test_content_script_restores_panel_when_chatgpt_removes_panel_but_keeps_code
             assert.deepEqual(scripts, [
               "content.js",
               "content_rerender.js",
-              "content_auto_send.js"
+              "content_auto_send.js",
+              "content_auto_retry.js"
             ]);
             for (const scriptName of scripts) {
               const scriptPath = path.join(extensionDir, scriptName);

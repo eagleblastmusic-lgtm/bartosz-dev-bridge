@@ -3,12 +3,16 @@
 // ChatGPT may replace the composer after an input event, accept insertion but
 // ignore a synthetic click, or keep the send button disabled briefly. AUTO must
 // operate on the current live composer and must not report success until the
-// exact marker has been consumed.
+// exact marker has been consumed or appears in a submitted user message.
 const BDB_AUTO_SEND_BUTTON_ATTEMPTS = 80;
 const BDB_AUTO_INSERTION_OBSERVE_POLLS = 40;
-const BDB_AUTO_SEND_CONFIRM_POLLS = 24;
-const BDB_AUTO_SEND_MAX_CLICKS = 3;
+const BDB_AUTO_SEND_CONFIRM_POLLS = 30;
 const BDB_AUTO_SEND_POLL_MS = 100;
+const BDB_AUTO_SEND_STRATEGIES = Object.freeze([
+  "button_click",
+  "request_submit",
+  "enter_key"
+]);
 
 function bdbAutoSendSleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -17,6 +21,16 @@ function bdbAutoSendSleep(milliseconds) {
 function bdbComposerContains(marker) {
   const current = findComposer();
   return Boolean(current && composerText(current).includes(marker));
+}
+
+function bdbUserMessageContains(marker) {
+  if (!document || typeof document.querySelectorAll !== "function") {
+    return false;
+  }
+  const messages = document.querySelectorAll("[data-message-author-role='user']");
+  return Array.from(messages).some((message) => (
+    typeof message.textContent === "string" && message.textContent.includes(marker)
+  ));
 }
 
 function bdbInitialComposerState() {
@@ -58,23 +72,94 @@ async function bdbFindReadySendButton(composer) {
   return { form, button: null };
 }
 
-async function bdbWaitForComposerConsumption(marker) {
+async function bdbWaitForSendConfirmation(marker) {
   let consecutiveMissing = 0;
   for (let poll = 0; poll < BDB_AUTO_SEND_CONFIRM_POLLS; poll += 1) {
+    if (bdbUserMessageContains(marker)) {
+      return { confirmed: true, via: "user_message" };
+    }
     if (bdbComposerContains(marker)) {
       consecutiveMissing = 0;
     } else {
       consecutiveMissing += 1;
       if (consecutiveMissing >= 3) {
-        return true;
+        return { confirmed: true, via: "composer_consumed" };
       }
     }
     await bdbAutoSendSleep(BDB_AUTO_SEND_POLL_MS);
   }
-  return false;
+  return { confirmed: false, via: null };
 }
 
-autoSend = async function autoSendWithConfirmation(response, loopId, iteration) {
+function bdbRequestSubmit(form, button) {
+  if (!form || typeof form.requestSubmit !== "function") {
+    return false;
+  }
+  try {
+    form.requestSubmit(button);
+    return true;
+  } catch (_withButtonError) {
+    try {
+      form.requestSubmit();
+      return true;
+    } catch (_withoutButtonError) {
+      return false;
+    }
+  }
+}
+
+function bdbDispatchEnter(composer) {
+  if (!composer || typeof composer.dispatchEvent !== "function" || typeof KeyboardEvent !== "function") {
+    return false;
+  }
+  const eventInit = {
+    key: "Enter",
+    code: "Enter",
+    keyCode: 13,
+    which: 13,
+    bubbles: true,
+    cancelable: true
+  };
+  composer.dispatchEvent(new KeyboardEvent("keydown", eventInit));
+  composer.dispatchEvent(new KeyboardEvent("keypress", eventInit));
+  composer.dispatchEvent(new KeyboardEvent("keyup", eventInit));
+  return true;
+}
+
+async function bdbAttemptSend(marker, strategy) {
+  const currentComposer = findComposer();
+  if (!currentComposer || !composerText(currentComposer).includes(marker)) {
+    return { attempted: false, reason: "live_composer_lost" };
+  }
+
+  const current = await bdbFindReadySendButton(currentComposer);
+  if (!current.form || !current.button) {
+    return {
+      attempted: false,
+      reason: current.form ? "exact_send_button_unavailable" : "composer_form_missing"
+    };
+  }
+
+  if (strategy === "button_click") {
+    current.button.click();
+    return { attempted: true, reason: null };
+  }
+  if (strategy === "request_submit") {
+    return {
+      attempted: bdbRequestSubmit(current.form, current.button),
+      reason: "request_submit_unavailable"
+    };
+  }
+  if (strategy === "enter_key") {
+    return {
+      attempted: bdbDispatchEnter(currentComposer),
+      reason: "enter_dispatch_unavailable"
+    };
+  }
+  return { attempted: false, reason: "unknown_send_strategy" };
+}
+
+autoSend = async function autoSendWithConfirmedFallbacks(response, loopId, iteration) {
   const marker = `BDB_AUTO_RESULT:${loopId}:${iteration}`;
   const text = resultText(response, marker);
   const initial = bdbInitialComposerState();
@@ -94,35 +179,33 @@ autoSend = async function autoSendWithConfirmation(response, loopId, iteration) 
     return { sent: false, reason: "insertion_not_observed" };
   }
 
-  const ready = await bdbFindReadySendButton(liveComposer);
-  if (!ready.form || !ready.button || !bdbComposerContains(marker)) {
-    return {
-      sent: false,
-      reason: ready.form ? "exact_send_button_unavailable" : "composer_form_missing"
-    };
-  }
-
-  for (let clickAttempt = 0; clickAttempt < BDB_AUTO_SEND_MAX_CLICKS; clickAttempt += 1) {
+  const attempts = [];
+  for (const strategy of BDB_AUTO_SEND_STRATEGIES) {
     if (!bdbComposerContains(marker)) {
-      return { sent: true, reason: null, confirmed: true, clickAttempts: clickAttempt };
-    }
-
-    const currentComposer = findComposer();
-    if (!currentComposer || !composerText(currentComposer).includes(marker)) {
-      return { sent: false, reason: "live_composer_lost" };
-    }
-    const current = await bdbFindReadySendButton(currentComposer);
-    if (!current.button) {
-      return { sent: false, reason: "exact_send_button_unavailable" };
-    }
-    current.button.click();
-
-    if (await bdbWaitForComposerConsumption(marker)) {
       return {
         sent: true,
         reason: null,
         confirmed: true,
-        clickAttempts: clickAttempt + 1
+        confirmedVia: "composer_consumed",
+        attempts
+      };
+    }
+
+    const attempt = await bdbAttemptSend(marker, strategy);
+    attempts.push({ strategy, ...attempt });
+    if (!attempt.attempted) {
+      continue;
+    }
+
+    const confirmation = await bdbWaitForSendConfirmation(marker);
+    if (confirmation.confirmed) {
+      return {
+        sent: true,
+        reason: null,
+        confirmed: true,
+        confirmedVia: confirmation.via,
+        strategy,
+        attempts
       };
     }
   }
@@ -131,6 +214,7 @@ autoSend = async function autoSendWithConfirmation(response, loopId, iteration) 
     sent: false,
     reason: "send_not_confirmed",
     confirmed: false,
-    markerStillPresent: bdbComposerContains(marker)
+    markerStillPresent: bdbComposerContains(marker),
+    attempts
   };
 };
