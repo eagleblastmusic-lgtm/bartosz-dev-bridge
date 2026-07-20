@@ -31,6 +31,20 @@ The synchronization layer is now monotonic:
 
 Replay claims, AUTO opt-in, time/iteration limits, Native Messaging, rollback and promotion behavior are unchanged.
 
+## Windows helper-process visibility
+
+The same operator run exposed a separate usability defect: Control Center could launch synchronous PowerShell or Python helper commands from a GUI process without suppressing their console subsystem. Windows could therefore display a blank `python.exe` or PowerShell window during Start, Stop, Status or Re-arm.
+
+`SubprocessCommandRunner` now adds Windows `CREATE_NO_WINDOW` only when `os.name == "nt"`:
+
+- no shell is introduced;
+- stdout and stderr remain captured in temporary files;
+- timeout and exit-code handling are unchanged;
+- POSIX execution receives no Windows creation flags;
+- long-lived Bridge and promoter logging remain unchanged.
+
+The change affects only helper-process presentation. It does not weaken process, Native Host, allowlist, profile, rollback, promotion or authorization gates.
+
 ## Regression coverage
 
 `tests/test_browser_auto_state_monotonic_runtime.py` deterministically injects the race:
@@ -43,15 +57,23 @@ Replay claims, AUTO opt-in, time/iteration limits, Native Messaging, rollback an
 
 The test fails against the preceding read-copy-write implementation and passes only when canonical state cannot regress.
 
+`tests/test_operator_runner.py` additionally verifies that:
+
+- Windows helper commands receive `CREATE_NO_WINDOW`;
+- `shell=False`, redirected output and bounded timeout remain in place;
+- non-Windows execution receives no Windows-only creation flag.
+
 ## Operator acceptance
 
 After CI and merge:
 
 1. update the clean local `main` by fast-forward only;
-2. reload the unpacked extension and confirm version `0.2.7`;
-3. reload the ChatGPT tab once before starting a new loop;
-4. Start and arm the Control Center;
-5. enable AUTO with bounded limits;
-6. run a fresh unique loop without clicking, pressing Enter, sending another message, or refreshing the page.
+2. rebuild/reinstall Control Center from the merged source so the windowless runner is active;
+3. reload the unpacked extension and confirm version `0.2.7`;
+4. reload the ChatGPT tab once before starting a new loop;
+5. Start and arm the Control Center;
+6. confirm that Start, Status and Re-arm do not display a console window;
+7. enable AUTO with bounded limits;
+8. run a fresh unique loop without clicking, pressing Enter, sending another message, or refreshing the page.
 
 No Git push, merge, release or deployment capability is added.
