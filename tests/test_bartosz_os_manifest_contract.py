@@ -110,6 +110,10 @@ def test_manifest_and_adapter_schemas_are_closed() -> None:
         "release_manifest",
     }
     assert request_schema["additionalProperties"] is False
+    assert request_schema["properties"]["operation"]["enum"] == [
+        *READ_OPERATIONS,
+        *MUTATION_OPERATIONS,
+    ]
     assert response_schema["additionalProperties"] is False
     assert response_schema["properties"]["adapter_persisted_state"] == {"const": False}
     assert response_schema["properties"]["network_listener"] == {"const": False}
