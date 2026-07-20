@@ -1,0 +1,198 @@
+name: Real Repository Kalkulator Pilot
+
+on:
+  pull_request:
+    branches: [gpt-work/control-center-0.3.0]
+    paths:
+      - ".github/workflows/real-repository-kalkulator-pilot.yml"
+      - "bdb_bridge/real_repo_pilot*.py"
+      - "scripts/real_repository_pilot.py"
+      - "scripts/Invoke-BDBRealRepositoryPilot.ps1"
+      - "tests/test_real_repo_pilot_contract.py"
+      - "docs/REAL_REPOSITORY_KALKULATOR_PILOT.md"
+      - "bdb_bridge/**"
+      - "tests/**"
+      - "pyproject.toml"
+  push:
+    branches: [gpt-work/real-repo-kalkulator-pilot]
+
+permissions:
+  contents: read
+
+jobs:
+  full-test:
+    name: Full pytest / ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.11"
+          - os: windows-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.14"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Compile real repository pilot
+        run: |
+          python -m py_compile bdb_bridge/real_repo_pilot.py
+          python -m py_compile bdb_bridge/real_repo_pilot_fixture.py
+          python -m py_compile scripts/real_repository_pilot.py
+      - name: Run full test suite
+        run: python -m pytest -q
+
+  real-pilot:
+    name: Windows / Python 3.14 / pinned kalkulator repair
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install pilot dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Validate focused pilot contracts
+        run: >-
+          python -m pytest -vv
+          tests/test_real_repo_pilot_contract.py
+          tests/test_repair_loop.py
+          tests/test_repair_correlation.py
+          tests/test_native_action_repair_correlation.py
+      - name: Validate PowerShell entrypoint
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/Invoke-BDBRealRepositoryPilot.ps1"),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            throw "Real repository pilot PowerShell has syntax errors"
+          }
+      - name: Run bounded real repository pilot
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "bdb-real-repository-kalkulator"
+          .\scripts\Invoke-BDBRealRepositoryPilot.ps1 `
+            -Python (Get-Command python).Source `
+            -Root $root `
+            -TimeoutSeconds 180
+
+          $reportPath = Join-Path $root "real-repository-pilot-report.json"
+          if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+            throw "Real repository pilot report is missing"
+          }
+          $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+          if ($report.status -ne "pass") { throw "Real repository pilot did not pass" }
+          if ($report.repository.pinned_sha -ne "4bd377f0fb33194da586a2aa58b67efcb86bc2e4") {
+            throw "Real repository pilot used a different source commit"
+          }
+          if ($report.attempt_count -ne 2 -or $report.user_interventions_between_attempts -ne 0) {
+            throw "Real repository pilot did not prove the autonomous two-attempt loop"
+          }
+          if (
+            $report.initial_attempt.rollback_performed -ne $true -or
+            $report.initial_attempt.checkpoint_state -ne "rolled_back" -or
+            $report.initial_attempt.analysis.failed_test -ne "test_square_current_value"
+          ) {
+            throw "Real repository failure and rollback were not proved"
+          }
+          if (
+            $report.repair_attempt.status -ne "success" -or
+            $report.repair_attempt.checkpoint_state -ne "committed"
+          ) {
+            throw "Real repository repair did not pass"
+          }
+          if (@($report.repair_attempt.changed_files) -join "," -ne "README.md,calculator.py,tests/test_calculator.py") {
+            throw "Real repository changed-file set differs from the allowlist"
+          }
+          if (
+            $report.remote_main_before -ne $report.remote_main_after -or
+            $report.remote_mutation_performed -ne $false -or
+            $report.local_remote_count -ne 0 -or
+            $report.local_branch -ne "bdb-real-pilot" -or
+            $report.source_checkout_clean -ne $true
+          ) {
+            throw "Real repository remote-isolation evidence is invalid"
+          }
+          if (
+            $report.promotion_receipt.parent_commit -ne $report.repository.pinned_sha -or
+            $report.promotion_receipt.source_commit -ne $report.local_source_commit
+          ) {
+            throw "Real repository promotion receipt is inconsistent"
+          }
+      - name: Assemble bounded evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "bdb-real-repository-kalkulator"
+          $evidence = Join-Path $root "evidence"
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          $reportPath = Join-Path $root "real-repository-pilot-report.json"
+          if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
+            Copy-Item -LiteralPath $reportPath -Destination $evidence
+            $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+            if (Test-Path -LiteralPath $report.receipt_path -PathType Leaf) {
+              Copy-Item -LiteralPath $report.receipt_path -Destination (Join-Path $evidence "promotion-receipt.json")
+            }
+          }
+          foreach ($relative in @(
+            "bridge.stdout.log",
+            "bridge.stderr.log",
+            "bridge-config.json",
+            "native-host.json",
+            "native-host-sessions.json"
+          )) {
+            $source = Join-Path $root $relative
+            if (Test-Path -LiteralPath $source -PathType Leaf) {
+              Copy-Item -LiteralPath $source -Destination $evidence
+            }
+          }
+          $journal = Join-Path $root "runtime\journal.db"
+          if (Test-Path -LiteralPath $journal -PathType Leaf) {
+            Copy-Item -LiteralPath $journal -Destination $evidence
+          }
+
+          $sourceRepo = Join-Path $root "kalkulator-source"
+          if (Test-Path -LiteralPath $sourceRepo -PathType Container) {
+            $final = Join-Path $evidence "final"
+            New-Item -ItemType Directory -Path (Join-Path $final "tests") -Force | Out-Null
+            Copy-Item -LiteralPath (Join-Path $sourceRepo "calculator.py") -Destination $final
+            Copy-Item -LiteralPath (Join-Path $sourceRepo "README.md") -Destination $final
+            Copy-Item -LiteralPath (Join-Path $sourceRepo "tests\test_calculator.py") -Destination (Join-Path $final "tests")
+            git -C $sourceRepo diff 4bd377f0fb33194da586a2aa58b67efcb86bc2e4..HEAD --binary --no-ext-diff -- | Out-File -LiteralPath (Join-Path $evidence "kalkulator-local.patch") -Encoding utf8
+            $gitEvidence = [ordered]@{
+              schema = "bdb-real-repository-git-evidence-v1"
+              branch = (git -C $sourceRepo branch --show-current).Trim()
+              head = (git -C $sourceRepo rev-parse HEAD).Trim()
+              parent = (git -C $sourceRepo rev-parse HEAD^).Trim()
+              remotes = @((git -C $sourceRepo remote) | Where-Object { $_ })
+              status_porcelain = @((git -C $sourceRepo status --porcelain=v1) | Where-Object { $_ })
+            }
+            $gitEvidence | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $evidence "local-git-evidence.json") -Encoding utf8
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bdb-real-repository-kalkulator-pilot
+          path: ${{ runner.temp }}/bdb-real-repository-kalkulator/evidence/
+          if-no-files-found: error
+          retention-days: 14
