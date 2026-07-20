@@ -88,6 +88,8 @@ jobs:
             throw "Real repository pilot PowerShell has syntax errors"
           }
       - name: Run bounded real repository pilot
+        id: real_pilot
+        continue-on-error: true
         shell: pwsh
         run: |
           $root = Join-Path $env:RUNNER_TEMP "bdb-real-repository-kalkulator"
@@ -95,12 +97,93 @@ jobs:
             -Python (Get-Command python).Source `
             -Root $root `
             -TimeoutSeconds 180
+      - name: Assemble bounded evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "bdb-real-repository-kalkulator"
+          $evidence = Join-Path $root "evidence"
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          $diagnostic = Join-Path $evidence "diagnostic.txt"
+          "pilot_step_outcome=${{ steps.real_pilot.outcome }}" | Set-Content -LiteralPath $diagnostic -Encoding utf8
 
+          $reportPath = Join-Path $root "real-repository-pilot-report.json"
+          if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
+            Copy-Item -LiteralPath $reportPath -Destination $evidence
+            $rawReport = Get-Content -LiteralPath $reportPath -Raw
+            "`n=== REPORT ===`n$rawReport" | Add-Content -LiteralPath $diagnostic -Encoding utf8
+            $report = $rawReport | ConvertFrom-Json
+            $receiptProperty = $report.PSObject.Properties["receipt_path"]
+            if ($null -ne $receiptProperty -and $receiptProperty.Value -and (Test-Path -LiteralPath $receiptProperty.Value -PathType Leaf)) {
+              Copy-Item -LiteralPath $receiptProperty.Value -Destination (Join-Path $evidence "promotion-receipt.json")
+            }
+          } else {
+            "`nreport_missing=true" | Add-Content -LiteralPath $diagnostic -Encoding utf8
+          }
+
+          foreach ($relative in @(
+            "bridge.stdout.log",
+            "bridge.stderr.log",
+            "bridge-config.json",
+            "native-host.json",
+            "native-host-sessions.json"
+          )) {
+            $source = Join-Path $root $relative
+            if (Test-Path -LiteralPath $source -PathType Leaf) {
+              Copy-Item -LiteralPath $source -Destination $evidence
+            }
+          }
+          $journal = Join-Path $root "runtime\journal.db"
+          if (Test-Path -LiteralPath $journal -PathType Leaf) {
+            Copy-Item -LiteralPath $journal -Destination $evidence
+          }
+
+          $sourceRepo = Join-Path $root "kalkulator-source"
+          if (Test-Path -LiteralPath $sourceRepo -PathType Container) {
+            $final = Join-Path $evidence "final"
+            New-Item -ItemType Directory -Path (Join-Path $final "tests") -Force | Out-Null
+            foreach ($relative in @("calculator.py", "README.md")) {
+              $sourceFile = Join-Path $sourceRepo $relative
+              if (Test-Path -LiteralPath $sourceFile -PathType Leaf) {
+                Copy-Item -LiteralPath $sourceFile -Destination $final
+              }
+            }
+            $testFile = Join-Path $sourceRepo "tests\test_calculator.py"
+            if (Test-Path -LiteralPath $testFile -PathType Leaf) {
+              Copy-Item -LiteralPath $testFile -Destination (Join-Path $final "tests")
+            }
+            git -C $sourceRepo diff 4bd377f0fb33194da586a2aa58b67efcb86bc2e4..HEAD --binary --no-ext-diff -- | Out-File -LiteralPath (Join-Path $evidence "kalkulator-local.patch") -Encoding utf8
+            $parent = (git -C $sourceRepo rev-parse HEAD^ 2>$null)
+            $gitEvidence = [ordered]@{
+              schema = "bdb-real-repository-git-evidence-v1"
+              branch = (git -C $sourceRepo branch --show-current).Trim()
+              head = (git -C $sourceRepo rev-parse HEAD).Trim()
+              parent = if ($LASTEXITCODE -eq 0) { $parent.Trim() } else { $null }
+              remotes = @((git -C $sourceRepo remote) | Where-Object { $_ })
+              status_porcelain = @((git -C $sourceRepo status --porcelain=v1) | Where-Object { $_ })
+            }
+            $gitEvidence | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $evidence "local-git-evidence.json") -Encoding utf8
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bdb-real-repository-kalkulator-pilot
+          path: ${{ runner.temp }}/bdb-real-repository-kalkulator/evidence/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce real repository pilot result
+        if: always()
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "bdb-real-repository-kalkulator"
           $reportPath = Join-Path $root "real-repository-pilot-report.json"
           if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
             throw "Real repository pilot report is missing"
           }
-          $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+          $rawReport = Get-Content -LiteralPath $reportPath -Raw
+          Write-Host "=== REAL REPOSITORY PILOT REPORT ==="
+          Write-Host $rawReport
+          $report = $rawReport | ConvertFrom-Json
           if ($report.status -ne "pass") { throw "Real repository pilot did not pass" }
           if ($report.repository.pinned_sha -ne "4bd377f0fb33194da586a2aa58b67efcb86bc2e4") {
             throw "Real repository pilot used a different source commit"
@@ -139,60 +222,3 @@ jobs:
           ) {
             throw "Real repository promotion receipt is inconsistent"
           }
-      - name: Assemble bounded evidence
-        if: always()
-        shell: pwsh
-        run: |
-          $root = Join-Path $env:RUNNER_TEMP "bdb-real-repository-kalkulator"
-          $evidence = Join-Path $root "evidence"
-          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
-          $reportPath = Join-Path $root "real-repository-pilot-report.json"
-          if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
-            Copy-Item -LiteralPath $reportPath -Destination $evidence
-            $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-            if (Test-Path -LiteralPath $report.receipt_path -PathType Leaf) {
-              Copy-Item -LiteralPath $report.receipt_path -Destination (Join-Path $evidence "promotion-receipt.json")
-            }
-          }
-          foreach ($relative in @(
-            "bridge.stdout.log",
-            "bridge.stderr.log",
-            "bridge-config.json",
-            "native-host.json",
-            "native-host-sessions.json"
-          )) {
-            $source = Join-Path $root $relative
-            if (Test-Path -LiteralPath $source -PathType Leaf) {
-              Copy-Item -LiteralPath $source -Destination $evidence
-            }
-          }
-          $journal = Join-Path $root "runtime\journal.db"
-          if (Test-Path -LiteralPath $journal -PathType Leaf) {
-            Copy-Item -LiteralPath $journal -Destination $evidence
-          }
-
-          $sourceRepo = Join-Path $root "kalkulator-source"
-          if (Test-Path -LiteralPath $sourceRepo -PathType Container) {
-            $final = Join-Path $evidence "final"
-            New-Item -ItemType Directory -Path (Join-Path $final "tests") -Force | Out-Null
-            Copy-Item -LiteralPath (Join-Path $sourceRepo "calculator.py") -Destination $final
-            Copy-Item -LiteralPath (Join-Path $sourceRepo "README.md") -Destination $final
-            Copy-Item -LiteralPath (Join-Path $sourceRepo "tests\test_calculator.py") -Destination (Join-Path $final "tests")
-            git -C $sourceRepo diff 4bd377f0fb33194da586a2aa58b67efcb86bc2e4..HEAD --binary --no-ext-diff -- | Out-File -LiteralPath (Join-Path $evidence "kalkulator-local.patch") -Encoding utf8
-            $gitEvidence = [ordered]@{
-              schema = "bdb-real-repository-git-evidence-v1"
-              branch = (git -C $sourceRepo branch --show-current).Trim()
-              head = (git -C $sourceRepo rev-parse HEAD).Trim()
-              parent = (git -C $sourceRepo rev-parse HEAD^).Trim()
-              remotes = @((git -C $sourceRepo remote) | Where-Object { $_ })
-              status_porcelain = @((git -C $sourceRepo status --porcelain=v1) | Where-Object { $_ })
-            }
-            $gitEvidence | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $evidence "local-git-evidence.json") -Encoding utf8
-          }
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: bdb-real-repository-kalkulator-pilot
-          path: ${{ runner.temp }}/bdb-real-repository-kalkulator/evidence/
-          if-no-files-found: error
-          retention-days: 14
