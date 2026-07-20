@@ -1,10 +1,10 @@
-# Bartosz Dev Bridge — P14 adapter Bartosz OS
+# Bartosz Dev Bridge — adapter Bartosz OS
 
-Status: IMPLEMENTED ON BRANCH
+Status: IMPLEMENTED FOR 0.3.0
 
 ## Cel
 
-P14 definiuje stabilny kontrakt, przez który przyszły Bartosz OS może odkryć możliwości Dev Bridge i wywołać publiczne Operator API. Adapter nie przejmuje odpowiedzialności DevMastera i nie staje się nowym źródłem stanu.
+Adapter definiuje stabilny kontrakt, przez który przyszły Bartosz OS może odkryć możliwości Dev Bridge i wywołać publiczne Operator API. Nie przejmuje odpowiedzialności DevMastera i nie staje się nowym źródłem stanu.
 
 ## Manifest modułu
 
@@ -21,6 +21,14 @@ P14 definiuje stabilny kontrakt, przez który przyszły Bartosz OS może odkryć
 - brak roli Bartosz OS Core jako źródła stanu operacyjnego.
 
 Statyczny descriptor znajduje się w `manifests/bartosz-dev-bridge.module.json`; funkcja `module_manifest()` generuje ten sam kontrakt z bieżącą wersją pakietu.
+
+W 0.3.0 oba manifesty reklamują również kontrakty:
+
+- `bdb-session-history-v1`;
+- `bdb-repair-correlation-v1`;
+- `bdb-repair-group-v1`;
+- `bdb-control-center-smoke-v1`;
+- `bdb-release-manifest-v1`.
 
 ## Żądanie i odpowiedź
 
@@ -41,27 +49,32 @@ Mutacja przechodzi dopiero po dwóch niezależnych bramkach:
 
 Odczyt z ustawionym `mutation_authorized=True` również jest odrzucany, aby pole nie stało się bezwartościowym domyślnym przełącznikiem.
 
+Dodanie `sessions` w 0.3.0 nie rozszerza katalogu mutacji i nie włącza nowych uprawnień wykonawczych.
+
 ## Routing
 
-Adapter przekazuje wyłącznie zamknięty katalog publicznego Operator API:
+Adapter przekazuje wyłącznie zamknięty katalog publicznego Operator API.
 
 ### Odczyt
 
-- capabilities;
-- list_projects;
-- status;
-- events z bounded cursorem;
-- current_operation;
-- logs z bounded limitami.
+- `capabilities`;
+- `list_projects`;
+- `status`;
+- `events` z bounded cursorem;
+- `current_operation`;
+- `sessions` z wymaganym `workspace_root` i opcjonalnym bounded `limit`;
+- `logs` z bounded limitami.
+
+Operacja `sessions` zwraca tę samą read-only projekcję historii sesji, receipts i jawnych grup naprawczych co Control Center. Adapter nie buduje relacji samodzielnie i nie inferuje ich na podstawie czasu, nazw ani kolejności.
 
 ### Mutacje
 
-- prepare;
-- start;
-- stop;
-- rearm.
+- `prepare`;
+- `start`;
+- `stop`;
+- `rearm`.
 
-Dodatkowe i brakujące parametry są odrzucane przed wywołaniem Operator API.
+Dodatkowe i brakujące parametry są odrzucane przed wywołaniem Operator API. Przykładowo `sessions` akceptuje tylko `workspace_root` oraz opcjonalny `limit`; próba przekazania pola w rodzaju `infer_repairs` jest odrzucana.
 
 ## Granice
 
@@ -72,6 +85,7 @@ Adapter:
 - nie nasłuchuje w sieci;
 - nie zapisuje stanu;
 - nie generuje własnych definicji statusu;
+- nie tworzy ani nie modyfikuje correlation ID;
 - nie zmienia własności decyzji i źródeł prawdy;
 - nie jest wdrożeniem Bartosz OS Core.
 
