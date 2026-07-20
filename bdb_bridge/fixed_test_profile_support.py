@@ -1,16 +1,52 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
-from pathlib import Path
 from typing import Any, Type
 
 from .execution import sanitized_test_environment
-from .fixed_test_profiles import PYTEST_PROFILE, fixed_profile_arguments
+from .fixed_test_profiles import (
+    DOTNET_PROFILE,
+    PYTEST_PROFILE,
+    fixed_profile_arguments,
+    fixed_profile_command,
+)
 from .models import BridgeErrorCode, ProfileRunOutcome
 from .multi_file_patch_recovery_models import MultiFileCheckpointState
 from .protocol import BridgeError
+
+
+_DOTNET_ENVIRONMENT_KEYS = (
+    "APPDATA",
+    "DOTNET_ROOT",
+    "DOTNET_ROOT_X64",
+    "HOME",
+    "LOCALAPPDATA",
+    "NUGET_PACKAGES",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "USERPROFILE",
+)
+
+
+def _profile_environment(profile_id: str) -> dict[str, str]:
+    environment = sanitized_test_environment()
+    if profile_id == DOTNET_PROFILE:
+        for key in _DOTNET_ENVIRONMENT_KEYS:
+            value = os.environ.get(key)
+            if value:
+                environment[key] = value
+        environment.update(
+            {
+                "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+                "DOTNET_NOLOGO": "1",
+                "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1",
+            }
+        )
+    return environment
 
 
 def install_fixed_test_profile_support(
@@ -26,7 +62,11 @@ def install_fixed_test_profile_support(
         profile_id: str = PYTEST_PROFILE,
     ) -> ProfileRunOutcome:
         try:
-            arguments = fixed_profile_arguments(profile_id)
+            command = fixed_profile_command(
+                profile_id,
+                python_executable=self.config.python_executable,
+                environment=os.environ,
+            )
         except BridgeError:
             return ProfileRunOutcome(
                 "internal_error",
@@ -35,19 +75,19 @@ def install_fixed_test_profile_support(
                 "Profile is not locally allowed",
                 0,
             )
-        executable = Path(self.config.python_executable)
-        if not executable.is_file():
+        except FileNotFoundError as exc:
             return ProfileRunOutcome(
                 "internal_error",
                 None,
                 "",
-                "Configured Python executable does not exist",
+                str(exc),
                 0,
             )
+
         started = time.monotonic()
         try:
             completed = subprocess.run(
-                [str(executable), *arguments],
+                list(command),
                 cwd=workspace.path,
                 text=True,
                 encoding="utf-8",
@@ -55,7 +95,7 @@ def install_fixed_test_profile_support(
                 capture_output=True,
                 check=False,
                 timeout=self.config.test_timeout_seconds,
-                env=sanitized_test_environment(),
+                env=_profile_environment(profile_id),
                 shell=False,
             )
             status = "success" if completed.returncode == 0 else "failed"

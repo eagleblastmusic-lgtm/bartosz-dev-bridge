@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from typing import Any
 
 from PySide6.QtCore import Signal
@@ -20,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from .projects import PreparePlan, PrepareResult
+from .runtime_paths import default_python_executable
 
 
 class ProjectsWidget(QWidget):
@@ -147,7 +147,8 @@ class ProjectsWidget(QWidget):
         self.allowed_paths_edit.setPlaceholderText("README.md\ntests/*.py\nsrc/**")
         self.allowed_paths_edit.setMaximumHeight(115)
         form_layout.addRow("Allowed paths", self.allowed_paths_edit)
-        self.python_edit = QLineEdit(sys.executable)
+        self.python_edit = QLineEdit(default_python_executable())
+        self.python_edit.setPlaceholderText("Wskaż python.exe środowiska BDB")
         self.python_edit.setObjectName("ProjectPythonEdit")
         form_layout.addRow("Python", self.python_edit)
         self.test_timeout_spin = QSpinBox()
