@@ -188,8 +188,13 @@ def execute_pilot(*, repo_root: Path, root: Path, python_executable: str, timeou
         promotion = WorkspacePromoter(config).promote_file(result_path)
         if promotion.status != "promoted" or promotion.source_commit is None:
             raise RuntimeError(f"Real-repository result was not promoted: {promotion.as_dict()}")
-        if promotion.parent_commit != PINNED_SHA:
+        receipt = json.loads(promotion.receipt_path.read_text(encoding="utf-8"))
+        if receipt.get("schema") != "bdb-workspace-promotion-v1":
+            raise RuntimeError("Real-repository promotion receipt schema is invalid")
+        if receipt.get("parent_commit") != PINNED_SHA:
             raise RuntimeError("Real-repository promotion parent differs from pinned commit")
+        if receipt.get("source_commit") != promotion.source_commit:
+            raise RuntimeError("Real-repository receipt source commit differs from promotion outcome")
 
         final_tests = run([python_executable, "-m", "pytest", "-q"], cwd=fixture)
         assert_clean_checkout(fixture, label="promoted real-repository checkout")
@@ -249,6 +254,7 @@ def execute_pilot(*, repo_root: Path, root: Path, python_executable: str, timeou
                     "verified": True,
                 },
                 "promotion": promotion.as_dict(),
+                "promotion_receipt": receipt,
                 "final_tests": {"exit_code": final_tests.returncode, "stdout_tail": str(final_tests.stdout)[-2000:]},
                 "source_checkout_clean": True,
                 "local_branch": "bdb-real-pilot",
