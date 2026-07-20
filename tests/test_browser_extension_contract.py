@@ -15,7 +15,7 @@ def read(name: str) -> str:
 def test_manifest_has_minimal_mv3_permissions() -> None:
     manifest = json.loads(read("manifest.json"))
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "0.2.6"
+    assert manifest["version"] == "0.2.7"
     assert manifest["permissions"] == ["nativeMessaging", "storage"]
     assert manifest["host_permissions"] == ["https://chatgpt.com/*"]
     assert manifest["background"] == {"service_worker": "background_full_entry.js"}
@@ -129,6 +129,8 @@ def test_auto_entry_synchronizes_loop_state_without_weakening_replay_guard() -> 
     assert "canonicalAutoStateKey" in entry
     assert "chrome.storage.session.get(null)" in entry
     assert "legacyAutoStateEntries" in entry
+    assert "if (isStoredAutoState(canonical))" in entry
+    assert "const current = await chrome.storage.session.get(canonicalKey);" in entry
     assert 'reason = "iteration_already_processed"' in entry
     assert "expectedIteration" in entry
     assert "claimAutoReplay" in background
