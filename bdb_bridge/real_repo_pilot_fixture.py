@@ -107,7 +107,9 @@ def initialize_kalkulator(root: Path) -> dict[str, Any]:
         '    engine.digit("3")\n'
         '    assert engine.display == "3"\n'
     )
-    tests_after = tests_text.rstrip() + square_tests + "\n"
+    tests_after = tests_text.rstrip() + square_tests.rstrip() + "\n"
+    if tests_after.endswith("\n\n"):
+        raise RuntimeError("Generated real-repository test file has a blank line at EOF")
 
     readme_after = _replace_once(
         readme_text,
