@@ -10,7 +10,7 @@
     "request_id": { "type": "string", "format": "uuid" },
     "operation": {
       "enum": [
-        "capabilities", "list_projects", "status", "events", "current_operation", "logs",
+        "capabilities", "list_projects", "status", "events", "current_operation", "sessions", "logs",
         "prepare", "start", "stop", "rearm"
       ]
     },
