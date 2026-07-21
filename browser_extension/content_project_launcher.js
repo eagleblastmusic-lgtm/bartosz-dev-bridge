@@ -190,6 +190,8 @@ async function bdbPollProjectLaunch() {
 const bdbProjectRuntimeReady = Boolean(
   typeof chrome === "object" &&
   chrome.runtime &&
+  typeof chrome.runtime.id === "string" &&
+  chrome.runtime.id.length > 0 &&
   typeof chrome.runtime.sendMessage === "function"
 );
 if (bdbProjectRuntimeReady) {
