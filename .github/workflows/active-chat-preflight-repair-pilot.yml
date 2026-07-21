@@ -11,6 +11,7 @@ on:
       - "bdb_gui/**"
       - "tests/test_action_preflight_contract.py"
       - "tests/test_browser_action_preflight_runtime.py"
+      - "tests/test_browser_conversation_tab_binding_runtime.py"
       - "tests/test_browser_repair_correlation_runtime.py"
       - "tests/test_current_chat_handoff_contract.py"
       - "tests/test_terminal_diagnostics.py"
@@ -50,6 +51,7 @@ jobs:
           python -m pytest -vv
           tests/test_action_preflight_contract.py
           tests/test_browser_action_preflight_runtime.py
+          tests/test_browser_conversation_tab_binding_runtime.py
           tests/test_browser_repair_correlation_runtime.py
           tests/test_current_chat_handoff_contract.py
           tests/test_terminal_diagnostics.py
