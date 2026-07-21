@@ -23,8 +23,13 @@ function bdbBindingSessionId(commandId) {
   return separator > 0 ? commandId.slice(0, separator) : null;
 }
 
-async function bdbRecordConversationCommand(action, response) {
-  if (!action || typeof action.repo_alias !== "string") {
+async function bdbRecordConversationCommand(action, response, tabId) {
+  if (
+    !action ||
+    typeof action.repo_alias !== "string" ||
+    !Number.isInteger(tabId) ||
+    tabId < 0
+  ) {
     return;
   }
   const commandId = bdbBindingCommandId(response);
@@ -40,6 +45,7 @@ async function bdbRecordConversationCommand(action, response) {
     .filter(([, binding]) => (
       binding &&
       typeof binding === "object" &&
+      binding.tab_id === tabId &&
       binding.repo_alias === action.repo_alias &&
       Number.isFinite(binding.updated_at)
     ))
@@ -55,6 +61,7 @@ async function bdbRecordConversationCommand(action, response) {
       ...binding,
       schema: "bdb-conversation-binding-v1",
       conversation_id: conversationId,
+      tab_id: tabId,
       repo_alias: action.repo_alias,
       session_id: bdbBindingSessionId(commandId),
       command_id: commandId,
@@ -71,7 +78,7 @@ async function bdbRecordConversationCommand(action, response) {
 submitAction = async function submitActionWithConversationBinding(action, tabId) {
   const response = await submitActionBeforeConversationBinding(action, tabId);
   try {
-    await bdbRecordConversationCommand(action, response);
+    await bdbRecordConversationCommand(action, response, tabId);
   } catch (_error) {
     // A storage failure must not turn a successful, already-submitted command into
     // a duplicate retry. The command remains recoverable by command_id.
