@@ -63,7 +63,11 @@ install_journal_multi_file_patch_hardening(Journal)
 install_journal_multi_file_patch_runtime_api(Journal)
 install_multi_file_patch_command_gate()
 
-from .workspace_manager import WorkspaceManager
+from .workspace_manager import Git, WorkspaceManager
+from .git_status_untracked_hotfix import install_full_untracked_status
+
+install_full_untracked_status(Git)
+
 from .instance_lock import InstanceLock
 from .service_status import ServiceStatusReader, is_pid_alive
 from .heartbeat import HeartbeatWorker
