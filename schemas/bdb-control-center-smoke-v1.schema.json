@@ -30,6 +30,8 @@
     "project_available": { "type": "boolean" },
     "dashboard_busy": { "type": "boolean" },
     "projects_wizard_present": { "const": true },
+    "project_creator_button_present": { "const": true },
+    "project_creator_worker_active": { "const": false },
     "prepare_plan_required": { "const": true },
     "prepare_confirmation_required": { "const": true },
     "prepare_plan_loaded": { "type": "boolean" },
