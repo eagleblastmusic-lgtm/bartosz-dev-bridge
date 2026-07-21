@@ -6,6 +6,8 @@ on:
     paths:
       - ".github/workflows/native-host-windowless-candidate.yml"
       - "bdb_bridge/native_host.py"
+      - "bdb_bridge/native_host_project_launcher.py"
+      - "bdb_bridge/project_launch.py"
       - "bdb_bridge/windows_stdio.py"
       - "packaging/windows/native_host_entry.py"
       - "scripts/Build-BDBNativeHostWindowless.ps1"
@@ -14,6 +16,8 @@ on:
       - "scripts/prepare_local_browser_pilot.py"
       - "tests/test_windows_native_stdio.py"
       - "tests/test_native_host_windowless_packaging_contract.py"
+      - "tests/test_native_host_project_launcher.py"
+      - "tests/test_project_launch_queue.py"
       - "pyproject.toml"
 
 permissions:
@@ -56,6 +60,8 @@ jobs:
           python -m pytest -vv
           tests/test_windows_native_stdio.py
           tests/test_native_host_windowless_packaging_contract.py
+          tests/test_native_host_project_launcher.py
+          tests/test_project_launch_queue.py
       - name: Build windowless Native Host
         id: build
         shell: pwsh
