@@ -8,6 +8,7 @@ from bdb_operator.models import OperatorResponse
 from bdb_operator.project_creator import ProjectCommandResult, ProjectCreatorService
 
 
+# This cross-layer contract intentionally participates in the final PR validation set.
 class FakeRunner:
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
