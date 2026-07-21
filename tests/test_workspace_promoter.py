@@ -27,7 +27,12 @@ def git(repo: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def setup(tmp_path: Path, session_id: str = SESSION) -> tuple[BridgeConfig, Path, Path, str]:
+def setup(
+    tmp_path: Path,
+    session_id: str = SESSION,
+    *,
+    allowed_paths: tuple[str, ...] = ("app.py",),
+) -> tuple[BridgeConfig, Path, Path, str]:
     source = tmp_path / "source"
     control = tmp_path / "control"
     worktrees = tmp_path / "worktrees"
@@ -53,12 +58,19 @@ def setup(tmp_path: Path, session_id: str = SESSION) -> tuple[BridgeConfig, Path
         worktree_root=worktrees,
         runtime_dir=runtime,
         repository_id="workspace-promoter-test",
-        allowed_paths=("app.py",),
+        allowed_paths=allowed_paths,
     )
     return config, source, worktree, base_sha
 
 
-def result_path(config: BridgeConfig, session_id: str, *, status: str = "success", exit_code: int = 0) -> Path:
+def result_path(
+    config: BridgeConfig,
+    session_id: str,
+    *,
+    status: str = "success",
+    exit_code: int = 0,
+    changed_files: list[str] | None = None,
+) -> Path:
     path = Path(config.direct_result_dir) / "sessions" / session_id / "results" / "000001.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -69,7 +81,7 @@ def result_path(config: BridgeConfig, session_id: str, *, status: str = "success
                 "session_id": session_id,
                 "sequence": 1,
                 "command_id": f"{session_id}:000001",
-                "changed_files": ["app.py"],
+                "changed_files": changed_files or ["app.py"],
                 "data": {
                     "operation": "multi_file_patch",
                     "checkpoint_state": "committed",
@@ -106,6 +118,41 @@ def test_successful_result_creates_commit_and_fast_forwards_source(tmp_path: Pat
     repeated = WorkspacePromoter(config).promote_file(result)
     assert repeated.status == "already_promoted"
     assert repeated.source_commit == outcome.source_commit
+
+
+def test_nested_untracked_files_are_promoted_as_files_not_directories(tmp_path: Path) -> None:
+    changed = [
+        "app.py",
+        "pyproject.toml",
+        "src/calculator.py",
+        "tests/test_calculator.py",
+    ]
+    config, source, worktree, base_sha = setup(
+        tmp_path,
+        allowed_paths=("app.py", "pyproject.toml", "src/**", "tests/**"),
+    )
+    (worktree / "src").mkdir()
+    (worktree / "tests").mkdir()
+    (worktree / "pyproject.toml").write_text("[project]\nname = \"fixture\"\n", encoding="utf-8")
+    (worktree / "src" / "calculator.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (worktree / "tests" / "test_calculator.py").write_text(
+        "from src.calculator import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n",
+        encoding="utf-8",
+    )
+    result = result_path(config, SESSION, changed_files=changed)
+
+    outcome = WorkspacePromoter(config).promote_file(result)
+
+    assert outcome.status == "promoted"
+    assert outcome.source_commit is not None
+    assert outcome.source_commit != base_sha
+    assert git(source, "rev-parse", "HEAD") == outcome.source_commit
+    assert git(source, "status", "--porcelain=v1") == ""
+    assert git(worktree, "status", "--porcelain=v1") == ""
+    assert (source / "src" / "calculator.py").is_file()
+    assert (source / "tests" / "test_calculator.py").is_file()
+    receipt = json.loads(outcome.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["changed_files"] == changed
 
 
 def test_failed_result_is_not_promoted(tmp_path: Path) -> None:
