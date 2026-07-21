@@ -21,5 +21,6 @@ def test_project_launcher_requires_visible_focused_conversation() -> None:
 def test_control_center_does_not_open_a_new_chatgpt_tab() -> None:
     window = (GUI / "project_window.py").read_text(encoding="utf-8")
 
-    assert "ProjectCreatorService(browser_opener=lambda _url: True)" in window
+    assert "ProjectCreatorService(" in window
+    assert "browser_opener=lambda _url: True" in window
     assert "Prompt oczekuje w aktywnej rozmowie ChatGPT" in window
