@@ -81,6 +81,6 @@ def test_windowless_native_host_entry_uses_inherited_binary_stdio() -> None:
         encoding="utf-8"
     )
     assert "resolve_native_binary_stdio" in entry
-    assert "run_host(" in entry
+    assert "run_project_launcher_host(" in entry
     assert "sys.stdin.buffer" not in entry
     assert "sys.stdout.buffer" not in entry

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bartosz-dev-bridge"
-version = "0.3.0"
-description = "Bounded ChatGPT-to-local-workspace bridge with tested edits and verified fast-forward promotion"
+version = "0.3.1"
+description = "Bounded ChatGPT-to-local-workspace bridge with project creation, tested edits, and verified fast-forward promotion"
 requires-python = ">=3.11"
 dependencies = []
 

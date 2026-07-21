@@ -1,4 +1,4 @@
-name: Control Center 0.3.0 Candidate
+name: Control Center 0.3.1 Candidate
 
 on:
   pull_request:
@@ -9,6 +9,7 @@ on:
       - "bdb_gui/**"
       - "bdb_operator/**"
       - "bdb_bridge/**"
+      - "browser_extension/**"
       - "bdb_release/**"
       - "manifests/**"
       - "packaging/**"
@@ -19,9 +20,13 @@ on:
       - "tests/test_release_packaging_contract.py"
       - "tests/test_gui_schema_contract.py"
       - "tests/test_gui_control_center_smoke.py"
+      - "tests/test_gui_project_creator_service.py"
+      - "tests/test_project_launch_queue.py"
+      - "tests/test_native_host_project_launcher.py"
+      - "tests/test_browser_extension_contract.py"
       - "pyproject.toml"
   push:
-    branches: [gpt-work/control-center-0.3.0]
+    branches: [gpt-work/project-creator-wizard]
 
 permissions:
   contents: read
@@ -30,7 +35,7 @@ jobs:
   build-and-accept:
     name: Windows / Python 3.12 / packaged acceptance
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,7 +47,7 @@ jobs:
       - name: Validate source identity and PowerShell syntax
         shell: pwsh
         run: |
-          $expected = "0.3.0"
+          $expected = "0.3.1"
           $projectVersion = python -c "import pathlib,tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"
           $applicationVersion = python -c "from bdb_gui.version import APPLICATION_VERSION; print(APPLICATION_VERSION)"
           $moduleVersion = python -c "import json,pathlib; print(json.loads(pathlib.Path('manifests/bartosz-dev-bridge.module.json').read_text(encoding='utf-8'))['version'])"
@@ -72,6 +77,10 @@ jobs:
           tests/test_release_packaging_contract.py
           tests/test_gui_schema_contract.py
           tests/test_gui_control_center_smoke.py
+          tests/test_gui_project_creator_service.py
+          tests/test_project_launch_queue.py
+          tests/test_native_host_project_launcher.py
+          tests/test_browser_extension_contract.py
       - name: Build one-directory candidate
         shell: pwsh
         run: |
@@ -95,14 +104,14 @@ jobs:
         run: |
           $release = Join-Path $PWD "candidate-release"
           New-Item -ItemType Directory -Path $release -Force | Out-Null
-          $zip = Join-Path $release "BDB-Control-Center-windows-x86_64-0.3.0.zip"
+          $zip = Join-Path $release "BDB-Control-Center-windows-x86_64-0.3.1.zip"
           $manifest = Join-Path $release "bdb-release-manifest-v1.json"
           $acceptance = Join-Path $release "Invoke-BDBControlCenterArtifactAcceptance.ps1"
 
           Compress-Archive -Path .\dist\BDB-Control-Center -DestinationPath $zip -CompressionLevel Optimal
           python scripts/build_release_manifest.py create `
             --artifact $zip `
-            --version "0.3.0" `
+            --version "0.3.1" `
             --source-commit "$env:GITHUB_SHA" `
             --output $manifest
           if ($LASTEXITCODE -ne 0) { throw "Candidate manifest creation failed" }
@@ -114,12 +123,12 @@ jobs:
           Copy-Item -LiteralPath "scripts/Invoke-BDBControlCenterArtifactAcceptance.ps1" -Destination $acceptance
           & $acceptance `
             -ReleaseDirectory $release `
-            -ExpectedVersion "0.3.0" `
+            -ExpectedVersion "0.3.1" `
             -ExpectedSourceCommit "$env:GITHUB_SHA"
           if ($LASTEXITCODE -ne 0) { throw "Candidate packaged acceptance failed" }
       - uses: actions/upload-artifact@v4
         with:
-          name: bdb-control-center-0.3.0-candidate
+          name: bdb-control-center-0.3.1-candidate
           path: candidate-release/
           if-no-files-found: error
           retention-days: 14

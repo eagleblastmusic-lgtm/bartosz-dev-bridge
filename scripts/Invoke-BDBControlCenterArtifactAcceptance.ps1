@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ReleaseDirectory,
 
-    [string]$ExpectedVersion = "0.3.0",
+    [string]$ExpectedVersion = "0.3.1",
 
     [string]$ExpectedSourceCommit = "",
 
@@ -101,6 +101,9 @@ try {
     Assert-Condition ($smoke.session_receipt_open_explicit -eq $true) "Receipt opening is not explicit"
     Assert-Condition ($smoke.session_folder_open_explicit -eq $true) "Folder opening is not explicit"
     Assert-Condition ($smoke.session_repair_relationships_inferred -eq $false) "Repair relationships were inferred"
+    Assert-Condition ($smoke.projects_wizard_present -eq $true) "Projects wizard is missing"
+    Assert-Condition ($smoke.project_creator_button_present -eq $true) "Project Creator button is missing"
+    Assert-Condition ($smoke.project_creator_worker_active -eq $false) "Project Creator worker ran during read-only smoke"
 
     $receipt = [ordered]@{
         schema = "bdb-control-center-acceptance-v1"
@@ -116,6 +119,7 @@ try {
         operation_flow_present = $smoke.operation_flow_present
         session_history_view_present = $smoke.session_history_view_present
         session_repair_relationships_inferred = $smoke.session_repair_relationships_inferred
+        project_creator_button_present = $smoke.project_creator_button_present
         accepted_at = [datetime]::UtcNow.ToString("o")
         extracted_path = if ($KeepExtracted) { $extractRoot } else { $null }
     }

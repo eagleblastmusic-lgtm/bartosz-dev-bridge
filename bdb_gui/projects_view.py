@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .project_creator import ProjectCreatorResult
 from .projects import PreparePlan, PrepareResult
 from .runtime_paths import default_python_executable
 
@@ -25,6 +26,7 @@ from .runtime_paths import default_python_executable
 class ProjectsWidget(QWidget):
     plan_requested = Signal(object)
     prepare_requested = Signal(object)
+    creator_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -86,9 +88,27 @@ class ProjectsWidget(QWidget):
             )
         self._update_enabled_state()
 
+    def apply_creator_result(self, result: ProjectCreatorResult) -> None:
+        self.set_busy(False)
+        self.plan_preview.setPlainText(
+            json.dumps(result.to_dict(), ensure_ascii=False, indent=2, sort_keys=True)
+        )
+        if result.ok:
+            self.plan_state.setText("PROJEKT UTWORZONY I URUCHOMIONY")
+            self.feedback_label.setText(
+                "Repozytorium i workspace są gotowe. Bridge działa, Native Host jest uzbrojony, a prompt przekazano do ChatGPT."
+            )
+        else:
+            self.plan_state.setText("KREATOR NIE ZAKOŃCZYŁ PRACY")
+            self.feedback_label.setText(
+                f"{result.error_code or 'project_creator_failed'} — {result.error_message or 'brak szczegółów'}"
+            )
+        self._update_enabled_state()
+
     def smoke_report(self) -> dict[str, Any]:
         return {
             "projects_wizard_present": True,
+            "project_creator_button_present": hasattr(self, "creator_button"),
             "prepare_plan_required": True,
             "prepare_confirmation_required": True,
             "prepare_plan_loaded": self._plan is not None,
@@ -112,17 +132,26 @@ class ProjectsWidget(QWidget):
         hero.setObjectName("ProjectsHeroPanel")
         hero_layout = QVBoxLayout(hero)
         hero_layout.setContentsMargins(24, 20, 24, 20)
-        title = QLabel("Kreator przygotowania projektu")
+        hero_header = QHBoxLayout()
+        hero_text = QVBoxLayout()
+        title = QLabel("Projekty BDB")
         title.setObjectName("HeroTitle")
         description = QLabel(
-            "Najpierw powstaje niemutujący plan. Dopiero osobne potwierdzenie uruchamia istniejący preparer BDB."
+            "Kreator projektu wykonuje cały przebieg: nowe lub istniejące repo → Prepare → Start → Re-arm → prompt w ChatGPT. "
+            "Niżej pozostaje ręczny tryb Prepare dla zaawansowanej konfiguracji."
         )
         description.setObjectName("HeroText")
         description.setWordWrap(True)
+        hero_text.addWidget(title)
+        hero_text.addWidget(description)
+        hero_header.addLayout(hero_text, 1)
+        self.creator_button = QPushButton("Kreator projektu")
+        self.creator_button.setObjectName("OpenProjectCreatorButton")
+        self.creator_button.clicked.connect(lambda _checked=False: self.creator_requested.emit())
+        hero_header.addWidget(self.creator_button)
         self.plan_state = QLabel("BRAK PLANU")
         self.plan_state.setObjectName("ProjectsPlanState")
-        hero_layout.addWidget(title)
-        hero_layout.addWidget(description)
+        hero_layout.addLayout(hero_header)
         hero_layout.addWidget(self.plan_state)
         layout.addWidget(hero)
 
@@ -167,7 +196,7 @@ class ProjectsWidget(QWidget):
         self.plan_preview = QTextEdit()
         self.plan_preview.setObjectName("ProjectsPlanPreview")
         self.plan_preview.setReadOnly(True)
-        self.plan_preview.setPlainText("Uzupełnij formularz i zbuduj plan.")
+        self.plan_preview.setPlainText("Uruchom Kreator projektu albo uzupełnij ręczny formularz Prepare.")
         preview_layout.addWidget(preview_title)
         preview_layout.addWidget(self.plan_preview, 1)
         body.addWidget(preview_panel, 3)
@@ -217,6 +246,7 @@ class ProjectsWidget(QWidget):
             self.prepare_requested.emit(self._plan)
 
     def _update_enabled_state(self, *_args: object) -> None:
+        self.creator_button.setEnabled(not self._busy)
         self.plan_button.setEnabled(not self._busy)
         self.prepare_button.setEnabled(
             not self._busy and self._plan is not None and self.ack_checkbox.isChecked()

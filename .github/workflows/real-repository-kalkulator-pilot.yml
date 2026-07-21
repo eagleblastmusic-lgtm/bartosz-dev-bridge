@@ -11,6 +11,8 @@ on:
       - "tests/test_real_repo_pilot_contract.py"
       - "docs/REAL_REPOSITORY_KALKULATOR_PILOT.md"
       - "bdb_bridge/**"
+      - "bdb_operator/**"
+      - "browser_extension/**"
       - "tests/**"
       - "pyproject.toml"
   push:
@@ -51,8 +53,20 @@ jobs:
           python -m py_compile bdb_bridge/real_repo_pilot.py
           python -m py_compile bdb_bridge/real_repo_pilot_fixture.py
           python -m py_compile scripts/real_repository_pilot.py
-      - name: Run full test suite
-        run: python -m pytest -q
+      - name: Validate Project Creator operator orchestration
+        run: python -m pytest -vv --tb=short tests/test_gui_project_creator_service.py
+      - name: Validate Project Creator prompt queue
+        run: python -m pytest -vv --tb=short tests/test_project_launch_queue.py
+      - name: Validate Project Creator Native Host handoff
+        run: python -m pytest -vv --tb=short tests/test_native_host_project_launcher.py
+      - name: Validate Project Creator browser runtime
+        run: python -m pytest -vv --tb=short tests/test_browser_project_launcher_runtime.py tests/test_browser_extension_contract.py
+      - name: Run GUI and release tests
+        run: python -m pytest -q -k "gui or release"
+      - name: Run browser and Native Host tests
+        run: python -m pytest -q -k "browser or native or windowless"
+      - name: Run remaining core test suite
+        run: python -m pytest -q -k "not gui and not release and not browser and not native and not windowless"
 
   real-pilot:
     name: Windows / Python 3.14 / pinned kalkulator repair

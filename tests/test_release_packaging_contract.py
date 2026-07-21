@@ -24,6 +24,7 @@ def test_release_artifacts_exist() -> None:
         ROOT / ".github" / "workflows" / "control-center-release-artifact.yml",
         ROOT / "docs" / "BDB_CONTROL_CENTER_RELEASE_PACKAGING.md",
         ROOT / "docs" / "CONTROL_CENTER_0.3.0_ACCEPTANCE.md",
+        ROOT / "docs" / "PROJECT_CREATOR_0.3.1.md",
         ROOT / "docs" / "adr" / "0014-manual-verified-release-artifacts.md",
     )
     for path in expected:
@@ -86,23 +87,23 @@ def test_release_workflow_is_manual_and_does_not_publish() -> None:
         assert forbidden not in workflow
 
 
-def test_release_version_is_aligned_for_0_3_0() -> None:
+def test_release_version_is_aligned_for_0_3_1() -> None:
     workflow = read(ROOT / ".github" / "workflows" / "control-center-release-artifact.yml")
     pyproject = read(ROOT / "pyproject.toml")
     version_module = read(ROOT / "bdb_gui" / "version.py")
     module_manifest = json.loads(read(ROOT / "manifests" / "bartosz-dev-bridge.module.json"))
 
-    assert 'default: "0.3.0"' in workflow
-    assert 'version = "0.3.0"' in pyproject
-    assert 'APPLICATION_VERSION = "0.3.0"' in version_module
-    assert module_manifest["version"] == "0.3.0"
+    assert 'default: "0.3.1"' in workflow
+    assert 'version = "0.3.1"' in pyproject
+    assert 'APPLICATION_VERSION = "0.3.1"' in version_module
+    assert module_manifest["version"] == "0.3.1"
     assert "Validate source identity and acceptance entrypoint" in workflow
     assert "$applicationVersion" in workflow
     assert "$moduleVersion" in workflow
     assert "$projectVersion" in workflow
 
 
-def test_module_manifest_advertises_0_3_0_read_contracts_without_new_mutations() -> None:
+def test_module_manifest_preserves_closed_operator_mutation_catalog() -> None:
     module_manifest = json.loads(read(ROOT / "manifests" / "bartosz-dev-bridge.module.json"))
     assert "sessions" in module_manifest["operations"]["read"]
     assert module_manifest["operations"]["mutation"] == ["prepare", "start", "stop", "rearm"]
@@ -129,7 +130,7 @@ def test_release_smoke_waits_for_windowed_process_and_reports_failure_details() 
     assert "produced no report" in workflow
 
 
-def test_release_smoke_proves_control_center_0_3_0_features() -> None:
+def test_release_smoke_proves_control_center_0_3_1_features() -> None:
     workflow = read(ROOT / ".github" / "workflows" / "control-center-release-artifact.yml")
     required_checks = (
         '$data.application_version -ne "${{ inputs.version }}"',
@@ -142,10 +143,13 @@ def test_release_smoke_proves_control_center_0_3_0_features() -> None:
         "$data.session_receipt_open_explicit -ne $true",
         "$data.session_folder_open_explicit -ne $true",
         "$data.session_repair_relationships_inferred -ne $false",
+        "$data.projects_wizard_present -ne $true",
+        "$data.project_creator_button_present -ne $true",
+        "$data.project_creator_worker_active -ne $false",
     )
     for check in required_checks:
         assert check in workflow
-    assert "Bundled smoke violates the Control Center 0.3.0 contract" in workflow
+    assert "Bundled smoke violates the Control Center 0.3.1 contract" in workflow
 
 
 def test_release_manifest_is_rechecked_against_requested_identity() -> None:
@@ -162,8 +166,8 @@ def test_self_contained_acceptance_is_copied_invoked_and_uploaded() -> None:
     workflow = read(ROOT / ".github" / "workflows" / "control-center-release-artifact.yml")
     assert "Invoke-BDBControlCenterArtifactAcceptance.ps1" in workflow
     assert "Copy-Item -LiteralPath" in workflow
-    assert "-ExpectedVersion \"${{ inputs.version }}\"" in workflow
-    assert "-ExpectedSourceCommit \"$env:GITHUB_SHA\"" in workflow
+    assert '-ExpectedVersion "${{ inputs.version }}"' in workflow
+    assert '-ExpectedSourceCommit "$env:GITHUB_SHA"' in workflow
     assert "Self-contained artifact acceptance failed" in workflow
     assert "bdb-control-center-acceptance-v1.json" in read(
         ROOT / "scripts" / "Invoke-BDBControlCenterArtifactAcceptance.ps1"
@@ -208,6 +212,6 @@ def test_packaged_entrypoint_and_package_discovery_are_explicit() -> None:
     assert 'release = ["PyInstaller>=6.14,<7"]' in pyproject
     assert '"bdb_release*"' in pyproject
     assert '"bdb_gui*"' in pyproject
-    assert "--add-data \"scripts;scripts\"" in read(
+    assert '--add-data "scripts;scripts"' in read(
         ROOT / ".github" / "workflows" / "control-center-release-artifact.yml"
     )

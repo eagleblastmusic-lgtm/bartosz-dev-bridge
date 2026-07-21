@@ -61,11 +61,17 @@ def test_native_message_frame_round_trip() -> None:
     assert checker.decode_native_message(frame) == request
 
 
-def test_windowless_build_and_installer_contracts_are_explicit() -> None:
+def test_windowless_build_installer_and_project_launcher_contracts_are_explicit() -> None:
     build = (ROOT / "scripts" / "Build-BDBNativeHostWindowless.ps1").read_text(
         encoding="utf-8"
     )
     installer = (ROOT / "scripts" / "Install-BDBNativeHost.ps1").read_text(
+        encoding="utf-8"
+    )
+    entry = (ROOT / "packaging" / "windows" / "native_host_entry.py").read_text(
+        encoding="utf-8"
+    )
+    launcher = (ROOT / "bdb_bridge" / "native_host_project_launcher.py").read_text(
         encoding="utf-8"
     )
     workflow = (
@@ -74,10 +80,15 @@ def test_windowless_build_and_installer_contracts_are_explicit() -> None:
 
     assert "--windowed" in build
     assert "--onedir" in build
+    assert "--collect-submodules bdb_bridge" in build
     assert "native_host_entry.py" in build
     assert "RequireWindowless" in installer
     assert "Get-PeSubsystem" in installer
     assert "expected Windows GUI" in installer
+    assert "run_project_launcher_host" in entry
+    assert "resolve_native_binary_stdio" in entry
+    assert '"project_launch_claim"' in launcher
+    assert '"project_launch_ack"' in launcher
     assert "Build-BDBNativeHostWindowless.ps1" in workflow
     assert "check_native_host_windowless.py" in workflow
     assert "-RequireWindowless" in workflow

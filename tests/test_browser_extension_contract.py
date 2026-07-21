@@ -15,7 +15,7 @@ def read(name: str) -> str:
 def test_manifest_has_minimal_mv3_permissions() -> None:
     manifest = json.loads(read("manifest.json"))
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "0.2.8"
+    assert manifest["version"] == "0.2.9"
     assert manifest["permissions"] == ["nativeMessaging", "storage"]
     assert manifest["host_permissions"] == ["https://chatgpt.com/*"]
     assert manifest["background"] == {"service_worker": "background_full_entry.js"}
@@ -25,6 +25,7 @@ def test_manifest_has_minimal_mv3_permissions() -> None:
         "content_rerender.js",
         "content_auto_send.js",
         "content_auto_retry.js",
+        "content_project_launcher.js",
     ]
     serialized = json.dumps(manifest)
     for forbidden in ("<all_urls>", "tabs", "debugger", "webRequest", "downloads"):
@@ -129,6 +130,7 @@ def test_auto_entry_synchronizes_loop_state_and_recovers_replay_claims() -> None
     assert '"background_entry.js"' in full_entry
     assert '"background_async_result.js"' in full_entry
     assert '"background_auto_recovery.js"' in full_entry
+    assert '"background_project_launcher.js"' in full_entry
     assert "canonicalAutoStateKey" in entry
     assert "chrome.storage.session.get(null)" in entry
     assert "legacyAutoStateEntries" in entry
@@ -178,6 +180,25 @@ def test_auto_send_requires_confirmed_multi_strategy_submission() -> None:
     assert "send_not_confirmed" in companion
     assert "markerStillPresent" in companion
     assert "confirmedVia" in companion
+
+
+def test_project_creator_handoff_is_leased_local_and_confirmed() -> None:
+    background = read("background_project_launcher.js")
+    content = read("content_project_launcher.js")
+    assert 'action: "project_launch_peek"' in background
+    assert '"project_launch_claim"' in background
+    assert '"project_launch_ack"' in background
+    assert "sendNative(" in background
+    assert "fetch(" not in background
+    assert "XMLHttpRequest" not in background
+    assert "crypto.randomUUID()" in content
+    assert "bdbClaimProjectLaunch" in content
+    assert "bdbAcknowledgeProjectLaunch" in content
+    assert "bdbWaitForSendConfirmation" in content
+    assert "BDB_AUTO_SEND_STRATEGIES" in content
+    assert "currentText.trim() !== \"\"" in content
+    assert "claim expires" in content
+    assert "navigator.clipboard" not in content
 
 
 def test_extension_contains_no_remote_scripts_or_inline_script() -> None:

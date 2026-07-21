@@ -49,7 +49,7 @@ def test_control_center_empty_root_headless_smoke(tmp_path: Path) -> None:
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["schema"] == "bdb-control-center-smoke-v1"
     assert report["status"] == "success"
-    assert report["application_version"] == "0.3.0"
+    assert report["application_version"] == "0.3.1"
     assert report["window_object_name"] == "BdbControlCenterWindow"
     assert report["window_constructed"] is True
     assert report["read_only_startup"] is True
@@ -74,6 +74,9 @@ def test_control_center_empty_root_headless_smoke(tmp_path: Path) -> None:
     assert report["session_receipt_open_explicit"] is True
     assert report["session_folder_open_explicit"] is True
     assert report["session_repair_relationships_inferred"] is False
+    assert report["projects_wizard_present"] is True
+    assert report["project_creator_button_present"] is True
+    assert report["project_creator_worker_active"] is False
     assert report["mutation_operations_invoked"] == 0
     assert report["operator_network_listener"] is False
     assert report["qt_platform"] == "offscreen"
@@ -115,8 +118,9 @@ def test_control_center_discovers_prepared_project_without_runtime_calls(tmp_pat
     assert completed.returncode == 0, completed.stdout + completed.stderr
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["status"] == "success"
-    assert report["application_version"] == "0.3.0"
+    assert report["application_version"] == "0.3.1"
     assert report["project_count"] == 1
+    assert report["project_creator_button_present"] is True
     assert report["mutation_operations_invoked"] == 0
     assert report["operator_network_listener"] is False
 
@@ -131,7 +135,7 @@ def test_control_center_missing_root_fails_without_creating_it(tmp_path: Path) -
     assert completed.returncode == 1, completed.stdout + completed.stderr
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["status"] == "failed"
-    assert report["application_version"] == "0.3.0"
+    assert report["application_version"] == "0.3.1"
     assert report["bootstrap_completed"] is True
     assert report["bootstrap_ok"] is False
     assert report["bootstrap_error_code"] == "invalid_argument"

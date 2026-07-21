@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Bartosz Dev Bridge",
-  "version": "0.2.8",
-  "description": "Bounded local workspace context, tested edits, recoverable monotonic AUTO state, confirmed continuation, and verified fast-forward promotion for ChatGPT.",
+  "version": "0.2.9",
+  "description": "Bounded local project creation, workspace context, tested edits, recoverable AUTO state, confirmed continuation, verified promotion, and one-click ChatGPT prompt handoff.",
   "permissions": [
     "nativeMessaging",
     "storage"
@@ -26,7 +26,8 @@
         "content.js",
         "content_rerender.js",
         "content_auto_send.js",
-        "content_auto_retry.js"
+        "content_auto_retry.js",
+        "content_project_launcher.js"
       ],
       "css": [
         "content.css"
