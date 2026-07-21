@@ -7,8 +7,12 @@ from PySide6.QtWidgets import QTabWidget
 from .project_window import ProjectControlCenterWindow
 from .session_history import SessionHistoryService, SessionHistorySnapshot
 from .session_history_view import PathOpener, SessionHistoryWidget
+from .session_history_view_hardening import install_session_history_diagnostics
 from .session_history_worker import SessionHistoryWorker
 from .tray_window import TrayProjectControlCenterWindow
+
+
+install_session_history_diagnostics(SessionHistoryWidget)
 
 
 class SessionHistoryWindowMixin:

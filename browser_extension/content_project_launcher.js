@@ -3,11 +3,58 @@
 const BDB_PROJECT_LAUNCH_ALIAS = "bdb-project-launch";
 const BDB_PROJECT_LAUNCH_POLL_MS = 1000;
 const BDB_PROJECT_LAUNCH_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const BDB_CONVERSATION_BINDINGS_KEY = "bdbConversationBindingsV1";
+const BDB_CONVERSATION_BINDING_LIMIT = 128;
 let bdbProjectLaunchPolling = false;
 const bdbProjectClaims = new Map();
 
 function bdbProjectLaunchMarker(launchId) {
   return `BDB_PROJECT_LAUNCH:${launchId}`;
+}
+
+function bdbProjectConversationId() {
+  const match = location.pathname.match(/(?:^|\/)c\/([A-Za-z0-9-]{8,})(?:\/|$)/);
+  return match ? match[1] : null;
+}
+
+function bdbProjectConversationIsActive() {
+  return Boolean(
+    document.visibilityState === "visible" &&
+    typeof document.hasFocus === "function" &&
+    document.hasFocus() &&
+    bdbProjectConversationId()
+  );
+}
+
+async function bdbBindProjectConversation(launch) {
+  if (!bdbProjectConversationIsActive()) {
+    return false;
+  }
+  const conversationId = bdbProjectConversationId();
+  if (!conversationId) {
+    return false;
+  }
+  const stored = await chrome.storage.local.get(BDB_CONVERSATION_BINDINGS_KEY);
+  const raw = stored[BDB_CONVERSATION_BINDINGS_KEY];
+  const bindings = raw && typeof raw === "object" && !Array.isArray(raw) ? { ...raw } : {};
+  const previous = bindings[conversationId];
+  const now = Date.now();
+  bindings[conversationId] = {
+    schema: "bdb-conversation-binding-v1",
+    conversation_id: conversationId,
+    repo_alias: launch.repo_alias,
+    launch_id: launch.launch_id,
+    session_id: previous && typeof previous.session_id === "string" ? previous.session_id : null,
+    command_id: previous && typeof previous.command_id === "string" ? previous.command_id : null,
+    bound_at: previous && Number.isFinite(previous.bound_at) ? previous.bound_at : now,
+    updated_at: now
+  };
+  const entries = Object.entries(bindings)
+    .filter(([, value]) => value && typeof value === "object" && Number.isFinite(value.updated_at))
+    .sort((left, right) => left[1].updated_at - right[1].updated_at)
+    .slice(-BDB_CONVERSATION_BINDING_LIMIT);
+  await chrome.storage.local.set({ [BDB_CONVERSATION_BINDINGS_KEY]: Object.fromEntries(entries) });
+  return true;
 }
 
 function bdbProjectClaimId(launchId) {
@@ -36,6 +83,9 @@ function bdbValidProjectLaunch(value) {
 }
 
 function bdbProjectComposerEligible(marker) {
+  if (!bdbProjectConversationIsActive()) {
+    return false;
+  }
   if (bdbUserMessageContains(marker)) {
     return true;
   }
@@ -123,8 +173,8 @@ async function bdbSubmitProjectLaunch(marker) {
 
 async function bdbHandleProjectLaunch(candidate) {
   const candidateMarker = bdbProjectLaunchMarker(candidate.launch_id);
-  // Tabs with an unrelated draft never acquire the cross-process claim. An
-  // empty tab or the tab already holding this exact marker may become owner.
+  // Only the currently visible, focused conversation may acquire the cross-process
+  // claim. Other ChatGPT tabs leave the launch pending instead of racing for it.
   if (!bdbProjectComposerEligible(candidateMarker)) {
     return false;
   }
@@ -135,6 +185,9 @@ async function bdbHandleProjectLaunch(candidate) {
   }
   const launch = ownership.launch;
   const claimId = ownership.claimId;
+  if (!await bdbBindProjectConversation(launch)) {
+    return false;
+  }
   const marker = bdbProjectLaunchMarker(launch.launch_id);
   if (bdbUserMessageContains(marker)) {
     return bdbAcknowledgeProjectLaunch(launch.launch_id, claimId);
@@ -192,7 +245,9 @@ const bdbProjectRuntimeReady = Boolean(
   chrome.runtime &&
   typeof chrome.runtime.id === "string" &&
   chrome.runtime.id.length > 0 &&
-  typeof chrome.runtime.sendMessage === "function"
+  typeof chrome.runtime.sendMessage === "function" &&
+  chrome.storage &&
+  chrome.storage.local
 );
 if (bdbProjectRuntimeReady) {
   void bdbPollProjectLaunch();

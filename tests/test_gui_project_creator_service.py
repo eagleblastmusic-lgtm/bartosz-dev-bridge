@@ -8,6 +8,7 @@ from bdb_operator.models import OperatorResponse
 from bdb_operator.project_creator import ProjectCommandResult, ProjectCreatorService
 
 
+# This cross-layer contract intentionally participates in the final PR validation set.
 class FakeRunner:
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
@@ -103,17 +104,44 @@ def test_new_project_creates_github_prepares_starts_and_queues_prompt(tmp_path: 
     assert result.github_url == "https://github.com/example/calculator"
     assert Path(result.source_repo, "README.md").is_file()
     assert operator.prepare_calls[0]["alias"] == "calculator"
+    assert operator.prepare_calls[0]["allowed_paths"][-3:] == ("*.cmd", "*.bat", "*.ps1")
     assert operator.starts == [(str(workspaces / "calculator"), 30)]
     launch = queue.peek()
     assert launch is not None
     assert launch.repo_alias == "calculator"
     assert "Create a calculator" in launch.prompt
     assert "Python 3 + pytest" in launch.prompt
+    assert "Efektywna allowlista" in launch.prompt
+    assert "- src/**" in launch.prompt
+    assert "- *.cmd" in launch.prompt
     assert launch.auto_send is True
-    assert opened == ["https://chatgpt.com/"]
+    assert opened == []
+    assert "chatgpt_active_conversation_waiting" in result.steps
+    assert "chatgpt_opened" not in result.steps
     commands = [call[0] for call in runner.calls]
     assert ("gh", "auth", "status") in commands
     assert any(command[:3] == ("gh", "repo", "create") for command in commands)
+
+
+def test_explicit_allowlist_is_not_silently_widened(tmp_path: Path) -> None:
+    workspaces = tmp_path / "workspaces"
+    projects = tmp_path / "projects"
+    workspaces.mkdir()
+    projects.mkdir()
+    service, *_ = make_service(tmp_path)
+
+    plan = service.build_plan(
+        workspaces_root=workspaces,
+        mode="new",
+        alias="strict",
+        project_name="strict",
+        projects_root=projects,
+        prompt="Create strict project",
+        allowed_paths=("src/**",),
+        python_executable=sys.executable,
+    )
+
+    assert plan.allowed_paths == ("src/**",)
 
 
 def test_existing_local_project_skips_github_creation(tmp_path: Path) -> None:

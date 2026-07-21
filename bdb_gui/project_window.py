@@ -29,7 +29,9 @@ class ProjectControlCenterWindow(ControlCenterWindow):
         **kwargs: Any,
     ) -> None:
         self._project_prepare_service = project_prepare_service or ProjectPrepareService()
-        self._project_creator_service = project_creator_service or ProjectCreatorService()
+        self._project_creator_service = project_creator_service or ProjectCreatorService(
+            browser_opener=lambda _url: True
+        )
         self._prepare_confirmation_provider = prepare_confirmation_provider
         self._plan_worker: PlanWorker | None = None
         self._prepare_worker: PrepareWorker | None = None
@@ -84,7 +86,7 @@ class ProjectControlCenterWindow(ControlCenterWindow):
             return
         self._set_global_busy(
             True,
-            "Kreator tworzy/podłącza repo, przygotowuje workspace, uruchamia BDB i przekazuje prompt…",
+            "Kreator tworzy/podłącza repo, przygotowuje workspace, uruchamia BDB i kolejkuje prompt do aktywnej rozmowy…",
         )
         worker = ProjectCreatorWorker(
             self._project_creator_service,
@@ -103,7 +105,7 @@ class ProjectControlCenterWindow(ControlCenterWindow):
             self._mutation_operations_invoked += outcome.result.mutation_operations_invoked
             if outcome.result.ok:
                 self.status_line.setText(
-                    f"Projekt {outcome.result.plan.alias} jest gotowy. Prompt został przekazany do ChatGPT."
+                    f"Projekt {outcome.result.plan.alias} jest gotowy. Prompt oczekuje w aktywnej rozmowie ChatGPT."
                 )
                 self.start_bootstrap()
             else:

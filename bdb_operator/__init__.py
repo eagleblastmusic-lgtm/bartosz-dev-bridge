@@ -11,6 +11,14 @@ from .session_projection import (
     SESSION_HISTORY_SCHEMA,
     SESSION_SUMMARY_SCHEMA,
 )
+from .session_projection_hardening import install_session_projection_diagnostics
+from .project_creator import ProjectCreatorService
+from .project_creator_hardening import install_project_creator_hardening
+
+
+install_session_projection_diagnostics()
+install_project_creator_hardening(ProjectCreatorService)
+
 
 __all__ = [
     "CURRENT_OPERATION_SCHEMA",
