@@ -5,6 +5,8 @@ from pathlib import Path
 
 from . import cli as _legacy
 from . import ghb07_cli as _base
+from .native_action_preflight import install_native_action_preflight
+from .native_actions import NativeActionComposer
 from .native_host import NativeArmStore, NativeHostConfig, default_native_config_path
 from .runtime_hardening import install_runtime_hardening
 from .terminal_diagnostics import install_terminal_diagnostics
@@ -12,6 +14,7 @@ from .terminal_diagnostics import install_terminal_diagnostics
 
 install_runtime_hardening()
 install_terminal_diagnostics()
+install_native_action_preflight(NativeActionComposer)
 
 _PREVIOUS_MAIN = _base.main
 _PREVIOUS_PARSER = _base._parser
