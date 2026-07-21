@@ -1,5 +1,9 @@
 "use strict";
 
-// Load the existing synchronized AUTO state entrypoint first, then add bounded
-// polling for Native Host responses that are initially accepted or pending.
-importScripts("background_entry.js", "background_async_result.js");
+// Load synchronized AUTO state, bounded Native Host result polling, then the
+// recoverable replay-claim lease used by live ChatGPT rerender duplicates.
+importScripts(
+  "background_entry.js",
+  "background_async_result.js",
+  "background_auto_recovery.js"
+);
