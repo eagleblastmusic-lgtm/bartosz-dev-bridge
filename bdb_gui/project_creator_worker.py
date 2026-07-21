@@ -44,7 +44,7 @@ class ProjectCreatorWorker(QRunnable):
                 workspaces_root=self._workspaces_root,
                 **self._payload,
             )
-            result = self._service.execute(plan, workspaces_root=self._workspaces_root)
+            result = self._service.execute(plan)
             outcome = ProjectCreatorOutcome(ok=result.ok, plan=plan, result=result)
         except (OSError, TypeError, ValueError) as error:
             outcome = ProjectCreatorOutcome(
