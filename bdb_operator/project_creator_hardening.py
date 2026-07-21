@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import replace
 from typing import Any
 
@@ -16,6 +17,16 @@ def install_project_creator_hardening(project_creator_service: type) -> None:
         return
     _INSTALLED = True
 
+    module = sys.modules[project_creator_service.__module__]
+    base_defaults = tuple(module.DEFAULT_ALLOWED_PATHS)
+    hardened_defaults = base_defaults
+    for pattern in _SAFE_ROOT_LAUNCHERS:
+        if pattern not in hardened_defaults:
+            hardened_defaults = (*hardened_defaults, pattern)
+    # The GUI imports this constant after package initialization, so its editable
+    # default text and the service default now describe the same exact contract.
+    module.DEFAULT_ALLOWED_PATHS = hardened_defaults
+
     original_init = project_creator_service.__init__
     original_build_plan = project_creator_service.build_plan
     original_execute = project_creator_service.execute
@@ -28,15 +39,11 @@ def install_project_creator_hardening(project_creator_service: type) -> None:
         original_init(self, *args, **kwargs)
 
     def hardened_build_plan(self: Any, *args: Any, **kwargs: Any) -> Any:
-        # Root launchers are common bounded project entry points. Include them in
-        # new Creator defaults so generated launchers cannot contradict the exact
-        # Bridge/Promoter allowlist. Explicit user allowlists remain untouched.
+        # Root launchers are common bounded project entry points. Include them only
+        # when the caller accepts Creator defaults. Explicit user allowlists remain
+        # untouched, including a deliberately narrow scope.
         if "allowed_paths" not in kwargs:
-            defaults = tuple(original_build_plan.__defaults__ or ())
-            _ = defaults  # keep introspection stable; defaults are keyword-only.
-            from .project_creator import DEFAULT_ALLOWED_PATHS
-
-            kwargs["allowed_paths"] = (*DEFAULT_ALLOWED_PATHS, *_SAFE_ROOT_LAUNCHERS)
+            kwargs["allowed_paths"] = hardened_defaults
         return original_build_plan(self, *args, **kwargs)
 
     def hardened_execute(self: Any, plan: Any) -> Any:
