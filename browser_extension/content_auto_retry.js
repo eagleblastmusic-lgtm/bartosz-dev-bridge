@@ -5,7 +5,7 @@
 // the same iteration while its durable replay lease is still processing. Retry
 // only those exact transient gaps; all replay, iteration, time and opt-in gates
 // remain owned by the background worker.
-const BDB_AUTO_DECISION_RETRY_ATTEMPTS = 240;
+const BDB_AUTO_DECISION_RETRY_ATTEMPTS = 800;
 const BDB_AUTO_DECISION_RETRY_MS = 250;
 const BDB_AUTO_TRANSIENT_REASONS = new Set([
   "non_sequential_iteration",
