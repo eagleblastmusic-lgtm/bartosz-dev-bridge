@@ -1,0 +1,112 @@
+name: Native Host Windowless Candidate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/native-host-windowless-candidate.yml"
+      - "bdb_bridge/native_host.py"
+      - "bdb_bridge/windows_stdio.py"
+      - "packaging/windows/native_host_entry.py"
+      - "scripts/Build-BDBNativeHostWindowless.ps1"
+      - "scripts/Install-BDBNativeHost.ps1"
+      - "scripts/check_native_host_windowless.py"
+      - "scripts/prepare_local_browser_pilot.py"
+      - "tests/test_windows_native_stdio.py"
+      - "tests/test_native_host_windowless_packaging_contract.py"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-accept:
+    name: Windows / Python 3.12 / GUI subsystem and stdio acceptance
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install build and test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev,release]"
+      - name: Validate PowerShell syntax
+        shell: pwsh
+        run: |
+          foreach ($script in @(
+            "scripts/Build-BDBNativeHostWindowless.ps1",
+            "scripts/Install-BDBNativeHost.ps1"
+          )) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "$script`: $($_.Message)" }
+              throw "PowerShell syntax validation failed"
+            }
+          }
+      - name: Run source contracts
+        run: >-
+          python -m pytest -vv
+          tests/test_windows_native_stdio.py
+          tests/test_native_host_windowless_packaging_contract.py
+      - name: Build windowless Native Host
+        id: build
+        shell: pwsh
+        run: |
+          $dist = Join-Path $env:RUNNER_TEMP "bdb-native-host-dist"
+          $work = Join-Path $env:RUNNER_TEMP "bdb-native-host-build"
+          $result = .\scripts\Build-BDBNativeHostWindowless.ps1 `
+            -Python (Get-Command python).Source `
+            -DistRoot $dist `
+            -WorkRoot $work | ConvertFrom-Json
+          if ($result.status -ne "built") {
+            throw "Windowless Native Host build did not finish in built state"
+          }
+          "executable=$($result.executable)" >> $env:GITHUB_OUTPUT
+          "directory=$($result.directory)" >> $env:GITHUB_OUTPUT
+      - name: Install candidate and verify Native Messaging protocol
+        shell: pwsh
+        run: |
+          $pilotRoot = Join-Path $env:RUNNER_TEMP "bdb-native-host-config"
+          python scripts/prepare_local_browser_pilot.py `
+            --root $pilotRoot `
+            --python (Get-Command python).Source
+          if ($LASTEXITCODE -ne 0) {
+            throw "Native Host fixture preparation failed"
+          }
+          $setup = Get-Content `
+            -LiteralPath (Join-Path $pilotRoot "browser-pilot-setup.json") `
+            -Raw | ConvertFrom-Json
+          $extensionId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          $bridgeConfig = [string]$setup.bridge_config
+          $install = .\scripts\Install-BDBNativeHost.ps1 `
+            -HostExecutable "${{ steps.build.outputs.executable }}" `
+            -BridgeConfig $bridgeConfig `
+            -RepositoryAlias "pilot" `
+            -ChromeExtensionId $extensionId `
+            -MaxWaitSeconds 30 `
+            -RequireWindowless | ConvertFrom-Json
+          if ($install.installed -ne $true -or $install.pe_subsystem -ne 2) {
+            throw "Windowless Native Host installation contract failed"
+          }
+          $nativeConfig = [string]$install.config
+          python scripts/check_native_host_windowless.py `
+            --executable "${{ steps.build.outputs.executable }}" `
+            --config $nativeConfig `
+            --origin "chrome-extension://$extensionId/"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windowless Native Messaging protocol acceptance failed"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bdb-native-host-windowless-candidate
+          path: ${{ steps.build.outputs.directory }}
+          if-no-files-found: error
+          retention-days: 14

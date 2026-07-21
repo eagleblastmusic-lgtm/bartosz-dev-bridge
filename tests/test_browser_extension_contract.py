@@ -15,7 +15,7 @@ def read(name: str) -> str:
 def test_manifest_has_minimal_mv3_permissions() -> None:
     manifest = json.loads(read("manifest.json"))
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "0.2.7"
+    assert manifest["version"] == "0.2.8"
     assert manifest["permissions"] == ["nativeMessaging", "storage"]
     assert manifest["host_permissions"] == ["https://chatgpt.com/*"]
     assert manifest["background"] == {"service_worker": "background_full_entry.js"}
@@ -118,14 +118,17 @@ def test_auto_remains_bounded_and_explicitly_opt_in() -> None:
     assert "BDB_AUTO_RESULT" in content
 
 
-def test_auto_entry_synchronizes_loop_state_without_weakening_replay_guard() -> None:
+def test_auto_entry_synchronizes_loop_state_and_recovers_replay_claims() -> None:
     entry = read("background_entry.js")
     full_entry = read("background_full_entry.js")
     background = read("background.js")
     polling = read("background_async_result.js")
+    recovery = read("background_auto_recovery.js")
     popup = read("popup.js")
     assert 'importScripts("background.js")' in entry
-    assert 'importScripts("background_entry.js", "background_async_result.js")' in full_entry
+    assert '"background_entry.js"' in full_entry
+    assert '"background_async_result.js"' in full_entry
+    assert '"background_auto_recovery.js"' in full_entry
     assert "canonicalAutoStateKey" in entry
     assert "chrome.storage.session.get(null)" in entry
     assert "legacyAutoStateEntries" in entry
@@ -135,18 +138,25 @@ def test_auto_entry_synchronizes_loop_state_without_weakening_replay_guard() -> 
     assert "expectedIteration" in entry
     assert "claimAutoReplay" in background
     assert "AUTO_REPLAY_GUARD_KEY" in background
-    assert "claimAutoReplay =" not in entry
+    assert "BDB_AUTO_REPLAY_LEASE_MS" in recovery
+    assert "claimRecoverableAutoReplay" in recovery
+    assert "bdbReleaseReplayClaim" in recovery
+    assert "bdbCompleteReplayClaim" in recovery
+    assert 'reason: "iteration_in_progress"' in recovery
+    assert 'reason: "iteration_already_processed"' in recovery
     assert 'action: "result"' in polling
     assert "waitForRequiredPromotion(action, latest)" in polling
     assert "BDB_ASYNC_RESULT_ATTEMPTS" in polling
     assert "Oczekiwana iteracja" in popup
 
 
-def test_auto_decision_retry_is_bounded_and_does_not_weaken_background_gates() -> None:
+def test_auto_decision_retry_is_bounded_and_waits_for_processing_claim() -> None:
     retry = read("content_auto_retry.js")
     assert "BDB_AUTO_DECISION_RETRY_ATTEMPTS" in retry
     assert "BDB_AUTO_DECISION_RETRY_MS" in retry
-    assert 'auto.reason === "non_sequential_iteration"' in retry
+    assert '"non_sequential_iteration"' in retry
+    assert '"iteration_in_progress"' in retry
+    assert "BDB_AUTO_TRANSIENT_REASONS.has(auto.reason)" in retry
     assert "auto.expectedIteration <= iteration" in retry
     assert 'type: "BDB_CONSIDER_AUTO", action' in retry
     assert "retryExhausted: true" in retry

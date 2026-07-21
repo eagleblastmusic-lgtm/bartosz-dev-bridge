@@ -1,10 +1,16 @@
 "use strict";
 
 // ChatGPT can render the next AUTO action while the previous decision is still
-// publishing its canonical loop state. Retry only the exact transient gap; all
-// replay, iteration, time, and opt-in gates remain owned by the background worker.
-const BDB_AUTO_DECISION_RETRY_ATTEMPTS = 24;
+// publishing its canonical loop state. A duplicate live panel can also observe
+// the same iteration while its durable replay lease is still processing. Retry
+// only those exact transient gaps; all replay, iteration, time and opt-in gates
+// remain owned by the background worker.
+const BDB_AUTO_DECISION_RETRY_ATTEMPTS = 800;
 const BDB_AUTO_DECISION_RETRY_MS = 250;
+const BDB_AUTO_TRANSIENT_REASONS = new Set([
+  "non_sequential_iteration",
+  "iteration_in_progress"
+]);
 
 function bdbAutoDecisionSleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -21,7 +27,7 @@ function bdbAutoDecisionNeedsCatchUp(auto, iteration) {
   return Boolean(
     auto &&
     auto.executed === false &&
-    auto.reason === "non_sequential_iteration" &&
+    BDB_AUTO_TRANSIENT_REASONS.has(auto.reason) &&
     Number.isInteger(iteration) &&
     Number.isInteger(auto.expectedIteration) &&
     auto.expectedIteration <= iteration

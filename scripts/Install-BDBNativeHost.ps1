@@ -13,12 +13,39 @@ param(
     [string]$EdgeExtensionId,
 
     [ValidateRange(0, 120)]
-    [int]$MaxWaitSeconds = 30
+    [int]$MaxWaitSeconds = 30,
+
+    [switch]$RequireWindowless
 )
 
 $ErrorActionPreference = "Stop"
 $hostName = "com.bartosz.dev_bridge"
 $extensionIdPattern = '^[a-p]{32}$'
+$windowsGuiSubsystem = 2
+
+function Get-PeSubsystem([string]$ExecutablePath) {
+    $bytes = [System.IO.File]::ReadAllBytes($ExecutablePath)
+    if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
+        throw "HostExecutable does not have a valid MZ header"
+    }
+    $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3c)
+    $optionalHeader = $peOffset + 24
+    if (
+        $peOffset -lt 0 -or
+        $optionalHeader + 70 -gt $bytes.Length -or
+        $bytes[$peOffset] -ne 0x50 -or
+        $bytes[$peOffset + 1] -ne 0x45 -or
+        $bytes[$peOffset + 2] -ne 0 -or
+        $bytes[$peOffset + 3] -ne 0
+    ) {
+        throw "HostExecutable does not have a complete PE header"
+    }
+    $magic = [System.BitConverter]::ToUInt16($bytes, $optionalHeader)
+    if ($magic -ne 0x10b -and $magic -ne 0x20b) {
+        throw "HostExecutable has an unsupported PE optional header"
+    }
+    return [System.BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+}
 
 $hostExecutablePath = (Resolve-Path -LiteralPath $HostExecutable).Path
 $bridgeConfigPath = (Resolve-Path -LiteralPath $BridgeConfig).Path
@@ -28,6 +55,17 @@ if (-not (Test-Path -LiteralPath $hostExecutablePath -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $bridgeConfigPath -PathType Leaf)) {
     throw "BridgeConfig must identify a file"
+}
+
+$peSubsystem = $null
+if ($RequireWindowless) {
+    if ($env:OS -ne "Windows_NT") {
+        throw "RequireWindowless is supported only on Windows"
+    }
+    $peSubsystem = Get-PeSubsystem $hostExecutablePath
+    if ($peSubsystem -ne $windowsGuiSubsystem) {
+        throw "HostExecutable PE subsystem is $peSubsystem; expected Windows GUI ($windowsGuiSubsystem)"
+    }
 }
 
 $ids = @()
@@ -104,5 +142,8 @@ $result = [ordered]@{
     allowed_origin_count = $allowedOrigins.Count
     config = $nativeConfigPath
     manifest = $hostManifestPath
+    executable = $hostExecutablePath
+    windowless_required = [bool]$RequireWindowless
+    pe_subsystem = $peSubsystem
 }
 $result | ConvertTo-Json -Depth 5
