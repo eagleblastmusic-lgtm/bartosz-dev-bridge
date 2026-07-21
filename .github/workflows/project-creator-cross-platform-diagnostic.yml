@@ -1,0 +1,39 @@
+name: Project Creator Cross-Platform Diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/project-creator-cross-platform-diagnostic.yml"
+      - "bdb_bridge/**"
+      - "bdb_operator/**"
+      - "browser_extension/**"
+      - "tests/**"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  partitions:
+    name: Ubuntu / Python ${{ matrix.python-version }} / partitioned pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Browser partition
+        run: python -m pytest -vv --tb=short -k "browser"
+      - name: Native Host partition
+        run: python -m pytest -vv --tb=short -k "native or windowless"
+      - name: Remaining non-GUI partition
+        run: python -m pytest -vv --tb=short -k "not gui and not release and not browser and not native and not windowless"
