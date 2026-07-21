@@ -10,6 +10,20 @@ function bdbProjectLaunchMarker(launchId) {
   return `BDB_PROJECT_LAUNCH:${launchId}`;
 }
 
+function bdbProjectConversationId() {
+  const match = location.pathname.match(/(?:^|\/)c\/([A-Za-z0-9-]{8,})(?:\/|$)/);
+  return match ? match[1] : null;
+}
+
+function bdbProjectConversationIsActive() {
+  return Boolean(
+    document.visibilityState === "visible" &&
+    typeof document.hasFocus === "function" &&
+    document.hasFocus() &&
+    bdbProjectConversationId()
+  );
+}
+
 function bdbProjectClaimId(launchId) {
   let claimId = bdbProjectClaims.get(launchId);
   if (!claimId) {
@@ -36,6 +50,9 @@ function bdbValidProjectLaunch(value) {
 }
 
 function bdbProjectComposerEligible(marker) {
+  if (!bdbProjectConversationIsActive()) {
+    return false;
+  }
   if (bdbUserMessageContains(marker)) {
     return true;
   }
@@ -123,8 +140,8 @@ async function bdbSubmitProjectLaunch(marker) {
 
 async function bdbHandleProjectLaunch(candidate) {
   const candidateMarker = bdbProjectLaunchMarker(candidate.launch_id);
-  // Tabs with an unrelated draft never acquire the cross-process claim. An
-  // empty tab or the tab already holding this exact marker may become owner.
+  // Only the currently visible, focused conversation may acquire the cross-process
+  // claim. Other ChatGPT tabs leave the launch pending instead of racing for it.
   if (!bdbProjectComposerEligible(candidateMarker)) {
     return false;
   }
