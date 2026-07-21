@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Bartosz Dev Bridge",
-  "version": "0.2.9",
-  "description": "Bounded local project creation, workspace context, tested edits, recoverable AUTO state, confirmed continuation, verified promotion, and one-click ChatGPT prompt handoff.",
+  "version": "0.3.0",
+  "description": "Active-chat project handoff, bounded local edits, client preflight, exact diagnostics, explicit repair correlation, recoverable AUTO state, verified tests, and local promotion.",
   "permissions": [
     "nativeMessaging",
     "storage"
@@ -27,7 +27,8 @@
         "content_rerender.js",
         "content_auto_send.js",
         "content_auto_retry.js",
-        "content_project_launcher.js"
+        "content_project_launcher.js",
+        "content_repair_retry.js"
       ],
       "css": [
         "content.css"
