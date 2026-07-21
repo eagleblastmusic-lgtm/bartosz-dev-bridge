@@ -98,6 +98,7 @@ from .code_relationship_models import (
     ResolutionStatus, SearchResult, SymbolReference,
 )
 from .code_relationship_service import RepositoryRelationshipService
+from .multi_file_patch_planner import MultiFilePatchPlanner
 from .multi_file_patch_executor import MultiFilePatchExecutor
 from .multi_file_patch_recovery_models import (
     MultiFileCheckpointBundle, MultiFileCheckpointPath, MultiFileCheckpointRecord,
@@ -107,6 +108,7 @@ from .multi_file_patch_runtime_models import (
     MultiFilePatchProfileRecord, MultiFilePatchRuntimeResult,
 )
 from .multi_file_patch_runtime import MultiFilePatchRuntimeCoordinator
+from .nested_create_hotfix import install_nested_create_hotfix
 from .multi_file_patch_result import install_multi_file_patch_result_support
 from .open_read_result import install_open_read_result_support
 from .open_read_result_safety import install_open_read_result_safety
@@ -121,6 +123,11 @@ install_multi_file_patch_executor_hardening(MultiFilePatchExecutor)
 install_multi_file_patch_temp_identity(MultiFilePatchExecutor)
 install_multi_file_patch_checkpoint_hook_boundary(MultiFilePatchExecutor)
 install_multi_file_patch_lifecycle_bootstrap(MultiFilePatchRuntimeCoordinator)
+install_nested_create_hotfix(
+    MultiFilePatchPlanner,
+    MultiFilePatchExecutor,
+    MultiFilePatchRuntimeCoordinator,
+)
 install_multi_file_patch_result_support(ResultCoordinator)
 install_open_read_result_support(ResultCoordinator, Journal)
 install_open_read_result_safety(ResultCoordinator)
