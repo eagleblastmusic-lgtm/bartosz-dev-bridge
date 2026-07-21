@@ -76,11 +76,9 @@ async function bdbRepairEnrichAction(action) {
   const previousAction = previous && previous.action;
   const previousCorrelation = previousAction && previousAction.repair_correlation;
   const previousCommandId = previous && bdbRepairCommandId(previous.response);
-  const predecessorSessionId = bdbRepairSessionId(previousCommandId)
-    || (previousAction && typeof previousAction.session_id === "string" ? previousAction.session_id : null);
+  const predecessorSessionId = bdbRepairSessionId(previousCommandId);
   const awaitingRepair = Boolean(previous && previous.awaiting_corrected_action === true);
 
-  enriched.session_id = crypto.randomUUID();
   enriched.sequence = 1;
   enriched.expected_revision = 0;
   delete enriched.expected_state_hash;
@@ -91,6 +89,7 @@ async function bdbRepairEnrichAction(action) {
     previousCorrelation &&
     typeof previousCorrelation.correlation_id === "string"
   ) {
+    enriched.session_id = crypto.randomUUID();
     enriched.repair_correlation = {
       schema: "bdb-repair-correlation-v1",
       correlation_id: previousCorrelation.correlation_id,
@@ -100,6 +99,22 @@ async function bdbRepairEnrichAction(action) {
     return enriched;
   }
 
+  // A preflight failure never reached Native Host, so its generated initial
+  // session is still unused. Reuse that initial identity for the corrected action.
+  if (
+    awaitingRepair &&
+    !previousCommandId &&
+    previousAction &&
+    typeof previousAction.session_id === "string" &&
+    previousCorrelation &&
+    previousCorrelation.role === "initial"
+  ) {
+    enriched.session_id = previousAction.session_id;
+    enriched.repair_correlation = bdbRepairDeepClone(previousCorrelation);
+    return enriched;
+  }
+
+  enriched.session_id = crypto.randomUUID();
   enriched.repair_correlation = {
     schema: "bdb-repair-correlation-v1",
     correlation_id: crypto.randomUUID(),
