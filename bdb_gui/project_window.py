@@ -29,10 +29,7 @@ class ProjectControlCenterWindow(ControlCenterWindow):
         **kwargs: Any,
     ) -> None:
         self._project_prepare_service = project_prepare_service or ProjectPrepareService()
-        self._project_creator_service = project_creator_service or ProjectCreatorService(
-            prepare_service=self._project_prepare_service,
-            operations_service=kwargs.get("operations_service"),
-        )
+        self._project_creator_service = project_creator_service or ProjectCreatorService()
         self._prepare_confirmation_provider = prepare_confirmation_provider
         self._plan_worker: PlanWorker | None = None
         self._prepare_worker: PrepareWorker | None = None
