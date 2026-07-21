@@ -4,10 +4,8 @@ import sys
 from pathlib import Path
 
 from bdb_bridge.project_launch import ProjectLaunchQueue
-from bdb_gui.operations import ProjectOperationsService
-from bdb_gui.project_creator import ProjectCommandResult, ProjectCreatorService
-from bdb_gui.projects import ProjectPrepareService
 from bdb_operator.models import OperatorResponse
+from bdb_operator.project_creator import ProjectCommandResult, ProjectCreatorService
 
 
 class FakeRunner:
@@ -30,9 +28,10 @@ class FakeRunner:
         return ProjectCommandResult(command, 0, stdout, "")
 
 
-class FakePrepareOperator:
+class FakeProjectCreatorOperator:
     def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
+        self.prepare_calls: list[dict[str, object]] = []
+        self.starts: list[tuple[str, int]] = []
 
     def prepare(
         self,
@@ -44,7 +43,7 @@ class FakePrepareOperator:
         test_timeout_seconds=120.0,
         python_executable=None,
     ):
-        self.calls.append(
+        self.prepare_calls.append(
             {
                 "workspace_root": str(workspace_root),
                 "source_repo": str(source_repo),
@@ -59,11 +58,6 @@ class FakePrepareOperator:
             data={"status": "prepared", "workspace_root": str(workspace_root)},
         )
 
-
-class FakeProjectOperator:
-    def __init__(self) -> None:
-        self.starts: list[tuple[str, int]] = []
-
     def start(self, workspace_root, *, arm_minutes=30):
         self.starts.append((str(workspace_root), arm_minutes))
         return OperatorResponse.success(
@@ -72,30 +66,19 @@ class FakeProjectOperator:
             data={"status": "RUNNING", "arm": {"armed": True}},
         )
 
-    def status(self, workspace_root):  # pragma: no cover
-        raise AssertionError("status not used")
-
-    def stop(self, workspace_root):  # pragma: no cover
-        raise AssertionError("stop not used")
-
-    def rearm(self, workspace_root, *, arm_minutes=30):  # pragma: no cover
-        raise AssertionError("rearm not used")
-
 
 def make_service(tmp_path: Path):
     runner = FakeRunner()
-    prepare_operator = FakePrepareOperator()
-    project_operator = FakeProjectOperator()
+    operator = FakeProjectCreatorOperator()
     queue = ProjectLaunchQueue(tmp_path / "project-launch-queue.json")
     opened: list[str] = []
     service = ProjectCreatorService(
-        prepare_service=ProjectPrepareService(prepare_operator),
-        operations_service=ProjectOperationsService(project_operator),
+        operator=operator,
         command_runner=runner,
         launch_queue=queue,
         browser_opener=lambda url: opened.append(url) or True,
     )
-    return service, runner, prepare_operator, project_operator, queue, opened
+    return service, runner, operator, queue, opened
 
 
 def test_new_project_creates_github_prepares_starts_and_queues_prompt(tmp_path: Path) -> None:
@@ -103,7 +86,7 @@ def test_new_project_creates_github_prepares_starts_and_queues_prompt(tmp_path: 
     projects = tmp_path / "projects"
     workspaces.mkdir()
     projects.mkdir()
-    service, runner, prepare, operator, queue, opened = make_service(tmp_path)
+    service, runner, operator, queue, opened = make_service(tmp_path)
 
     plan = service.build_plan(
         workspaces_root=workspaces,
@@ -114,17 +97,18 @@ def test_new_project_creates_github_prepares_starts_and_queues_prompt(tmp_path: 
         prompt="Create a calculator",
         python_executable=sys.executable,
     )
-    result = service.execute(plan, workspaces_root=workspaces)
+    result = service.execute(plan)
 
     assert result.ok is True
     assert result.github_url == "https://github.com/example/calculator"
     assert Path(result.source_repo, "README.md").is_file()
-    assert prepare.calls[0]["alias"] == "calculator"
+    assert operator.prepare_calls[0]["alias"] == "calculator"
     assert operator.starts == [(str(workspaces / "calculator"), 30)]
     launch = queue.peek()
     assert launch is not None
     assert launch.repo_alias == "calculator"
     assert "Create a calculator" in launch.prompt
+    assert "Python 3 + pytest" in launch.prompt
     assert launch.auto_send is True
     assert opened == ["https://chatgpt.com/"]
     commands = [call[0] for call in runner.calls]
@@ -139,7 +123,7 @@ def test_existing_local_project_skips_github_creation(tmp_path: Path) -> None:
     workspaces.mkdir()
     source.mkdir(parents=True)
     (source / ".git").mkdir()
-    service, runner, _prepare, operator, queue, _opened = make_service(tmp_path)
+    service, runner, operator, queue, _opened = make_service(tmp_path)
 
     plan = service.build_plan(
         workspaces_root=workspaces,
@@ -152,7 +136,7 @@ def test_existing_local_project_skips_github_creation(tmp_path: Path) -> None:
         python_executable=sys.executable,
         auto_send=False,
     )
-    result = service.execute(plan, workspaces_root=workspaces)
+    result = service.execute(plan)
 
     assert result.ok is True
     assert operator.starts == [(str(workspaces / "existing"), 30)]
