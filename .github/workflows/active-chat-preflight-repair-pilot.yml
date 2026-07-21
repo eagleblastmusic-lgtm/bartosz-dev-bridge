@@ -1,0 +1,58 @@
+name: Active Chat Preflight Repair Pilot
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/active-chat-preflight-repair-pilot.yml"
+      - "browser_extension/**"
+      - "bdb_bridge/**"
+      - "bdb_operator/**"
+      - "bdb_gui/**"
+      - "tests/test_action_preflight_contract.py"
+      - "tests/test_browser_action_preflight_runtime.py"
+      - "tests/test_browser_repair_correlation_runtime.py"
+      - "tests/test_current_chat_handoff_contract.py"
+      - "tests/test_terminal_diagnostics.py"
+      - "tests/test_session_projection_terminal_diagnostics.py"
+      - "tests/test_gui_project_creator_service.py"
+      - "tests/test_browser_extension_contract.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  active-chat-preflight-repair:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install BDB test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Run active-chat and repair pilot
+        env:
+          PYTHONUTF8: "1"
+        run: >-
+          python -m pytest -vv
+          tests/test_action_preflight_contract.py
+          tests/test_browser_action_preflight_runtime.py
+          tests/test_browser_repair_correlation_runtime.py
+          tests/test_current_chat_handoff_contract.py
+          tests/test_terminal_diagnostics.py
+          tests/test_session_projection_terminal_diagnostics.py
+          tests/test_gui_project_creator_service.py
+          tests/test_browser_extension_contract.py
