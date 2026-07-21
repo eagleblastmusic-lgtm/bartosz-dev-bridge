@@ -3,7 +3,7 @@
   "module_id": "devmaster.bartosz-dev-bridge",
   "display_name": "Bartosz Dev Bridge",
   "version": "0.3.1",
-  "responsibility": "local_project_create_edit_test_promote_bridge",
+  "responsibility": "local_code_edit_test_promote_bridge",
   "owner_module": "DevMaster",
   "source_repository": "eagleblastmusic-lgtm/bartosz-dev-bridge",
   "transport": {
