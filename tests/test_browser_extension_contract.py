@@ -15,7 +15,7 @@ def read(name: str) -> str:
 def test_manifest_has_minimal_mv3_permissions() -> None:
     manifest = json.loads(read("manifest.json"))
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "0.2.9"
+    assert manifest["version"] == "0.3.0"
     assert manifest["permissions"] == ["nativeMessaging", "storage"]
     assert manifest["host_permissions"] == ["https://chatgpt.com/*"]
     assert manifest["background"] == {"service_worker": "background_full_entry.js"}
@@ -26,6 +26,7 @@ def test_manifest_has_minimal_mv3_permissions() -> None:
         "content_auto_send.js",
         "content_auto_retry.js",
         "content_project_launcher.js",
+        "content_repair_retry.js",
     ]
     serialized = json.dumps(manifest)
     for forbidden in ("<all_urls>", "tabs", "debugger", "webRequest", "downloads"):
@@ -131,6 +132,9 @@ def test_auto_entry_synchronizes_loop_state_and_recovers_replay_claims() -> None
     assert '"background_async_result.js"' in full_entry
     assert '"background_auto_recovery.js"' in full_entry
     assert '"background_project_launcher.js"' in full_entry
+    assert '"background_action_preflight.js"' in full_entry
+    assert '"background_repair_correlation.js"' in full_entry
+    assert '"background_conversation_binding.js"' in full_entry
     assert "canonicalAutoStateKey" in entry
     assert "chrome.storage.session.get(null)" in entry
     assert "legacyAutoStateEntries" in entry
@@ -196,9 +200,26 @@ def test_project_creator_handoff_is_leased_local_and_confirmed() -> None:
     assert "bdbAcknowledgeProjectLaunch" in content
     assert "bdbWaitForSendConfirmation" in content
     assert "BDB_AUTO_SEND_STRATEGIES" in content
-    assert "currentText.trim() !== \"\"" in content
+    assert 'currentText.trim() !== ""' in content
     assert "claim expires" in content
     assert "navigator.clipboard" not in content
+
+
+def test_repair_retry_is_explicit_correlated_and_same_chat() -> None:
+    background = read("background_repair_correlation.js")
+    content = read("content_repair_retry.js")
+    assert 'schema: "bdb-repair-correlation-v1"' in background
+    assert 'role: "initial"' in background
+    assert 'role: "repair"' in background
+    assert "predecessor_session_id" in background
+    assert "awaiting_corrected_action" in background
+    assert "Napraw i uruchom ponownie" in content
+    assert "bdbContentRepairHashes" in content
+    assert "bdbContentRepairRequestCorrection" in content
+    assert "prepareContinuation(text, { requireEmpty: true })" in content
+    assert 'type: "BDB_SUBMIT_ACTION"' in content
+    assert "execCommand" not in background
+    assert "sendNativeMessage" not in content
 
 
 def test_extension_contains_no_remote_scripts_or_inline_script() -> None:
