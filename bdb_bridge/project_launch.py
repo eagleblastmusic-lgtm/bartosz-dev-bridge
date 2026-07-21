@@ -165,7 +165,9 @@ class ProjectLaunchQueue:
         now_fn: Callable[[], datetime] = _utc_now,
         writer: Callable[[Path, dict[str, Any]], None] = _atomic_json_write,
     ) -> None:
-        self.path = Path(path).expanduser().resolve(strict=False)
+        # Keep the caller-visible path identity. resolve() would follow a symlink
+        # before the fail-closed regular-file check has a chance to reject it.
+        self.path = Path(os.path.abspath(Path(path).expanduser()))
         self.lock_path = self.path.with_name(self.path.name + ".lock")
         self.now_fn = now_fn
         self._writer = writer
