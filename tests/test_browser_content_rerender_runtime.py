@@ -55,10 +55,14 @@ def test_content_script_restores_panel_when_chatgpt_removes_panel_but_keeps_code
                 this.textContent = "";
                 this.className = "";
                 this.classList = new FakeClassList();
+                this.dataset = {};
                 this.disabled = false;
                 this.type = "";
               }
               matches(selector) {
+                if (selector === ".bdb-output") {
+                  return this.className.split(/\s+/).includes("bdb-output");
+                }
                 return selector === "code" && this.tagName === "CODE";
               }
               append(...nodes) {
@@ -79,6 +83,7 @@ def test_content_script_restores_panel_when_chatgpt_removes_panel_but_keeps_code
                 while (current) {
                   if (selector === "pre" && current.tagName === "PRE") return current;
                   if (selector === "form" && current.tagName === "FORM") return current;
+                  if (selector === ".bdb-compact" && current.className.split(/\s+/).includes("bdb-compact")) return current;
                   current = current.parentElement;
                 }
                 return null;
@@ -89,9 +94,28 @@ def test_content_script_restores_panel_when_chatgpt_removes_panel_but_keeps_code
                     (child) => child.className.split(/\s+/).includes("bdb-assisted")
                   ) || null;
                 }
+                if (selector === "code") {
+                  return this.children.find((child) => child.tagName === "CODE") || null;
+                }
+                if (selector === ".bdb-result" || selector === ".bdb-controls") {
+                  return this.children.find(
+                    (child) => child.className.split(/\s+/).includes(selector.slice(1))
+                  ) || null;
+                }
                 return null;
               }
               querySelectorAll(selector) {
+                if (selector === ".bdb-output") {
+                  const found = [];
+                  const visit = (node) => {
+                    for (const child of node.children) {
+                      if (child.className.split(/\s+/).includes("bdb-output")) found.push(child);
+                      visit(child);
+                    }
+                  };
+                  visit(this);
+                  return found;
+                }
                 if (selector !== "pre code, code") return [];
                 const found = [];
                 const visit = (node) => {
@@ -127,14 +151,30 @@ def test_content_script_restores_panel_when_chatgpt_removes_panel_but_keeps_code
 
             const document = new FakeElement("document");
             document.documentElement = document;
+            document.visibilityState = "visible";
+            document.hasFocus = () => true;
             document.createElement = (tagName) => (
               tagName === "button" ? new FakeButton() : new FakeElement(tagName)
             );
             document.querySelector = () => null;
 
+            const localStore = {};
+            const storageLocal = {
+              async get(key) {
+                if (typeof key === "string" && Object.prototype.hasOwnProperty.call(localStore, key)) {
+                  return { [key]: JSON.parse(JSON.stringify(localStore[key])) };
+                }
+                return {};
+              },
+              async set(values) {
+                Object.assign(localStore, JSON.parse(JSON.stringify(values)));
+              }
+            };
+
             const context = {
               console,
               document,
+              location: { pathname: "/c/test-conversation-12345678" },
               navigator: {},
               window: { getSelection: () => null },
               HTMLElement: FakeElement,
@@ -146,7 +186,9 @@ def test_content_script_restores_panel_when_chatgpt_removes_panel_but_keeps_code
               setTimeout,
               clearTimeout,
               chrome: {
+                storage: { local: storageLocal },
                 runtime: {
+                  id: "",
                   async sendMessage(message) {
                     if (message.type === "BDB_CONTEXT") {
                       return { ok: false, error: "no_project_launch" };
@@ -173,7 +215,9 @@ def test_content_script_restores_panel_when_chatgpt_removes_panel_but_keeps_code
               "content_rerender.js",
               "content_auto_send.js",
               "content_auto_retry.js",
-              "content_project_launcher.js"
+              "content_project_launcher.js",
+              "content_project_tab_binding.js",
+              "content_repair_retry.js"
             ]);
             for (const scriptName of scripts) {
               const scriptPath = path.join(extensionDir, scriptName);
