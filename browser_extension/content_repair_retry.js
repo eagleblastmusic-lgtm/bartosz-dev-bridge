@@ -57,34 +57,49 @@ function bdbContentRepairIsFailure(entry, response, output) {
 }
 
 async function bdbContentRepairLatest(repoAlias) {
-  const stored = await chrome.storage.local.get(BDB_CONTENT_REPAIR_ACTIONS_KEY);
-  const raw = stored[BDB_CONTENT_REPAIR_ACTIONS_KEY];
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+  const result = await chrome.runtime.sendMessage({
+    type: "BDB_SUBMIT_ACTION",
+    action: {
+      schema: ACTION_SCHEMA,
+      operation: "repair_state_peek",
+      repo_alias: repoAlias
+    }
+  });
+  const response = result && result.ok === true ? result.response : null;
+  if (
+    !response ||
+    response.status !== "repair_state" ||
+    typeof response.key !== "string" ||
+    !response.entry ||
+    typeof response.entry !== "object"
+  ) {
     return null;
   }
-  const candidates = Object.entries(raw)
-    .filter(([, entry]) => (
-      entry &&
-      typeof entry === "object" &&
-      entry.repo_alias === repoAlias &&
-      Number.isFinite(entry.updated_at)
-    ))
-    .sort((left, right) => right[1].updated_at - left[1].updated_at);
-  return candidates.length > 0 ? { key: candidates[0][0], entry: candidates[0][1], all: raw } : null;
+  return { key: response.key, entry: response.entry };
 }
 
 async function bdbContentRepairUpdateState(found, changes) {
-  const next = {
-    ...found.all,
-    [found.key]: {
-      ...found.entry,
-      ...changes,
-      updated_at: Date.now()
-    }
+  const stored = await chrome.storage.local.get(BDB_CONTENT_REPAIR_ACTIONS_KEY);
+  const raw = stored[BDB_CONTENT_REPAIR_ACTIONS_KEY];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("Brak zapisanego stanu naprawy dla tej karty");
+  }
+  const current = raw[found.key];
+  if (!current || typeof current !== "object") {
+    throw new Error("Stan naprawy tej karty wygasł");
+  }
+  const nextEntry = {
+    ...current,
+    ...changes,
+    updated_at: Date.now()
   };
-  await chrome.storage.local.set({ [BDB_CONTENT_REPAIR_ACTIONS_KEY]: next });
-  found.entry = next[found.key];
-  found.all = next;
+  await chrome.storage.local.set({
+    [BDB_CONTENT_REPAIR_ACTIONS_KEY]: {
+      ...raw,
+      [found.key]: nextEntry
+    }
+  });
+  found.entry = nextEntry;
 }
 
 async function bdbContentRepairDigestBase64(value) {
