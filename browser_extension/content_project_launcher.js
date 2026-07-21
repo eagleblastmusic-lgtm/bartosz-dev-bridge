@@ -4,9 +4,19 @@ const BDB_PROJECT_LAUNCH_ALIAS = "bdb-project-launch";
 const BDB_PROJECT_LAUNCH_POLL_MS = 1000;
 const BDB_PROJECT_LAUNCH_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 let bdbProjectLaunchPolling = false;
+const bdbProjectClaims = new Map();
 
 function bdbProjectLaunchMarker(launchId) {
   return `BDB_PROJECT_LAUNCH:${launchId}`;
+}
+
+function bdbProjectClaimId(launchId) {
+  let claimId = bdbProjectClaims.get(launchId);
+  if (!claimId) {
+    claimId = crypto.randomUUID();
+    bdbProjectClaims.set(launchId, claimId);
+  }
+  return claimId;
 }
 
 function bdbValidProjectLaunch(value) {
@@ -40,21 +50,43 @@ async function bdbFetchProjectLaunch() {
   return response.launch;
 }
 
-async function bdbAcknowledgeProjectLaunch(launchId) {
+async function bdbProjectLaunchAction(operation, launchId, claimId) {
   const result = await chrome.runtime.sendMessage({
     type: "BDB_SUBMIT_ACTION",
     action: {
       schema: ACTION_SCHEMA,
-      operation: "project_launch_ack",
-      launch_id: launchId
+      operation,
+      launch_id: launchId,
+      claim_id: claimId
     }
   });
-  return Boolean(
-    result &&
-    result.ok === true &&
-    result.response &&
-    result.response.status === "acknowledged"
+  return result && result.ok === true ? result.response : null;
+}
+
+async function bdbClaimProjectLaunch(launch) {
+  const claimId = bdbProjectClaimId(launch.launch_id);
+  const response = await bdbProjectLaunchAction(
+    "project_launch_claim",
+    launch.launch_id,
+    claimId
   );
+  if (!response || response.status !== "claimed" || !bdbValidProjectLaunch(response.launch)) {
+    return null;
+  }
+  return { launch: response.launch, claimId };
+}
+
+async function bdbAcknowledgeProjectLaunch(launchId, claimId) {
+  const response = await bdbProjectLaunchAction(
+    "project_launch_ack",
+    launchId,
+    claimId
+  );
+  if (response && response.status === "acknowledged") {
+    bdbProjectClaims.delete(launchId);
+    return true;
+  }
+  return false;
 }
 
 async function bdbSubmitProjectLaunch(marker) {
@@ -77,10 +109,16 @@ async function bdbSubmitProjectLaunch(marker) {
   return false;
 }
 
-async function bdbHandleProjectLaunch(launch) {
+async function bdbHandleProjectLaunch(candidate) {
+  const ownership = await bdbClaimProjectLaunch(candidate);
+  if (!ownership) {
+    return false;
+  }
+  const launch = ownership.launch;
+  const claimId = ownership.claimId;
   const marker = bdbProjectLaunchMarker(launch.launch_id);
   if (bdbUserMessageContains(marker)) {
-    return bdbAcknowledgeProjectLaunch(launch.launch_id);
+    return bdbAcknowledgeProjectLaunch(launch.launch_id, claimId);
   }
 
   let composer = findComposer();
@@ -103,13 +141,13 @@ async function bdbHandleProjectLaunch(launch) {
   }
 
   if (!launch.auto_send) {
-    return bdbAcknowledgeProjectLaunch(launch.launch_id);
+    return bdbAcknowledgeProjectLaunch(launch.launch_id, claimId);
   }
   const sent = await bdbSubmitProjectLaunch(marker);
   if (!sent) {
     return false;
   }
-  return bdbAcknowledgeProjectLaunch(launch.launch_id);
+  return bdbAcknowledgeProjectLaunch(launch.launch_id, claimId);
 }
 
 async function bdbPollProjectLaunch() {
@@ -123,8 +161,8 @@ async function bdbPollProjectLaunch() {
       await bdbHandleProjectLaunch(launch);
     }
   } catch (_error) {
-    // The queue is optional and bounded. Native Host availability, an occupied
-    // composer or a transient ChatGPT rerender simply leaves the launch pending.
+    // Native Host unavailability, a busy composer or a transient rerender leaves
+    // the launch pending. The cross-process claim expires and can be retried.
   } finally {
     bdbProjectLaunchPolling = false;
   }
