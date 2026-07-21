@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from typing import BinaryIO, Protocol, Sequence
+
+
+WINDOWS_CREATE_NO_WINDOW = 0x08000000
 
 
 @dataclass(frozen=True)
@@ -20,6 +24,9 @@ class CommandRunner(Protocol):
 
 
 class SubprocessCommandRunner:
+    def __init__(self, *, platform_name: str | None = None) -> None:
+        self._platform_name = platform_name or os.name
+
     def run(self, args: Sequence[str], *, timeout_seconds: float) -> CompletedCommand:
         # Capture through regular temporary files instead of PIPE. Long-lived
         # descendants may inherit standard handles on Windows; PIPE capture can
@@ -28,6 +35,13 @@ class SubprocessCommandRunner:
         with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(
             mode="w+b"
         ) as stderr_file:
+            platform_options: dict[str, object] = {}
+            if self._platform_name == "nt":
+                # Control Center is a GUI process. Without CREATE_NO_WINDOW,
+                # synchronous PowerShell/Python helpers can create a visible
+                # console window every time status, Start, Stop or Re-arm runs.
+                platform_options["creationflags"] = WINDOWS_CREATE_NO_WINDOW
+
             completed = subprocess.run(
                 list(args),
                 stdin=subprocess.DEVNULL,
@@ -36,6 +50,7 @@ class SubprocessCommandRunner:
                 check=False,
                 shell=False,
                 timeout=timeout_seconds,
+                **platform_options,
             )
             stdout = _read_utf8(stdout_file)
             stderr = _read_utf8(stderr_file)

@@ -70,34 +70,46 @@ async function synchronizeAutoState(loopId, tabId) {
   const snapshot = await chrome.storage.session.get(null);
   const legacyEntries = legacyAutoStateEntries(snapshot, loopId, canonicalKey);
   const canonical = snapshot[canonicalKey];
+  const obsoleteKeys = legacyEntries.map(([key]) => key);
 
-  let state = isStoredAutoState(canonical) ? { ...canonical } : null;
-  if (!state) {
-    const selected = newestSafeAutoState(legacyEntries);
-    if (selected) {
-      state = {
-        ...selected[1],
-        migratedFromTabState: true
-      };
+  // A canonical state is already owned and advanced by background.js. Never
+  // rewrite it from a previously-read snapshot: a concurrent AUTO execution may
+  // have advanced lastIteration after this read, and a blind write would regress
+  // the loop counter. Cleanup of obsolete tab-scoped keys is safe and independent.
+  if (isStoredAutoState(canonical)) {
+    if (obsoleteKeys.length > 0) {
+      await chrome.storage.session.remove(obsoleteKeys);
     }
+    return canonical;
   }
 
-  if (!state) {
+  const selected = newestSafeAutoState(legacyEntries);
+  if (!selected) {
     return null;
   }
 
-  const synchronized = {
-    ...state,
+  // Migration is needed only when the canonical key does not exist. Re-check it
+  // immediately before writing so another worker invocation cannot be overwritten.
+  const current = await chrome.storage.session.get(canonicalKey);
+  if (isStoredAutoState(current[canonicalKey])) {
+    if (obsoleteKeys.length > 0) {
+      await chrome.storage.session.remove(obsoleteKeys);
+    }
+    return current[canonicalKey];
+  }
+
+  const migrated = {
+    ...selected[1],
+    migratedFromTabState: true,
     lastTabId: tabId,
     updatedAt: Date.now()
   };
-  await chrome.storage.session.set({ [canonicalKey]: synchronized });
+  await chrome.storage.session.set({ [canonicalKey]: migrated });
 
-  const obsoleteKeys = legacyEntries.map(([key]) => key);
   if (obsoleteKeys.length > 0) {
     await chrome.storage.session.remove(obsoleteKeys);
   }
-  return synchronized;
+  return migrated;
 }
 
 // background.js resolves this binding at execution time. Replacing only the key
