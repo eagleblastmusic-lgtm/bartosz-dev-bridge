@@ -109,8 +109,12 @@ def test_new_project_creates_github_prepares_starts_and_queues_prompt(tmp_path: 
     assert launch.repo_alias == "calculator"
     assert "Create a calculator" in launch.prompt
     assert "Python 3 + pytest" in launch.prompt
+    assert "Efektywna allowlista" in launch.prompt
+    assert "- src/**" in launch.prompt
     assert launch.auto_send is True
-    assert opened == ["https://chatgpt.com/"]
+    assert opened == []
+    assert "chatgpt_active_conversation_waiting" in result.steps
+    assert "chatgpt_opened" not in result.steps
     commands = [call[0] for call in runner.calls]
     assert ("gh", "auth", "status") in commands
     assert any(command[:3] == ("gh", "repo", "create") for command in commands)
