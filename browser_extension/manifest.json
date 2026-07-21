@@ -28,6 +28,7 @@
         "content_auto_send.js",
         "content_auto_retry.js",
         "content_project_launcher.js",
+        "content_project_tab_binding.js",
         "content_repair_retry.js"
       ],
       "css": [
