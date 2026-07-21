@@ -55,10 +55,14 @@ def test_content_script_runs_delayed_document_scan_after_streaming_settles(
                 this.textContent = "";
                 this.className = "";
                 this.classList = new FakeClassList();
+                this.dataset = {};
                 this.disabled = false;
                 this.type = "";
               }
               matches(selector) {
+                if (selector === ".bdb-output") {
+                  return this.className.split(/\s+/).includes("bdb-output");
+                }
                 if (selector === "code") return this.tagName === "CODE";
                 if (selector === "pre") return this.tagName === "PRE";
                 if (selector === "code, pre" || selector === "pre, code") {
@@ -78,6 +82,7 @@ def test_content_script_runs_delayed_document_scan_after_streaming_settles(
                 while (current) {
                   if (selector === "pre" && current.tagName === "PRE") return current;
                   if (selector === "form" && current.tagName === "FORM") return current;
+                  if (selector === ".bdb-compact" && current.className.split(/\s+/).includes("bdb-compact")) return current;
                   if ((selector === "pre, code" || selector === "code, pre") &&
                       (current.tagName === "PRE" || current.tagName === "CODE")) {
                     return current;
@@ -110,9 +115,28 @@ def test_content_script_runs_delayed_document_scan_after_streaming_settles(
                 if (selector === "pre code, code") {
                   return this.querySelectorAll(selector)[0] || null;
                 }
+                if (selector === "code") {
+                  return this.children.find((child) => child.tagName === "CODE") || null;
+                }
+                if (selector === ".bdb-result" || selector === ".bdb-controls") {
+                  return this.children.find(
+                    (child) => child.className.split(/\s+/).includes(selector.slice(1))
+                  ) || null;
+                }
                 return null;
               }
               querySelectorAll(selector) {
+                if (selector === ".bdb-output") {
+                  const outputs = [];
+                  const visitOutputs = (node) => {
+                    for (const child of node.children) {
+                      if (child.className.split(/\s+/).includes("bdb-output")) outputs.push(child);
+                      visitOutputs(child);
+                    }
+                  };
+                  visitOutputs(this);
+                  return outputs;
+                }
                 if (selector !== "pre code, code") return [];
                 const found = [];
                 const visit = (node) => {
@@ -154,14 +178,18 @@ def test_content_script_runs_delayed_document_scan_after_streaming_settles(
             let sendCalls = 0;
             const document = new FakeElement("document");
             document.documentElement = document;
+            document.visibilityState = "visible";
+            document.hasFocus = () => true;
             document.createElement = (tagName) => (
               tagName === "button" ? new FakeButton() : new FakeElement(tagName)
             );
             document.querySelector = () => null;
 
+            const localStore = {};
             const context = {
               console,
               document,
+              location: { pathname: "/c/test-conversation-12345678" },
               navigator: {},
               window: { getSelection: () => null },
               HTMLElement: FakeElement,
@@ -173,7 +201,21 @@ def test_content_script_runs_delayed_document_scan_after_streaming_settles(
               setTimeout: fakeSetTimeout,
               clearTimeout() {},
               chrome: {
+                storage: {
+                  local: {
+                    async get(key) {
+                      if (typeof key === "string" && Object.prototype.hasOwnProperty.call(localStore, key)) {
+                        return { [key]: JSON.parse(JSON.stringify(localStore[key])) };
+                      }
+                      return {};
+                    },
+                    async set(values) {
+                      Object.assign(localStore, JSON.parse(JSON.stringify(values)));
+                    }
+                  }
+                },
                 runtime: {
+                  id: "",
                   async sendMessage(message) {
                     assert.equal(message.type, "BDB_CONSIDER_AUTO");
                     sendCalls += 1;
@@ -191,11 +233,15 @@ def test_content_script_runs_delayed_document_scan_after_streaming_settles(
             context.globalThis = context;
             vm.createContext(context);
 
+            let reconciliationObserver = null;
             for (const scriptName of manifest.content_scripts[0].js) {
               const scriptPath = path.join(extensionDir, scriptName);
               vm.runInContext(fs.readFileSync(scriptPath, "utf8"), context, {
                 filename: scriptPath
               });
+              if (scriptName === "content_rerender.js") {
+                reconciliationObserver = observerCallbacks.at(-1);
+              }
             }
 
             const host = new FakeElement("pre");
@@ -211,7 +257,6 @@ def test_content_script_runs_delayed_document_scan_after_streaming_settles(
               "partial streaming JSON must not be enhanced"
             );
 
-            const reconciliationObserver = observerCallbacks.at(-1);
             assert.equal(typeof reconciliationObserver, "function");
             reconciliationObserver([
               {
