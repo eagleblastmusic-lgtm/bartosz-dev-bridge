@@ -2,6 +2,7 @@
 
 const BDB_REPAIR_ACTIONS_KEY = "bdbRepairActionsV1";
 const BDB_REPAIR_ACTION_LIMIT = 8;
+const BDB_REPAIR_STATE_PEEK = "repair_state_peek";
 const BDB_REPAIR_MUTATING_OPERATIONS = new Set([
   "replace_exact_and_test",
   "multi_file_patch"
@@ -42,6 +43,24 @@ async function bdbRepairStoreEntry(key, entry) {
     .sort((left, right) => left[1].updated_at - right[1].updated_at)
     .slice(-BDB_REPAIR_ACTION_LIMIT);
   await chrome.storage.local.set({ [BDB_REPAIR_ACTIONS_KEY]: Object.fromEntries(bounded) });
+}
+
+async function bdbRepairEntryForTab(tabId, repoAlias) {
+  if (!Number.isInteger(tabId) || tabId < 0) {
+    throw new Error("Repair state requires a concrete sender tab");
+  }
+  const alias = validateRepoAlias(repoAlias);
+  const key = bdbRepairEntryKey(tabId, alias);
+  const stored = await chrome.storage.local.get(BDB_REPAIR_ACTIONS_KEY);
+  const raw = stored[BDB_REPAIR_ACTIONS_KEY];
+  const entry = raw && typeof raw === "object" && !Array.isArray(raw) ? raw[key] : null;
+  return {
+    schema: "bdb-repair-state-response-v1",
+    status: entry && typeof entry === "object" ? "repair_state" : "repair_state_empty",
+    repo_alias: alias,
+    key,
+    entry: entry && typeof entry === "object" ? bdbRepairDeepClone(entry) : null
+  };
 }
 
 async function bdbRepairLatestForRepo(repoAlias) {
@@ -125,6 +144,14 @@ async function bdbRepairEnrichAction(action) {
 }
 
 submitAction = async function submitActionWithRepairCorrelation(action, tabId) {
+  if (action && action.operation === BDB_REPAIR_STATE_PEEK) {
+    validateJsonObject(action, "repair state request");
+    if (action.schema !== ACTION_SCHEMA) {
+      throw new Error(`Only ${ACTION_SCHEMA} is supported`);
+    }
+    return bdbRepairEntryForTab(tabId, action.repo_alias);
+  }
+
   const enriched = await bdbRepairEnrichAction(action);
   const mutating = Boolean(enriched && BDB_REPAIR_MUTATING_OPERATIONS.has(enriched.operation));
   const repoAlias = enriched && enriched.repo_alias;
