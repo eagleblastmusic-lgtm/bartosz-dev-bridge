@@ -5,7 +5,9 @@
 // claiming an iteration but before publishing its canonical state. Keep a
 // bounded durable claim lease so duplicates wait, failed executions release the
 // claim, and abandoned claims can be reclaimed without weakening replay safety.
-const BDB_AUTO_REPLAY_LEASE_MS = 45 * 1000;
+// The lease exceeds the extension's bounded initial wait, result polling and
+// promotion-observation window, so a live action cannot be reclaimed early.
+const BDB_AUTO_REPLAY_LEASE_MS = 180 * 1000;
 const BDB_AUTO_REPLAY_STATUS_PROCESSING = "processing";
 const BDB_AUTO_REPLAY_STATUS_COMPLETED = "completed";
 const considerAutoBeforeReplayRecovery = considerAuto;
@@ -150,6 +152,14 @@ considerAuto = async function considerAutoWithReplayRecovery(action, tabId) {
         ...decision,
         reason: "iteration_already_processed",
         expectedIteration: state.lastIteration + 1
+      };
+    }
+
+    const replayKey = autoReplayKey(metadata.loopId, metadata.iteration);
+    if (replayClaimsInFlight.has(replayKey)) {
+      return {
+        ...decision,
+        reason: "iteration_in_progress"
       };
     }
 
