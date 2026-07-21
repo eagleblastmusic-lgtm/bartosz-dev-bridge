@@ -108,7 +108,7 @@ def test_prepare_result_schema_requires_one_explicit_mutation() -> None:
     assert properties["mutation_operations_invoked"] == {"const": 1}
 
 
-def test_control_center_smoke_preserves_0_3_0_zero_mutation_gate() -> None:
+def test_control_center_smoke_preserves_0_3_1_zero_mutation_gate() -> None:
     schema = load("bdb-control-center-smoke-v1.schema.json")
     properties = schema["properties"]
     assert "application_version" in schema["required"]
@@ -119,6 +119,8 @@ def test_control_center_smoke_preserves_0_3_0_zero_mutation_gate() -> None:
     assert properties["mutation_operations_invoked"] == {"const": 0}
     assert properties["confirmation_required"] == {"const": True}
     assert properties["projects_wizard_present"] == {"const": True}
+    assert properties["project_creator_button_present"] == {"const": True}
+    assert properties["project_creator_worker_active"] == {"const": False}
     assert properties["prepare_plan_required"] == {"const": True}
     assert properties["prepare_confirmation_required"] == {"const": True}
     assert properties["current_operation_read_only"] == {"const": True}
