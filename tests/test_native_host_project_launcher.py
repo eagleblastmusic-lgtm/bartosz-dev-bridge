@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 import pytest
@@ -64,7 +65,7 @@ def request(action: str, **payload):
     }
 
 
-def test_peek_and_acknowledge_project_launch(tmp_path: Path) -> None:
+def test_peek_claim_and_acknowledge_project_launch(tmp_path: Path) -> None:
     config = native_config(tmp_path)
     NativeArmStore(config.state_path).arm(minutes=5)
     launch = ProjectLaunchQueue(tmp_path / "project-launch-queue.json").enqueue(
@@ -73,13 +74,38 @@ def test_peek_and_acknowledge_project_launch(tmp_path: Path) -> None:
         auto_send=True,
     )
     service = ProjectLauncherNativeHostService(config, origin=ORIGIN)
+    claim_id = str(uuid.uuid4())
 
     peek = service.handle(request("project_launch_peek"))
     assert peek["status"] == "project_launch"
     assert peek["launch"]["launch_id"] == launch.launch_id
-    assert peek["launch"]["prompt"] == "Create a calculator"
 
-    ack = service.handle(request("project_launch_ack", launch_id=launch.launch_id))
+    claim = service.handle(
+        request(
+            "project_launch_claim",
+            launch_id=launch.launch_id,
+            claim_id=claim_id,
+        )
+    )
+    assert claim["status"] == "claimed"
+    assert claim["launch"]["prompt"] == "Create a calculator"
+
+    competing = service.handle(
+        request(
+            "project_launch_claim",
+            launch_id=launch.launch_id,
+            claim_id=str(uuid.uuid4()),
+        )
+    )
+    assert competing["status"] == "busy_or_missing"
+
+    ack = service.handle(
+        request(
+            "project_launch_ack",
+            launch_id=launch.launch_id,
+            claim_id=claim_id,
+        )
+    )
     assert ack["status"] == "acknowledged"
     assert service.handle(request("project_launch_peek"))["status"] == "empty"
 
@@ -94,12 +120,18 @@ def test_project_launch_requires_armed_native_host(tmp_path: Path) -> None:
     assert error.value.code == "policy_denied"
 
 
-def test_ack_rejects_invalid_uuid(tmp_path: Path) -> None:
+def test_claim_rejects_invalid_uuid(tmp_path: Path) -> None:
     config = native_config(tmp_path)
     NativeArmStore(config.state_path).arm(minutes=5)
     service = ProjectLauncherNativeHostService(config, origin=ORIGIN)
 
     with pytest.raises(BridgeError) as error:
-        service.handle(request("project_launch_ack", launch_id="../escape"))
+        service.handle(
+            request(
+                "project_launch_claim",
+                launch_id="../escape",
+                claim_id=str(uuid.uuid4()),
+            )
+        )
 
     assert error.value.code == "invalid_payload"
