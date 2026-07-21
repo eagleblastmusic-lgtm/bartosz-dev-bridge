@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from bdb_bridge import CommandState, InstanceLock, Journal
@@ -67,6 +68,9 @@ def test_terminal_result_preserves_exact_pre_mutation_error(tmp_path: Path) -> N
         events = journal.list_events(session_id=SESSION_ID, command_id=COMMAND_ID)
         diagnostic = [event for event in events if event.event_type == "command.terminal_diagnostic"]
         assert len(diagnostic) == 1
-        assert diagnostic[0].payload["error_code"] == "unsafe_path"
+        assert diagnostic[0].payload_json is not None
+        payload = json.loads(diagnostic[0].payload_json)
+        assert payload["error_code"] == "unsafe_path"
+        assert payload["detail"].endswith("START-MP4-PLAYER.cmd")
     finally:
         journal.close()
