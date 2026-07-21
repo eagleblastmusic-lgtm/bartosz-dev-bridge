@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import subprocess
 from datetime import datetime, timezone
@@ -31,6 +33,29 @@ def git(repo: Path, *args: str) -> str:
     )
     assert completed.returncode == 0, completed.stderr
     return completed.stdout.strip()
+
+
+def digest(content: bytes) -> str:
+    return "sha256:" + hashlib.sha256(content).hexdigest()
+
+
+def valid_patch_payload(*, current: bytes = b"value = 1\n", replacement: bytes = b"value = 2\n") -> dict:
+    return {
+        "profile_id": "poc_pytest",
+        "patch": {
+            "schema": "bdb-multi-file-patch-v1",
+            "operations": [
+                {
+                    "schema": "bdb-file-replacement-v1",
+                    "kind": "replace_file",
+                    "path": "src/clamp.py",
+                    "expected_sha256": digest(current),
+                    "content_base64": base64.b64encode(replacement).decode("ascii"),
+                    "content_sha256": digest(replacement),
+                }
+            ],
+        },
+    }
 
 
 def setup(tmp_path: Path) -> tuple[Path, NativeActionComposer, str]:
@@ -103,7 +128,7 @@ def test_first_mutating_action_receives_initial_hash_and_trusted_scope(tmp_path:
             "sequence": 1,
             "operation": "multi_file_patch",
             "expected_revision": 0,
-            "payload": {"profile_id": "poc_pytest", "patches": []},
+            "payload": valid_patch_payload(),
         }
     )
 
@@ -135,7 +160,7 @@ def test_later_mutating_action_requires_previous_result_hash(tmp_path: Path) -> 
                 "sequence": 2,
                 "operation": "multi_file_patch",
                 "expected_revision": 0,
-                "payload": {"profile_id": "poc_pytest", "patches": []},
+                "payload": valid_patch_payload(),
             }
         )
     assert exc.value.code == "invalid_payload"
