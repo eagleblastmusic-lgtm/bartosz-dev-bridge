@@ -148,6 +148,9 @@ def test_content_script_restores_panel_when_chatgpt_removes_panel_but_keeps_code
               chrome: {
                 runtime: {
                   async sendMessage(message) {
+                    if (message.type === "BDB_CONTEXT") {
+                      return { ok: false, error: "no_project_launch" };
+                    }
                     assert.equal(message.type, "BDB_CONSIDER_AUTO");
                     sendCalls += 1;
                     return {
@@ -169,7 +172,8 @@ def test_content_script_restores_panel_when_chatgpt_removes_panel_but_keeps_code
               "content.js",
               "content_rerender.js",
               "content_auto_send.js",
-              "content_auto_retry.js"
+              "content_auto_retry.js",
+              "content_project_launcher.js"
             ]);
             for (const scriptName of scripts) {
               const scriptPath = path.join(extensionDir, scriptName);
