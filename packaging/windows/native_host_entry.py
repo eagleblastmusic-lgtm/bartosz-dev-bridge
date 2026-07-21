@@ -5,7 +5,8 @@ import re
 import sys
 from pathlib import Path
 
-from bdb_bridge.native_host import default_native_config_path, run_host
+from bdb_bridge.native_host import default_native_config_path
+from bdb_bridge.native_host_project_launcher import run_project_launcher_host
 from bdb_bridge.windows_stdio import resolve_native_binary_stdio
 
 
@@ -32,7 +33,7 @@ def main() -> None:
     )
     try:
         input_stream, output_stream = resolve_native_binary_stdio()
-        code = run_host(
+        code = run_project_launcher_host(
             config_path=config_path,
             origin=origin,
             input_stream=input_stream,
