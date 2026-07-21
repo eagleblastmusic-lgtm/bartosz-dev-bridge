@@ -14,6 +14,7 @@ on:
       - "tests/test_browser_conversation_tab_binding_runtime.py"
       - "tests/test_browser_repair_correlation_runtime.py"
       - "tests/test_current_chat_handoff_contract.py"
+      - "tests/test_native_action_preflight.py"
       - "tests/test_terminal_diagnostics.py"
       - "tests/test_session_projection_terminal_diagnostics.py"
       - "tests/test_gui_project_creator_service.py"
@@ -54,6 +55,7 @@ jobs:
           tests/test_browser_conversation_tab_binding_runtime.py
           tests/test_browser_repair_correlation_runtime.py
           tests/test_current_chat_handoff_contract.py
+          tests/test_native_action_preflight.py
           tests/test_terminal_diagnostics.py
           tests/test_session_projection_terminal_diagnostics.py
           tests/test_gui_project_creator_service.py
