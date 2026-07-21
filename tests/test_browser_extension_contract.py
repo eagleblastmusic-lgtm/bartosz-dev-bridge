@@ -26,6 +26,7 @@ def test_manifest_has_minimal_mv3_permissions() -> None:
         "content_auto_send.js",
         "content_auto_retry.js",
         "content_project_launcher.js",
+        "content_project_tab_binding.js",
         "content_repair_retry.js",
     ]
     serialized = json.dumps(manifest)
@@ -189,9 +190,14 @@ def test_auto_send_requires_confirmed_multi_strategy_submission() -> None:
 def test_project_creator_handoff_is_leased_local_and_confirmed() -> None:
     background = read("background_project_launcher.js")
     content = read("content_project_launcher.js")
+    tab_binding = read("content_project_tab_binding.js")
     assert 'action: "project_launch_peek"' in background
     assert '"project_launch_claim"' in background
     assert '"project_launch_ack"' in background
+    assert '"project_conversation_bind"' in background
+    assert "binding.tab_id === tabId" in read("background_conversation_binding.js")
+    assert 'operation: "project_conversation_bind"' in tab_binding
+    assert "conversation_id: conversationId" in tab_binding
     assert "sendNative(" in background
     assert "fetch(" not in background
     assert "XMLHttpRequest" not in background
