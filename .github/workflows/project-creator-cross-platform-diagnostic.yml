@@ -47,13 +47,14 @@ jobs:
           tests/test_browser_auto_loop_runtime.py
           tests/test_browser_auto_replay_recovery_runtime.py
           tests/test_browser_project_launcher_runtime.py
-      - name: Browser content runtimes
-        run: >-
-          python -m pytest -vv --tb=short
-          tests/test_browser_content_settle_reconciliation_runtime.py
-          tests/test_browser_content_rerender_runtime.py
-          tests/test_browser_auto_send_confirmation_runtime.py
-          tests/test_browser_auto_decision_retry_runtime.py
+      - name: Content settle reconciliation runtime
+        run: python -m pytest -vv --tb=short tests/test_browser_content_settle_reconciliation_runtime.py
+      - name: Content rerender runtime
+        run: python -m pytest -vv --tb=short tests/test_browser_content_rerender_runtime.py
+      - name: Content auto-send confirmation runtime
+        run: python -m pytest -vv --tb=short tests/test_browser_auto_send_confirmation_runtime.py
+      - name: Content AUTO decision retry runtime
+        run: python -m pytest -vv --tb=short tests/test_browser_auto_decision_retry_runtime.py
       - name: Native Host partition
         run: python -m pytest -vv --tb=short -k "native or windowless"
       - name: Remaining non-GUI partition
