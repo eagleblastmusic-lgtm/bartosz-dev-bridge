@@ -35,6 +35,18 @@ function bdbValidProjectLaunch(value) {
   );
 }
 
+function bdbProjectComposerEligible(marker) {
+  if (bdbUserMessageContains(marker)) {
+    return true;
+  }
+  const composer = findComposer();
+  if (!composer) {
+    return false;
+  }
+  const text = composerText(composer);
+  return text.includes(marker) || text.trim() === "";
+}
+
 async function bdbFetchProjectLaunch() {
   const result = await chrome.runtime.sendMessage({
     type: "BDB_CONTEXT",
@@ -110,6 +122,13 @@ async function bdbSubmitProjectLaunch(marker) {
 }
 
 async function bdbHandleProjectLaunch(candidate) {
+  const candidateMarker = bdbProjectLaunchMarker(candidate.launch_id);
+  // Tabs with an unrelated draft never acquire the cross-process claim. An
+  // empty tab or the tab already holding this exact marker may become owner.
+  if (!bdbProjectComposerEligible(candidateMarker)) {
+    return false;
+  }
+
   const ownership = await bdbClaimProjectLaunch(candidate);
   if (!ownership) {
     return false;
