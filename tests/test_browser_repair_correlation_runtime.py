@@ -177,6 +177,14 @@ def test_browser_repair_correlation_runtime(tmp_path: Path) -> None:
               return localStore.bdbRepairActionsV1["7:synthetic"];
             }
 
+            function peekAction() {
+              return {
+                schema: "bdb-action-v1",
+                operation: "repair_state_peek",
+                repo_alias: "synthetic"
+              };
+            }
+
             async function run() {
               const content = "print('ok')\n";
               await assert.rejects(
@@ -197,6 +205,15 @@ def test_browser_repair_correlation_runtime(tmp_path: Path) -> None:
                 role: "initial",
                 predecessor_session_id: null
               });
+
+              const ownPeek = await context.__submit(peekAction(), 7);
+              assert.equal(ownPeek.status, "repair_state");
+              assert.equal(ownPeek.key, "7:synthetic");
+              assert.equal(ownPeek.entry.tab_id, 7);
+              const foreignPeek = await context.__submit(peekAction(), 8);
+              assert.equal(foreignPeek.status, "repair_state_empty");
+              assert.equal(foreignPeek.entry, null);
+
               failedPreflight.awaiting_corrected_action = true;
 
               await context.__submit(action(content, await digest(content)), 7);
