@@ -61,8 +61,12 @@ jobs:
         run: python -m pytest -vv --tb=short tests/test_native_host_project_launcher.py
       - name: Validate Project Creator browser runtime
         run: python -m pytest -vv --tb=short tests/test_browser_project_launcher_runtime.py tests/test_browser_extension_contract.py
-      - name: Run full test suite
-        run: python -m pytest -q
+      - name: Run GUI and release tests
+        run: python -m pytest -q -k "gui or release"
+      - name: Run browser and Native Host tests
+        run: python -m pytest -q -k "browser or native or windowless"
+      - name: Run remaining core test suite
+        run: python -m pytest -q -k "not gui and not release and not browser and not native and not windowless"
 
   real-pilot:
     name: Windows / Python 3.14 / pinned kalkulator repair
