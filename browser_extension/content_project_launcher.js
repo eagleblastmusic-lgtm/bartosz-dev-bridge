@@ -187,5 +187,22 @@ async function bdbPollProjectLaunch() {
   }
 }
 
-bdbPollProjectLaunch();
-setInterval(bdbPollProjectLaunch, BDB_PROJECT_LAUNCH_POLL_MS);
+const bdbProjectRuntimeReady = Boolean(
+  typeof chrome === "object" &&
+  chrome.runtime &&
+  typeof chrome.runtime.sendMessage === "function"
+);
+if (bdbProjectRuntimeReady) {
+  void bdbPollProjectLaunch();
+  if (typeof setInterval === "function") {
+    const bdbProjectPollTimer = setInterval(
+      bdbPollProjectLaunch,
+      BDB_PROJECT_LAUNCH_POLL_MS
+    );
+    // Browser timers are numeric. Node-based contract harnesses expose unref(),
+    // so release the synthetic timer without changing browser behavior.
+    if (bdbProjectPollTimer && typeof bdbProjectPollTimer.unref === "function") {
+      bdbProjectPollTimer.unref();
+    }
+  }
+}
