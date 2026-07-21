@@ -47,7 +47,11 @@ class ProjectCreatorDialog(QDialog):
             "github_visibility": self.visibility_combo.currentData(),
             "prompt": self.prompt_edit.toPlainText(),
             "auto_send": self.auto_send_checkbox.isChecked(),
-            "allowed_paths": self.allowed_paths_edit.toPlainText().splitlines(),
+            "allowed_paths": [
+                line.strip()
+                for line in self.allowed_paths_edit.toPlainText().splitlines()
+                if line.strip()
+            ],
             "python_executable": self.python_edit.text(),
             "test_timeout_seconds": self.test_timeout_spin.value(),
             "arm_minutes": self.arm_minutes_spin.value(),
@@ -137,7 +141,8 @@ class ProjectCreatorDialog(QDialog):
 
         allowed_label = QLabel("Dozwolone ścieżki")
         allowed_label.setObjectName("ProjectCreatorAllowedLabel")
-        self.allowed_paths_edit = QTextEdit("\n".join(DEFAULT_ALLOWED_PATHS))
+        self.allowed_paths_edit = QTextEdit()
+        self.allowed_paths_edit.setPlainText("\n".join(DEFAULT_ALLOWED_PATHS))
         self.allowed_paths_edit.setObjectName("ProjectCreatorAllowedPaths")
         self.allowed_paths_edit.setMaximumHeight(120)
         layout.addWidget(allowed_label)
