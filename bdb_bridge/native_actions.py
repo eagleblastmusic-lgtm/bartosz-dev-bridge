@@ -15,6 +15,7 @@ from .local_spool_transport import LOCAL_ENVELOPE_SCHEMA
 from .protocol import (
     BridgeError,
     SCHEMA_VERSION,
+    path_matches,
     command_id_for,
     require_int,
     require_string,
@@ -23,7 +24,7 @@ from .protocol import (
 )
 from .repair_correlation import RepairCorrelation, parse_repair_correlation
 from .workspace_context import WorkspaceContextBuilder
-from .workspace_manager import Git
+from .workspace_manager import Git, changed_paths
 from .workspace_state import clean_workspace_state_hash
 
 
@@ -166,6 +167,7 @@ class NativeSessionStore:
 class RepositoryContext:
     base_sha: str
     source_clean: bool
+    session_clean: bool
     initial_state_hash: str | None
 
 
@@ -192,6 +194,7 @@ class NativeActionComposer:
             "repository_id": repository.bridge_config.repository_id,
             "base_sha": context.base_sha,
             "source_clean": context.source_clean,
+            "session_clean": context.session_clean,
             "initial_revision": 0,
             "initial_state_hash": context.initial_state_hash,
             "allowed_paths": list(repository.bridge_config.allowed_paths),
@@ -254,8 +257,11 @@ class NativeActionComposer:
                 correlation=parsed_correlation,
             )
             repository_context = self._repository_context(repository)
-            if not repository_context.source_clean or repository_context.initial_state_hash is None:
-                raise BridgeError("dirty_source_checkout", "Trusted repository checkout must be clean")
+            if not repository_context.session_clean or repository_context.initial_state_hash is None:
+                raise BridgeError(
+                    "dirty_source_checkout",
+                    "Trusted repository controlled paths must be clean",
+                )
             created_at = _utc_text(self.now_fn())
             session_record = self.session_store.bind(
                 NativeSessionRecord(
@@ -368,13 +374,29 @@ class NativeActionComposer:
         reader = GitObjectReader(repository.bridge_config.fixture_repo_path)
         reader.ensure_repository()
         base_sha = reader.resolve_commit("HEAD")
-        source_clean = not Git(repository.bridge_config.fixture_repo_path).run(
+        status = Git(repository.bridge_config.fixture_repo_path).run(
             ["status", "--porcelain=v1"]
-        ).stdout.strip()
+        ).stdout
+        source_changes = changed_paths(status)
+        source_clean = not source_changes
+
+        if repository.bridge_config.workspace_mode == "direct_checkout":
+            controlled_changes = [
+                path
+                for path in source_changes
+                if path_matches(path, repository.bridge_config.allowed_paths)
+            ]
+            session_clean = not controlled_changes
+        else:
+            # Backwards-compatible isolated worktree behavior remains fail-closed
+            # when any source path is dirty.
+            session_clean = source_clean
+
         return RepositoryContext(
             base_sha=base_sha,
             source_clean=source_clean,
-            initial_state_hash=clean_workspace_state_hash(base_sha) if source_clean else None,
+            session_clean=session_clean,
+            initial_state_hash=clean_workspace_state_hash(base_sha) if session_clean else None,
         )
 
     def _repository(self, alias: str) -> RepositoryAlias:

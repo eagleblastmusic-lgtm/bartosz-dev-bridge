@@ -281,11 +281,67 @@ if ($Action -eq "Status") {
         "-C", [string]$state.source_repo,
         "rev-parse", "HEAD"
     )
+
+    $configDocument = Get-Content -LiteralPath $bridgeConfig -Raw | ConvertFrom-Json
+    $sourceChangedPaths = @(
+        foreach ($line in ($sourceStatus -split "`r?`n")) {
+            if ([string]::IsNullOrWhiteSpace($line) -or $line.Length -lt 4) {
+                continue
+            }
+            $value = $line.Substring(3).Replace("\", "/")
+            if ($value.Contains(" -> ")) {
+                $value = $value.Split(@(" -> "), 2, [System.StringSplitOptions]::None)[1]
+            }
+            $value
+        }
+    )
+
+    function Test-AllowedStatusPath {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$Path,
+            [Parameter(Mandatory = $true)]
+            [object[]]$Patterns
+        )
+
+        foreach ($rawPattern in $Patterns) {
+            $pattern = ([string]$rawPattern).Replace("\", "/")
+            if ($pattern.EndsWith("/**", [System.StringComparison]::Ordinal)) {
+                $prefix = $pattern.Substring(0, $pattern.Length - 3)
+                if (
+                    $Path -eq $prefix -or
+                    $Path.StartsWith("$prefix/", [System.StringComparison]::Ordinal)
+                ) {
+                    return $true
+                }
+            }
+            elseif ($Path -eq $pattern) {
+                return $true
+            }
+        }
+        return $false
+    }
+
+    $sourceClean = $sourceChangedPaths.Count -eq 0
+    if ([string]$configDocument.workspace_mode -eq "direct_checkout") {
+        $controlledChanges = @(
+            $sourceChangedPaths |
+                Where-Object {
+                    Test-AllowedStatusPath -Path $_ -Patterns @($configDocument.allowed_paths)
+                }
+        )
+        $controlledClean = $controlledChanges.Count -eq 0
+    }
+    else {
+        $controlledChanges = @($sourceChangedPaths)
+        $controlledClean = $sourceClean
+    }
+
     $ready = (
         $bridge.status -eq "RUNNING" -and
         $native.armed -eq $true -and
         $promoter.running -eq $true -and
-        [string]::IsNullOrWhiteSpace($sourceStatus)
+        $controlledClean
     )
     [ordered]@{
         status = if ($ready) { "READY" } else { "NOT_READY" }
@@ -294,7 +350,13 @@ if ($Action -eq "Status") {
         native_host = $native
         promoter = $promoter
         source_head = $sourceHead
-        source_clean = [string]::IsNullOrWhiteSpace($sourceStatus)
+        source_clean = $sourceClean
+        controlled_clean = $controlledClean
+        controlled_changes = @($controlledChanges)
+        source_changes_outside_scope = @(
+            $sourceChangedPaths |
+                Where-Object { $_ -notin $controlledChanges }
+        ).Count
     } | ConvertTo-Json -Depth 10
     exit 0
 }

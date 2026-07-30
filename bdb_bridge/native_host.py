@@ -44,6 +44,7 @@ _SAFE_CLIENT_ERROR_CODES = frozenset(
         "unsupported_schema",
         "policy_denied",
         "journal_conflict",
+        "dirty_source_checkout",
         "unsafe_path",
         "result_too_large",
     }
