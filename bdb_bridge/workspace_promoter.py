@@ -252,10 +252,21 @@ class WorkspacePromoter:
 
         source_status = self.source_git.run(["status", "--porcelain=v1"]).stdout
         source_changes = changed_paths(source_status)
-        if sorted(source_changes) != list(changed):
+        controlled_changes = sorted(
+            path
+            for path in source_changes
+            if path_matches(path, self.config.allowed_paths)
+        )
+        foreign_before = sorted(
+            path
+            for path in source_changes
+            if not path_matches(path, self.config.allowed_paths)
+        )
+        if controlled_changes != list(changed):
             raise BridgeError(
                 "manual_reconciliation_required",
-                f"Direct checkout changes differ from durable result: {source_changes[:20]}",
+                "Direct checkout controlled changes differ from durable result: "
+                f"{controlled_changes[:20]}",
             )
 
         self.source_git.run(["diff", "--check", "--", *changed])
@@ -290,10 +301,26 @@ class WorkspacePromoter:
             )
 
         final_status = self.source_git.run(["status", "--porcelain=v1"]).stdout
-        if final_status.strip():
+        final_changes = changed_paths(final_status)
+        controlled_after = sorted(
+            path
+            for path in final_changes
+            if path_matches(path, self.config.allowed_paths)
+        )
+        foreign_after = sorted(
+            path
+            for path in final_changes
+            if not path_matches(path, self.config.allowed_paths)
+        )
+        if controlled_after:
             raise BridgeError(
                 "manual_reconciliation_required",
-                "Direct checkout is not clean after commit",
+                f"Direct checkout still has controlled changes after commit: {controlled_after[:20]}",
+            )
+        if foreign_after != foreign_before:
+            raise BridgeError(
+                "manual_reconciliation_required",
+                "Unrelated local changes changed during direct checkout promotion",
             )
 
         file_hashes: dict[str, str | None] = {}
@@ -312,6 +339,7 @@ class WorkspacePromoter:
             "source_commit": commit_sha,
             "parent_commit": parent_sha,
             "changed_files": list(changed),
+            "preserved_foreign_paths": foreign_after,
             "file_sha256": file_hashes,
             "promoted_at": _utc_now(),
         }

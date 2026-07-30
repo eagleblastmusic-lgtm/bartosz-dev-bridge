@@ -40,7 +40,8 @@ def setup_direct(tmp_path: Path) -> tuple[BridgeConfig, Path, str]:
     git(source, "config", "user.name", "Direct Checkout Test")
     git(source, "config", "user.email", "direct-checkout@example.invalid")
     (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8", newline="\n")
-    git(source, "add", "--", "app.py")
+    (source / "notes.txt").write_text("private notes\n", encoding="utf-8", newline="\n")
+    git(source, "add", "--", "app.py", "notes.txt")
     git(source, "commit", "-m", "baseline")
     base_sha = git(source, "rev-parse", "HEAD")
     config = BridgeConfig(
@@ -95,6 +96,35 @@ def test_direct_checkout_registers_source_without_creating_worktree(tmp_path: Pa
     assert git(source, "status", "--porcelain=v1") == ""
 
 
+def test_direct_checkout_allows_unrelated_dirty_paths(tmp_path: Path) -> None:
+    config, source, base_sha = setup_direct(tmp_path)
+    (source / "notes.txt").write_text("local private edit\n", encoding="utf-8", newline="\n")
+
+    with Journal.open(config.journal_path) as journal:
+        journal.create_session(SESSION, config.repository_id, base_sha)
+        manager = WorkspaceManager(config, SESSION, base_sha, ["app.py"])
+        record = manager.ensure_workspace(journal)
+
+    assert Path(record.workspace_path) == source
+    assert manager.controlled_changed_paths() == []
+    assert manager.unauthorized_changed_paths() == ["notes.txt"]
+    assert git(source, "status", "--porcelain=v1") == "M notes.txt"
+
+
+def test_direct_checkout_rejects_preexisting_controlled_change(tmp_path: Path) -> None:
+    config, source, base_sha = setup_direct(tmp_path)
+    (source / "app.py").write_text("VALUE = 99\n", encoding="utf-8", newline="\n")
+
+    with Journal.open(config.journal_path) as journal:
+        journal.create_session(SESSION, config.repository_id, base_sha)
+        manager = WorkspaceManager(config, SESSION, base_sha, ["app.py"])
+        with pytest.raises(BridgeError) as exc:
+            manager.ensure_workspace(journal)
+
+    assert exc.value.code == "dirty_source_checkout"
+    assert "app.py" in str(exc.value)
+
+
 def test_direct_checkout_promoter_commits_in_place(tmp_path: Path) -> None:
     config, source, base_sha = setup_direct(tmp_path)
     with Journal.open(config.journal_path) as journal:
@@ -115,6 +145,28 @@ def test_direct_checkout_promoter_commits_in_place(tmp_path: Path) -> None:
     receipt = json.loads(outcome.receipt_path.read_text(encoding="utf-8"))
     assert receipt["workspace_mode"] == "direct_checkout"
     assert receipt["parent_commit"] == base_sha
+    assert receipt["preserved_foreign_paths"] == []
+
+
+def test_direct_checkout_promoter_preserves_unrelated_dirty_paths(tmp_path: Path) -> None:
+    config, source, base_sha = setup_direct(tmp_path)
+    with Journal.open(config.journal_path) as journal:
+        journal.create_session(SESSION, config.repository_id, base_sha)
+
+    (source / "notes.txt").write_text("keep my local edit\n", encoding="utf-8", newline="\n")
+    (source / "app.py").write_text("VALUE = 2\n", encoding="utf-8", newline="\n")
+
+    outcome = WorkspacePromoter(config).promote_file(result_path(config))
+
+    assert outcome.status == "promoted"
+    assert git(source, "rev-parse", "HEAD^") == base_sha
+    assert (source / "app.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert (source / "notes.txt").read_text(encoding="utf-8") == "keep my local edit\n"
+    assert git(source, "status", "--porcelain=v1") == "M notes.txt"
+    assert git(source, "show", "--name-only", "--format=", "HEAD").splitlines() == ["app.py"]
+
+    receipt = json.loads(outcome.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["preserved_foreign_paths"] == ["notes.txt"]
 
 
 def test_unknown_workspace_mode_is_rejected(tmp_path: Path) -> None:

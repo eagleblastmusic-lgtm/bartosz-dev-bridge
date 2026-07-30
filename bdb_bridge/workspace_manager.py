@@ -140,6 +140,10 @@ class WorkspaceManager:
     def list_changed_paths(self) -> list[str]:
         return changed_paths(self.git.run(["status", "--porcelain=v1"]).stdout)
 
+    def controlled_changed_paths(self) -> list[str]:
+        # Dirty paths that belong to the Bridge-controlled allowlist.
+        return [path for path in self.list_changed_paths() if self.is_allowed_path(path)]
+
     def unauthorized_changed_paths(self, *, expected_temp: Path | None = None) -> list[str]:
         allowed_temp: str | None = None
         if expected_temp is not None:
@@ -262,10 +266,11 @@ class WorkspaceManager:
         self._assert_expected_path()
         if not self.path.joinpath(".git").exists():
             raise BridgeError(BridgeErrorCode.INVALID_FIXTURE_REPO, "Fixture repository is not initialized")
-        if not self.is_source_git_clean():
+        controlled = self.controlled_changed_paths()
+        if controlled:
             raise BridgeError(
                 BridgeErrorCode.DIRTY_SOURCE_CHECKOUT,
-                "Direct checkout must be clean before a new command",
+                f"Direct checkout already has changes in controlled paths: {controlled[:20]}",
             )
         verify = self.source_git.run(["cat-file", "-e", f"{self.base_sha}^{{commit}}"], check=False)
         if verify.returncode != 0:
@@ -362,13 +367,22 @@ class WorkspaceManager:
             raise BridgeError(BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED, "Physical workspace is missing")
         if self.direct_checkout:
             self._verify_direct_checkout_registration()
+            controlled = self.controlled_changed_paths()
+            if controlled:
+                raise BridgeError(
+                    BridgeErrorCode.DIRTY_SOURCE_CHECKOUT,
+                    f"Direct checkout already has changes in controlled paths: {controlled[:20]}",
+                )
         else:
             self._verify_worktree_registration()
-        if not self.is_source_git_clean():
-            raise BridgeError(BridgeErrorCode.DIRTY_SOURCE_CHECKOUT, "Source checkout is dirty")
-        foreign = self.unauthorized_changed_paths()
-        if foreign:
-            raise BridgeError(BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED, f"Unauthorized workspace paths: {foreign[:20]}")
+            if not self.is_source_git_clean():
+                raise BridgeError(BridgeErrorCode.DIRTY_SOURCE_CHECKOUT, "Source checkout is dirty")
+            foreign = self.unauthorized_changed_paths()
+            if foreign:
+                raise BridgeError(
+                    BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
+                    f"Unauthorized workspace paths: {foreign[:20]}",
+                )
         actual = self.compute_state_hash()
         if actual != record.state_hash:
             raise BridgeError(BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED, "Physical workspace state differs from journal before plan")
