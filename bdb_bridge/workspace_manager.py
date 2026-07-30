@@ -70,9 +70,11 @@ class WorkspaceManager:
         self.config = config
         self.session_id = session_id
         self.base_sha = validate_base_sha(base_sha)
-        self.source_git = Git(Path(config.fixture_repo_path))
+        self.source_path = Path(config.fixture_repo_path).expanduser().resolve(strict=False)
+        self.source_git = Git(self.source_path)
         self.root = Path(config.worktree_root).expanduser().resolve(strict=False)
-        self.path = self.root / session_id
+        self.direct_checkout = getattr(config, "workspace_mode", "isolated_worktree") == "direct_checkout"
+        self.path = self.source_path if self.direct_checkout else self.root / session_id
         self.manifest_paths = tuple(manifest_paths)
         self._assert_expected_path()
 
@@ -81,6 +83,14 @@ class WorkspaceManager:
         return Git(self.path)
 
     def _assert_expected_path(self) -> None:
+        if self.direct_checkout:
+            if self.path != self.source_path:
+                raise BridgeError(
+                    BridgeErrorCode.UNSAFE_WORKTREE_PATH,
+                    "Direct checkout path differs from the configured source checkout",
+                )
+            self._assert_no_reparse_escape(self.path)
+            return
         expected = self.root / self.session_id
         if self.path != expected or self.path.parent != self.root:
             raise BridgeError(BridgeErrorCode.UNSAFE_WORKTREE_PATH, "Workspace path is not exact <root>/<session_id>")
@@ -201,6 +211,32 @@ class WorkspaceManager:
                 current[key] = value
         return entries
 
+    def _verify_direct_checkout_registration(self) -> None:
+        expected = self.source_path.resolve(strict=True)
+        actual = self.path.resolve(strict=True)
+        if actual != expected or self.path.is_symlink() or not self.path.is_dir():
+            raise BridgeError(
+                BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
+                "Direct checkout identity differs from the configured source repository",
+            )
+        if not self.path.joinpath(".git").exists():
+            raise BridgeError(
+                BridgeErrorCode.INVALID_FIXTURE_REPO,
+                "Direct checkout is not an initialized Git repository",
+            )
+        branch = self.git.run(["symbolic-ref", "-q", "--short", "HEAD"], check=False)
+        if branch.returncode != 0 or not branch.stdout.strip():
+            raise BridgeError(
+                BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
+                "Direct checkout HEAD must be attached to a local branch",
+            )
+        head = self.git.run(["rev-parse", "HEAD"]).stdout.strip().lower()
+        if head != self.base_sha:
+            raise BridgeError(
+                BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
+                "Direct checkout HEAD does not match exact base SHA",
+            )
+
     def _verify_worktree_registration(self) -> None:
         expected = self.path.resolve(strict=False)
         matching = []
@@ -222,7 +258,50 @@ class WorkspaceManager:
         if symbolic.returncode == 0:
             raise BridgeError(BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED, "Workspace HEAD is attached to a branch")
 
+    def _ensure_direct_checkout(self, journal: Any) -> WorkspaceRecord:
+        self._assert_expected_path()
+        if not self.path.joinpath(".git").exists():
+            raise BridgeError(BridgeErrorCode.INVALID_FIXTURE_REPO, "Fixture repository is not initialized")
+        if not self.is_source_git_clean():
+            raise BridgeError(
+                BridgeErrorCode.DIRTY_SOURCE_CHECKOUT,
+                "Direct checkout must be clean before a new command",
+            )
+        verify = self.source_git.run(["cat-file", "-e", f"{self.base_sha}^{{commit}}"], check=False)
+        if verify.returncode != 0:
+            raise BridgeError(BridgeErrorCode.UNKNOWN_BASE_SHA, "Manifest base_sha is unavailable locally")
+        self._verify_direct_checkout_registration()
+        existing = journal.get_workspace(self.session_id)
+        if existing is not None:
+            if Path(existing.workspace_path) != self.path:
+                raise BridgeError(
+                    BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
+                    "Stored direct checkout path differs from the configured source checkout",
+                )
+            if existing.base_sha.lower() != self.base_sha:
+                raise BridgeError(
+                    BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
+                    "Stored direct checkout base SHA differs from session base SHA",
+                )
+            actual = self.compute_state_hash()
+            if actual != existing.state_hash:
+                raise BridgeError(
+                    BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
+                    "Direct checkout state differs from the Journal before execution",
+                )
+            return existing
+        state_hash = self.compute_state_hash()
+        return journal.register_workspace(
+            session_id=self.session_id,
+            workspace_path=str(self.path),
+            base_sha=self.base_sha,
+            revision=0,
+            state_hash=state_hash,
+        )
+
     def ensure_workspace(self, journal: Any) -> WorkspaceRecord:
+        if self.direct_checkout:
+            return self._ensure_direct_checkout(journal)
         self._assert_expected_path()
         if not Path(self.config.fixture_repo_path).joinpath(".git").exists():
             raise BridgeError(BridgeErrorCode.INVALID_FIXTURE_REPO, "Fixture repository is not initialized")
@@ -281,7 +360,10 @@ class WorkspaceManager:
             raise BridgeError(BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED, "Workspace registration identity mismatch")
         if not self.path.is_dir():
             raise BridgeError(BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED, "Physical workspace is missing")
-        self._verify_worktree_registration()
+        if self.direct_checkout:
+            self._verify_direct_checkout_registration()
+        else:
+            self._verify_worktree_registration()
         if not self.is_source_git_clean():
             raise BridgeError(BridgeErrorCode.DIRTY_SOURCE_CHECKOUT, "Source checkout is dirty")
         foreign = self.unauthorized_changed_paths()

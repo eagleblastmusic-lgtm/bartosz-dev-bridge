@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .config import BridgeConfig
+from .journal import Journal
 from .protocol import BridgeError, path_matches, validate_repo_relative_path, validate_session_id
 from .workspace_manager import Git, changed_paths
 
@@ -108,6 +109,16 @@ class WorkspacePromoter:
         if receipt.exists():
             return self._read_existing_receipt(receipt, session_id, sequence, changed)
 
+        if self.config.workspace_mode == "direct_checkout":
+            return self._promote_direct_checkout(
+                document,
+                data,
+                session_id,
+                sequence,
+                changed,
+                receipt,
+            )
+
         worktree = self._worktree_path(session_id)
         worktree_git = Git(worktree)
         self._verify_registered_worktree(worktree, worktree_git)
@@ -205,6 +216,99 @@ class WorkspacePromoter:
             "sequence": sequence,
             "command_id": document.get("command_id"),
             "result_sha256": _sha256(data),
+            "source_commit": commit_sha,
+            "parent_commit": parent_sha,
+            "changed_files": list(changed),
+            "file_sha256": file_hashes,
+            "promoted_at": _utc_now(),
+        }
+        _atomic_json(receipt, receipt_document)
+        return PromotionOutcome("promoted", session_id, sequence, commit_sha, receipt, changed)
+
+    def _promote_direct_checkout(
+        self,
+        document: dict[str, Any],
+        result_bytes: bytes,
+        session_id: str,
+        sequence: int,
+        changed: tuple[str, ...],
+        receipt: Path,
+    ) -> PromotionOutcome:
+        self._verify_source_branch()
+        with Journal.open(self.config.journal_path) as journal:
+            session = journal.get_session(session_id)
+        if session is None:
+            raise BridgeError(
+                "manual_reconciliation_required",
+                "Direct checkout promotion has no durable session record",
+            )
+
+        source_head = self.source_git.run(["rev-parse", "HEAD"]).stdout.strip().lower()
+        if source_head != session.base_sha.lower():
+            raise BridgeError(
+                "manual_reconciliation_required",
+                "Direct checkout HEAD no longer matches the session base SHA",
+            )
+
+        source_status = self.source_git.run(["status", "--porcelain=v1"]).stdout
+        source_changes = changed_paths(source_status)
+        if sorted(source_changes) != list(changed):
+            raise BridgeError(
+                "manual_reconciliation_required",
+                f"Direct checkout changes differ from durable result: {source_changes[:20]}",
+            )
+
+        self.source_git.run(["diff", "--check", "--", *changed])
+        self.source_git.run(["add", "-A", "--", *changed])
+        staged = self.source_git.run(["diff", "--cached", "--name-only"]).stdout.splitlines()
+        staged = sorted(value.replace("\\", "/") for value in staged if value)
+        if staged != list(changed):
+            raise BridgeError(
+                "manual_reconciliation_required",
+                f"Direct checkout staged paths differ from durable result: {staged[:20]}",
+            )
+
+        command_id = str(document.get("command_id") or f"{session_id}:{sequence:06d}")
+        self.source_git.run(
+            [
+                "-c",
+                f"user.name={self.commit_name}",
+                "-c",
+                f"user.email={self.commit_email}",
+                "commit",
+                "--no-gpg-sign",
+                "-m",
+                f"bdb: direct checkout {command_id}",
+            ]
+        )
+        commit_sha = self.source_git.run(["rev-parse", "HEAD"]).stdout.strip().lower()
+        parent_sha = self._single_parent(self.source_git, commit_sha)
+        if parent_sha != source_head:
+            raise BridgeError(
+                "manual_reconciliation_required",
+                "Direct checkout commit parent differs from the session base SHA",
+            )
+
+        final_status = self.source_git.run(["status", "--porcelain=v1"]).stdout
+        if final_status.strip():
+            raise BridgeError(
+                "manual_reconciliation_required",
+                "Direct checkout is not clean after commit",
+            )
+
+        file_hashes: dict[str, str | None] = {}
+        for relative in changed:
+            target = self._source_path(relative)
+            file_hashes[relative] = _sha256(target.read_bytes()) if target.is_file() else None
+
+        receipt_document = {
+            "schema": PROMOTION_RECEIPT_SCHEMA,
+            "status": "promoted",
+            "workspace_mode": "direct_checkout",
+            "session_id": session_id,
+            "sequence": sequence,
+            "command_id": document.get("command_id"),
+            "result_sha256": _sha256(result_bytes),
             "source_commit": commit_sha,
             "parent_commit": parent_sha,
             "changed_files": list(changed),

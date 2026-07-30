@@ -30,6 +30,7 @@ class BridgeConfig:
     direct_spool_enabled: bool = True
     direct_spool_dir: Path | None = None
     direct_result_dir: Path | None = None
+    workspace_mode: str = "isolated_worktree"
 
     def __post_init__(self) -> None:
         c_repo = Path(self.control_repo_path).expanduser().resolve(strict=False)
@@ -65,6 +66,12 @@ class BridgeConfig:
             result_dir = r_dir / "direct_spool" / "results"
         result_dir = Path(result_dir).expanduser().resolve(strict=False)
         object.__setattr__(self, "direct_result_dir", result_dir)
+
+        if self.workspace_mode not in {"isolated_worktree", "direct_checkout"}:
+            raise BridgeError(
+                "invalid_config",
+                "workspace_mode must be isolated_worktree or direct_checkout",
+            )
 
         for name, val in [
             ("poll_interval_seconds", self.poll_interval_seconds),
@@ -160,4 +167,5 @@ class BridgeConfig:
             direct_spool_enabled=direct_spool_enabled,
             direct_spool_dir=direct_spool_dir,
             direct_result_dir=direct_result_dir,
+            workspace_mode=str(raw.get("workspace_mode") or "isolated_worktree"),
         )
