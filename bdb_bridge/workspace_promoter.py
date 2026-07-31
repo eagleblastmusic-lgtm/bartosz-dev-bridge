@@ -357,17 +357,50 @@ class WorkspacePromoter:
         if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence != 1:
             raise BridgeError("policy_denied", "Automatic promotion requires a fresh sequence-1 session")
         data = document.get("data")
-        if not isinstance(data, dict):
-            raise BridgeError("invalid_payload", "Promotion result has no data object")
-        operation = data.get("operation")
+        revision_before = document.get("workspace_revision_before")
+        revision_after = document.get("workspace_revision_after")
+        changed_hint = document.get("changed_files")
+
+        legacy_exact_result = (
+            data is None
+            and document.get("executor_version") == "0.5.0-ghb0"
+            and document.get("summary") in {
+                "Command effect recorded",
+                "Idempotent effect replay",
+                "Recovered PLANNED-AFTER effect",
+            }
+            and isinstance(revision_before, int)
+            and not isinstance(revision_before, bool)
+            and revision_after == revision_before + 1
+            and isinstance(changed_hint, list)
+            and len(changed_hint) == 1
+            and isinstance(changed_hint[0], str)
+            and isinstance(document.get("diff"), str)
+            and bool(document.get("diff"))
+        )
+
+        if isinstance(data, dict):
+            operation = data.get("operation")
+            rollback_performed = data.get("rollback_performed")
+            checkpoint_state = data.get("checkpoint_state")
+        elif legacy_exact_result:
+            operation = "replace_exact_and_test"
+            rollback_performed = False
+            checkpoint_state = None
+        else:
+            raise BridgeError(
+                "invalid_payload",
+                "Promotion result has neither valid data nor legacy exact-result evidence",
+            )
+
         if operation == "multi_file_patch":
-            if data.get("checkpoint_state") != "committed" or data.get("rollback_performed") is not False:
+            if checkpoint_state != "committed" or rollback_performed is not False:
                 raise BridgeError(
                     "policy_denied",
                     "Promotion requires a committed checkpoint without rollback",
                 )
         elif operation == "replace_exact_and_test":
-            if data.get("rollback_performed") is not False:
+            if rollback_performed is not False:
                 raise BridgeError(
                     "policy_denied",
                     "Exact replacement promotion requires completion without rollback",

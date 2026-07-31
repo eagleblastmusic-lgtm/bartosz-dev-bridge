@@ -124,3 +124,35 @@ def test_promoter_rejects_exact_replace_with_rollback() -> None:
 
     with pytest.raises(BridgeError):
         promoter._validate_result(document)
+
+
+def test_promoter_accepts_legacy_exact_result_without_data() -> None:
+    promoter_type = _promoter_type()
+    promoter = object.__new__(promoter_type)
+    promoter.config = SimpleNamespace(
+        allowed_paths=("templates/**",),
+    )
+
+    session_id = str(uuid.uuid4())
+    document = {
+        "status": "success",
+        "exit_code": 0,
+        "session_id": session_id,
+        "sequence": 1,
+        "executor_version": "0.5.0-ghb0",
+        "summary": "Command effect recorded",
+        "workspace_revision_before": 0,
+        "workspace_revision_after": 1,
+        "diff": "diff --git a/templates/example.json b/templates/example.json",
+        "changed_files": [
+            "templates/page.filozofia-marki.json",
+        ],
+    }
+
+    result = promoter._validate_result(document)
+
+    assert result == (
+        session_id,
+        1,
+        ("templates/page.filozofia-marki.json",),
+    )
