@@ -91,6 +91,53 @@ function Get-WorkspaceState {
     return $state
 }
 
+function ConvertTo-UtcDateTimeOffset {
+    param(
+        [Parameter(Mandatory = $true)][object]$Value,
+        [Parameter(Mandatory = $true)][string]$FieldName
+    )
+
+    if ($Value -is [DateTimeOffset]) {
+        return ([DateTimeOffset]$Value).ToUniversalTime()
+    }
+
+    if ($Value -is [DateTime]) {
+        $date = [DateTime]$Value
+
+        if ($date.Kind -eq [DateTimeKind]::Utc) {
+            return [DateTimeOffset]::new($date)
+        }
+
+        if ($date.Kind -eq [DateTimeKind]::Local) {
+            return ([DateTimeOffset]::new($date)).ToUniversalTime()
+        }
+
+        $utc = [DateTime]::SpecifyKind($date, [DateTimeKind]::Utc)
+        return [DateTimeOffset]::new($utc)
+    }
+
+    $text = [string]$Value
+    $parsed = [DateTimeOffset]::MinValue
+    $styles = (
+        [Globalization.DateTimeStyles]::AllowWhiteSpaces -bor
+        [Globalization.DateTimeStyles]::AssumeUniversal -bor
+        [Globalization.DateTimeStyles]::AdjustToUniversal
+    )
+
+    if (
+        [DateTimeOffset]::TryParse(
+            $text,
+            [Globalization.CultureInfo]::InvariantCulture,
+            $styles,
+            [ref]$parsed
+        )
+    ) {
+        return $parsed.ToUniversalTime()
+    }
+
+    throw "Nieprawidłowy znacznik czasu w polu ${FieldName}: $text"
+}
+
 function Get-LoopStatus {
     $raw = & $LoopScript -Action Status -Root $Root | Out-String
     if ($LASTEXITCODE -ne 0) {
@@ -497,7 +544,7 @@ switch ($Action) {
 
             $bridgeInstanceId = [string]$loop.bridge.instance_id
             $ownedGenerationId = [string]$loop.native_host.generation_id
-            $lastArmedUntil = [DateTimeOffset]::Parse([string]$loop.native_host.armed_until)
+            $lastArmedUntil = ConvertTo-UtcDateTimeOffset -Value $loop.native_host.armed_until -FieldName "loop.native_host.armed_until"
 
             $activity = Get-LatestRuntimeActivityUtc
             if ($null -ne $activity -and $activity -gt $lastActivityUtc) {
@@ -589,7 +636,7 @@ switch ($Action) {
                 $remainingMinutes = -1.0
 
                 if ($native.armed -eq $true -and $native.armed_until) {
-                    $armedUntil = [DateTimeOffset]::Parse([string]$native.armed_until)
+                    $armedUntil = ConvertTo-UtcDateTimeOffset -Value $native.armed_until -FieldName "native.armed_until"
                     $remainingMinutes = (
                         $armedUntil.UtcDateTime - $now
                     ).TotalMinutes
@@ -615,9 +662,9 @@ switch ($Action) {
                 if ($normalRenew -or $emergencyRenew) {
                     $arm = Invoke-Arm -Python $python -NativeConfig $nativeConfig
                     $ownedGenerationId = [string]$arm.generation_id
-                    $lastArmedUntil = [DateTimeOffset]::Parse(
-                        [string]$arm.armed_until
-                    )
+                    $lastArmedUntil = ConvertTo-UtcDateTimeOffset `
+                        -Value $arm.armed_until `
+                        -FieldName "arm.armed_until"
                     $renewCount += 1
 
                     Write-KeeperLog -Message (

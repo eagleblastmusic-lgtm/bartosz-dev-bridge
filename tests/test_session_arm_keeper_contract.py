@@ -55,3 +55,15 @@ def test_session_launcher_stays_local_and_assisted() -> None:
     assert "Invoke-BDBSessionArmKeeper.ps1" in source
     assert "gh " not in source
     assert "git push" not in source
+
+def test_keeper_parses_json_dates_without_current_culture_roundtrip() -> None:
+    source = KEEPER.read_text(encoding="utf-8")
+    assert "function ConvertTo-UtcDateTimeOffset" in source
+    assert "$Value -is [DateTimeOffset]" in source
+    assert "$Value -is [DateTime]" in source
+    assert "[Globalization.CultureInfo]::InvariantCulture" in source
+    assert "[Globalization.DateTimeStyles]::AdjustToUniversal" in source
+    assert "ConvertTo-UtcDateTimeOffset -Value $loop.native_host.armed_until" in source
+    assert "ConvertTo-UtcDateTimeOffset -Value $native.armed_until" in source
+    assert "-Value $arm.armed_until" in source
+    assert "[DateTimeOffset]::Parse([string]" not in source
