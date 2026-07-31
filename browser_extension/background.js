@@ -6,7 +6,7 @@ const ACTION_SCHEMA = "bdb-action-v1";
 const WORKSPACE_CONTEXT_OPERATION = "workspace_context";
 const MAX_SERIALIZED_BYTES = 1024 * 1024;
 const DEFAULT_WAIT_SECONDS = 30;
-const PROMOTION_WAIT_ATTEMPTS = 60;
+const PROMOTION_WAIT_ATTEMPTS = 300;
 const PROMOTION_WAIT_MILLISECONDS = 100;
 const DEFAULT_AUTO_SETTINGS = Object.freeze({
   autoEnabled: false,

@@ -51,3 +51,38 @@ def test_required_promotion_accepts_exact_replacement_results() -> None:
     assert '"Command effect recorded"' in source
     assert "receipt.command_id === commandId" in source
     assert "context.source_clean === true" in source
+
+
+
+def test_required_promotion_wait_budget_is_at_least_30_seconds() -> None:
+    source = (
+        EXTENSION / "background.js"
+    ).read_text(encoding="utf-8")
+
+    attempts_match = re.search(
+        r"const PROMOTION_WAIT_ATTEMPTS = ([0-9]+);",
+        source,
+    )
+
+    milliseconds_match = re.search(
+        r"const PROMOTION_WAIT_MILLISECONDS = ([0-9]+);",
+        source,
+    )
+
+    assert attempts_match is not None
+    assert milliseconds_match is not None
+
+    attempts = int(attempts_match.group(1))
+    milliseconds = int(milliseconds_match.group(1))
+
+    assert attempts * milliseconds >= 30_000
+
+    assert (
+        "attempt < PROMOTION_WAIT_ATTEMPTS"
+        in source
+    )
+
+    assert (
+        "await sleep(PROMOTION_WAIT_MILLISECONDS);"
+        in source
+    )
