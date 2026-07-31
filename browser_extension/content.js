@@ -31,6 +31,237 @@ function compactAction(action) {
 }
 
 
+const BDB_ASSISTED_POLL_ATTEMPTS = 120;
+const BDB_ASSISTED_POLL_DELAY_MS = 500;
+
+function bdbAssistedSleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function bdbAssistedResponsePending(response) {
+  return Boolean(
+    response &&
+    (response.status === "accepted" || response.status === "pending")
+  );
+}
+
+function bdbAssistedCommandId(response) {
+  if (response && typeof response.command_id === "string") {
+    return response.command_id;
+  }
+  const result = response && response.result;
+  return result && typeof result.command_id === "string"
+    ? result.command_id
+    : null;
+}
+
+function bdbAssistedActionIdentity(action) {
+  return JSON.stringify(action);
+}
+
+function bdbAssistedViews(actionIdentity) {
+  const views = [];
+  if (typeof actionIdentity !== "string" || actionIdentity.length === 0) {
+    return views;
+  }
+
+  for (const block of document.querySelectorAll("pre code, code")) {
+    if (!(block instanceof HTMLElement)) {
+      continue;
+    }
+    const current = parseAction(block);
+    if (!current || bdbAssistedActionIdentity(current) !== actionIdentity) {
+      continue;
+    }
+    const host = block.closest("pre") || block.parentElement;
+    if (!(host instanceof HTMLElement)) {
+      continue;
+    }
+    const panel = host.querySelector(":scope > .bdb-assisted");
+    if (!(panel instanceof HTMLElement)) {
+      continue;
+    }
+    const viewButton = panel.querySelector(".bdb-execute");
+    const viewOutput = panel.querySelector(".bdb-output");
+    if (!(viewButton instanceof HTMLElement)) {
+      continue;
+    }
+    views.push({
+      button: viewButton,
+      output: viewOutput instanceof HTMLElement ? viewOutput : null
+    });
+  }
+
+  return views;
+}
+
+function bdbApplyAssistedViews(
+  actionIdentity,
+  callback,
+  fallbackButton = null,
+  fallbackOutput = null
+) {
+  const views = bdbAssistedViews(actionIdentity);
+  if (views.length > 0) {
+    for (const view of views) {
+      callback(view);
+    }
+    return;
+  }
+
+  if (fallbackButton) {
+    callback({
+      button: fallbackButton,
+      output: fallbackOutput
+    });
+  }
+}
+
+function bdbSetAssistedButtonState(
+  actionIdentity,
+  label,
+  disabled,
+  fallbackButton = null
+) {
+  bdbApplyAssistedViews(
+    actionIdentity,
+    ({ button: viewButton }) => {
+      viewButton.textContent = label;
+      viewButton.disabled = disabled;
+    },
+    fallbackButton
+  );
+}
+
+function bdbRenderAssistedResult(
+  actionIdentity,
+  response,
+  compact,
+  fallbackButton,
+  fallbackOutput
+) {
+  bdbApplyAssistedViews(
+    actionIdentity,
+    ({ output: viewOutput }) => {
+      if (viewOutput) {
+        renderResult(viewOutput, response, { compact });
+      }
+    },
+    fallbackButton,
+    fallbackOutput
+  );
+}
+
+function bdbSetAssistedError(
+  actionIdentity,
+  message,
+  label,
+  disabled,
+  fallbackButton,
+  fallbackOutput
+) {
+  bdbApplyAssistedViews(
+    actionIdentity,
+    ({ button: viewButton, output: viewOutput }) => {
+      if (viewOutput) {
+        viewOutput.textContent = message;
+      }
+      viewButton.textContent = label;
+      viewButton.disabled = disabled;
+    },
+    fallbackButton,
+    fallbackOutput
+  );
+}
+
+function bdbAssistedContextAvailable() {
+  try {
+    return Boolean(
+      typeof chrome !== "undefined" &&
+      chrome.runtime &&
+      typeof chrome.runtime.id === "string" &&
+      chrome.runtime.id.length > 0
+    );
+  } catch (_error) {
+    return false;
+  }
+}
+
+function bdbAssistedUncertainError(error) {
+  const message = String(
+    error && error.message ? error.message : error
+  );
+  return /Extension context invalidated|message port closed|Receiving end does not exist|before a response was received/i.test(
+    message
+  );
+}
+
+async function bdbAssistedMessage(message) {
+  if (!bdbAssistedContextAvailable()) {
+    throw new Error("Extension context invalidated");
+  }
+
+  const result = await chrome.runtime.sendMessage(message);
+  if (!result || result.ok !== true) {
+    throw new Error(
+      result && result.error
+        ? result.error
+        : "Brak odpowiedzi rozszerzenia"
+    );
+  }
+  return result.response;
+}
+
+async function bdbRunAssistedAction(action) {
+  let latest = await bdbAssistedMessage({
+    type: "BDB_SUBMIT_ASSISTED",
+    action
+  });
+
+  if (!bdbAssistedResponsePending(latest)) {
+    return latest;
+  }
+
+  const commandId = bdbAssistedCommandId(latest);
+  if (!commandId) {
+    return latest;
+  }
+
+  for (
+    let attempt = 0;
+    attempt < BDB_ASSISTED_POLL_ATTEMPTS;
+    attempt += 1
+  ) {
+    await bdbAssistedSleep(BDB_ASSISTED_POLL_DELAY_MS);
+
+    latest = await bdbAssistedMessage({
+      type: "BDB_POLL_ASSISTED",
+      action,
+      commandId
+    });
+
+    if (!bdbAssistedResponsePending(latest)) {
+      return latest;
+    }
+  }
+
+  return {
+    ...latest,
+    async_poll_exhausted: true,
+    command_id: bdbAssistedCommandId(latest) || commandId
+  };
+}
+
+function bdbAssistedCompletionLabel(response) {
+  const payload =
+    response && response.result && typeof response.result === "object"
+      ? response.result
+      : response;
+  return payload && payload.status === "success"
+    ? "BDB: wykonano"
+    : "BDB: zakończono";
+}
+
 function assistedElapsedLabel(milliseconds) {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
   const minutes = Math.floor(totalSeconds / 60);
@@ -38,14 +269,27 @@ function assistedElapsedLabel(milliseconds) {
   return `BDB: wykonywanie… ${minutes}:${seconds}`;
 }
 
-function startAssistedProgress(button) {
+function startAssistedProgress(button, actionIdentity = null) {
   const startedAt = Date.now();
   let active = true;
 
   const update = () => {
-    if (active) {
-      button.textContent = assistedElapsedLabel(Date.now() - startedAt);
+    if (!active) {
+      return;
     }
+
+    const label = assistedElapsedLabel(Date.now() - startedAt);
+    if (actionIdentity) {
+      bdbSetAssistedButtonState(
+        actionIdentity,
+        label,
+        true,
+        button
+      );
+      return;
+    }
+
+    button.textContent = label;
   };
 
   update();
@@ -310,25 +554,89 @@ function enhance(codeBlock, action) {
 
   button.addEventListener("click", async () => {
     button.disabled = true;
-    const stopProgress = startAssistedProgress(button);
     output.textContent = "";
+
+    let actionIdentity = null;
+    let keepDisabled = false;
+    let stopProgress = () => {};
+
     try {
       const currentAction = parseAction(codeBlock);
       if (!currentAction) {
         throw new Error("Blok BDB zmienił się lub nie jest już prawidłowym bdb-action-v1 JSON");
       }
-      const result = await chrome.runtime.sendMessage({ type: "BDB_SUBMIT_ACTION", action: currentAction });
-      if (!result || result.ok !== true) {
-        throw new Error(result && result.error ? result.error : "Brak odpowiedzi rozszerzenia");
+
+      actionIdentity = bdbAssistedActionIdentity(currentAction);
+      stopProgress = startAssistedProgress(button, actionIdentity);
+
+      const response = await bdbRunAssistedAction(currentAction);
+
+      if (bdbAssistedResponsePending(response)) {
+        keepDisabled = true;
+        bdbRenderAssistedResult(
+          actionIdentity,
+          response,
+          compact,
+          button,
+          output
+        );
+        bdbSetAssistedButtonState(
+          actionIdentity,
+          "BDB: nadal trwa — nie ponawiaj",
+          true,
+          button
+        );
+        return;
       }
-      renderResult(output, result.response, { compact });
-      button.textContent = "BDB: wykonano";
+
+      bdbRenderAssistedResult(
+        actionIdentity,
+        response,
+        compact,
+        button,
+        output
+      );
+      bdbSetAssistedButtonState(
+        actionIdentity,
+        bdbAssistedCompletionLabel(response),
+        false,
+        button
+      );
     } catch (error) {
-      output.textContent = `BDB error: ${String(error && error.message ? error.message : error)}`;
-      button.textContent = "BDB: ponów";
+      const detail = String(
+        error && error.message ? error.message : error
+      );
+
+      if (bdbAssistedUncertainError(error)) {
+        keepDisabled = true;
+        bdbSetAssistedError(
+          actionIdentity,
+          "BDB: połączenie z rozszerzeniem zostało przerwane. Operacja mogła zostać wykonana. Nie uruchamiaj jej ponownie; odśwież kartę i sprawdź wynik.",
+          "BDB: sprawdź wynik — nie ponawiaj",
+          true,
+          button,
+          output
+        );
+      } else {
+        bdbSetAssistedError(
+          actionIdentity,
+          `BDB error: ${detail}`,
+          "BDB: ponów",
+          false,
+          button,
+          output
+        );
+      }
     } finally {
       stopProgress();
-      button.disabled = false;
+      bdbApplyAssistedViews(
+        actionIdentity,
+        ({ button: viewButton }) => {
+          viewButton.disabled = keepDisabled;
+        },
+        button,
+        output
+      );
     }
   });
 

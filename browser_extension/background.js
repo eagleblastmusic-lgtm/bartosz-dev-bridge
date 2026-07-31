@@ -185,7 +185,7 @@ async function waitForRequiredPromotion(action, response) {
       receipt &&
       receipt.status === "promoted" &&
       receipt.command_id === commandId &&
-      context.source_clean === true
+      context.controlled_clean === true
     ) {
       return withPromotion(response, receipt);
     }
@@ -472,6 +472,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     switch (message.type) {
       case "BDB_SUBMIT_ACTION":
         return submitAction(message.action, sender.tab && sender.tab.id);
+      case "BDB_SUBMIT_ASSISTED":
+        if (typeof globalThis.bdbSubmitAssistedAction !== "function") {
+          throw new Error("Assisted submit protocol is unavailable");
+        }
+        return globalThis.bdbSubmitAssistedAction(
+          message.action,
+          sender.tab && sender.tab.id
+        );
+      case "BDB_POLL_ASSISTED":
+        if (typeof globalThis.bdbPollAssistedActionResult !== "function") {
+          throw new Error("Assisted result protocol is unavailable");
+        }
+        return globalThis.bdbPollAssistedActionResult(
+          message.action,
+          message.commandId
+        );
       case "BDB_CONSIDER_AUTO":
         return considerAuto(message.action, sender.tab && sender.tab.id);
       case "BDB_GET_AUTO_SETTINGS":

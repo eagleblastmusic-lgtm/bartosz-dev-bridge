@@ -94,12 +94,12 @@ def test_assisted_progress_counter_and_cleanup(tmp_path: Path) -> None:
 
             assert.match(
               script,
-              /const stopProgress = startAssistedProgress\(button\);/
+              /let stopProgress = \(\) => \{\};[\s\S]*stopProgress = startAssistedProgress\(button, actionIdentity\);/s
             );
 
             assert.match(
               script,
-              /finally\s*\{\s*stopProgress\(\);\s*button\.disabled = false;/s
+              /finally\s*\{\s*stopProgress\(\);[\s\S]*viewButton\.disabled = keepDisabled;/s
             );
             """
         ),

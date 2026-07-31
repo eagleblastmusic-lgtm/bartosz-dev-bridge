@@ -3,6 +3,28 @@
 const BDB_CONTENT_REPAIR_ACTIONS_KEY = "bdbRepairActionsV1";
 const BDB_CONTENT_REPAIR_MARKER_PREFIX = "BDB_REPAIR_REQUEST";
 
+function bdbContentRepairRuntimeAvailable() {
+  try {
+    return Boolean(
+      typeof chrome !== "undefined" &&
+      chrome.runtime &&
+      typeof chrome.runtime.id === "string" &&
+      chrome.runtime.id.length > 0
+    );
+  } catch (_error) {
+    return false;
+  }
+}
+
+function bdbContentRepairContextInvalid(error) {
+  const message = String(
+    error && error.message ? error.message : error
+  );
+  return /Extension context invalidated|message port closed|Receiving end does not exist|before a response was received/i.test(
+    message
+  );
+}
+
 function bdbContentRepairClone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -57,25 +79,37 @@ function bdbContentRepairIsFailure(entry, response, output) {
 }
 
 async function bdbContentRepairLatest(repoAlias) {
-  const result = await chrome.runtime.sendMessage({
-    type: "BDB_SUBMIT_ACTION",
-    action: {
-      schema: ACTION_SCHEMA,
-      operation: "repair_state_peek",
-      repo_alias: repoAlias
-    }
-  });
-  const response = result && result.ok === true ? result.response : null;
-  if (
-    !response ||
-    response.status !== "repair_state" ||
-    typeof response.key !== "string" ||
-    !response.entry ||
-    typeof response.entry !== "object"
-  ) {
+  if (!bdbContentRepairRuntimeAvailable()) {
     return null;
   }
-  return { key: response.key, entry: response.entry };
+
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type: "BDB_SUBMIT_ACTION",
+      action: {
+        schema: ACTION_SCHEMA,
+        operation: "repair_state_peek",
+        repo_alias: repoAlias
+      }
+    });
+    const response =
+      result && result.ok === true ? result.response : null;
+    if (
+      !response ||
+      response.status !== "repair_state" ||
+      typeof response.key !== "string" ||
+      !response.entry ||
+      typeof response.entry !== "object"
+    ) {
+      return null;
+    }
+    return { key: response.key, entry: response.entry };
+  } catch (error) {
+    if (bdbContentRepairContextInvalid(error)) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 async function bdbContentRepairUpdateState(found, changes) {
@@ -259,6 +293,12 @@ async function bdbContentRepairEnhance(output) {
   if (!(output instanceof HTMLElement) || output.dataset.bdbRepairReady === "true") {
     return;
   }
+
+  const localResponse = bdbContentRepairResponseFromOutput(output);
+  if (!bdbContentRepairIsFailure(null, localResponse, output)) {
+    return;
+  }
+
   const host = output.closest("pre") || output.parentElement && output.parentElement.parentElement;
   if (!(host instanceof HTMLElement)) {
     return;
@@ -275,7 +315,7 @@ async function bdbContentRepairEnhance(output) {
   if (!found) {
     return;
   }
-  const response = bdbContentRepairResponseFromOutput(output) || found.entry.response;
+  const response = localResponse || found.entry.response;
   if (!bdbContentRepairIsFailure(found.entry, response, output)) {
     return;
   }
@@ -299,6 +339,10 @@ async function bdbContentRepairEnhance(output) {
 }
 
 function bdbContentRepairScan(root = document) {
+  if (!bdbContentRepairRuntimeAvailable()) {
+    return;
+  }
+
   const outputs = [];
   if (root instanceof HTMLElement && root.matches(".bdb-output")) {
     outputs.push(root);
@@ -307,12 +351,21 @@ function bdbContentRepairScan(root = document) {
     outputs.push(...root.querySelectorAll(".bdb-output"));
   }
   for (const output of outputs) {
-    void bdbContentRepairEnhance(output);
+    void bdbContentRepairEnhance(output).catch((error) => {
+      if (!bdbContentRepairContextInvalid(error)) {
+        console.warn("BDB repair enhancement failed", error);
+      }
+    });
   }
 }
 
 bdbContentRepairScan(document);
 const bdbContentRepairObserver = new MutationObserver((records) => {
+  if (!bdbContentRepairRuntimeAvailable()) {
+    bdbContentRepairObserver.disconnect();
+    return;
+  }
+
   for (const record of records) {
     if (record.target instanceof HTMLElement) {
       bdbContentRepairScan(record.target);

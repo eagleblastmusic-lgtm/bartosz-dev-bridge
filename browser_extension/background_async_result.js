@@ -67,6 +67,54 @@ async function pollBdbCommandResult(action, initialResponse) {
   };
 }
 
+const BDB_ASSISTED_RESULT_WAIT_SECONDS = 5;
+
+function bdbValidateAssistedAction(action) {
+  validateJsonObject(action, "BDB assisted action");
+  if (action.schema !== ACTION_SCHEMA) {
+    throw new Error(`Only ${ACTION_SCHEMA} is supported`);
+  }
+}
+
+async function bdbSubmitAssistedAction(action, tabId) {
+  bdbValidateAssistedAction(action);
+  return submitActionBeforeAsyncResultPolling(action, tabId);
+}
+
+async function bdbPollAssistedActionResult(action, commandId) {
+  bdbValidateAssistedAction(action);
+  const parsed = parseBdbCommandId(commandId);
+  if (!parsed) {
+    throw new Error("Assisted command_id has an unsafe format");
+  }
+
+  const latest = await sendNative({
+    schema: REQUEST_SCHEMA,
+    request_id: requestId("assisted-result"),
+    action: "result",
+    repo_alias: validateRepoAlias(action.repo_alias),
+    session_id: parsed.sessionId,
+    sequence: parsed.sequence,
+    wait_seconds: BDB_ASSISTED_RESULT_WAIT_SECONDS
+  });
+
+  if (latest.status === "completed") {
+    return waitForRequiredPromotion(action, latest);
+  }
+
+  if (latest.status === "failed" || !responseStillPending(latest)) {
+    return latest;
+  }
+
+  return {
+    ...latest,
+    command_id: latest.command_id || commandId
+  };
+}
+
+globalThis.bdbSubmitAssistedAction = bdbSubmitAssistedAction;
+globalThis.bdbPollAssistedActionResult = bdbPollAssistedActionResult;
+
 submitAction = async function submitActionWithAsyncResultPolling(action, tabId) {
   const response = await submitActionBeforeAsyncResultPolling(action, tabId);
   return pollBdbCommandResult(action, response);

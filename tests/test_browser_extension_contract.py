@@ -55,8 +55,10 @@ def test_manual_click_reparses_current_code_block_before_submission() -> None:
     end = content.index("panel.append(button, output);", start)
     manual_handler = content[start:end]
     assert "const currentAction = parseAction(codeBlock);" in manual_handler
-    assert 'type: "BDB_SUBMIT_ACTION", action: currentAction' in manual_handler
-    assert 'type: "BDB_SUBMIT_ACTION", action }' not in manual_handler
+    assert 'type: "BDB_SUBMIT_ASSISTED"' in content
+    assert "bdbRunAssistedAction(currentAction)" in manual_handler
+    assert '"BDB_POLL_ASSISTED"' in content
+    assert 'type: "BDB_SUBMIT_ACTION", action: currentAction' not in manual_handler
     assert "Blok BDB zmienił się" in manual_handler
 
 
@@ -90,7 +92,7 @@ def test_required_promotion_blocks_auto_until_receipt_matches_command() -> None:
     assert "waitForRequiredPromotion(action, response)" in background
     assert "context.latest_promotion" in background
     assert "receipt.command_id === commandId" in background
-    assert "context.source_clean === true" in background
+    assert "context.controlled_clean === true" in background
     assert 'reason: "promotion_not_observed"' in background
     assert 'status: "needs_user"' in background
     assert "PROMOTION_WAIT_ATTEMPTS" in background

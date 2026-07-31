@@ -108,7 +108,7 @@ def test_auto_loop_state_survives_tab_change_and_worker_restart(tmp_path: Path) 
                           schema: "bdb-native-response-v1",
                           request_id: request.request_id,
                           context: {
-                            source_clean: true,
+                            controlled_clean: true,
                             latest_promotion: null
                           },
                           arm: { armed: true }
