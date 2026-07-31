@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -225,3 +226,167 @@ def test_profile_source_contains_only_fixed_theme_roots() -> None:
     assert "cursor-api" not in source
     assert "_live_" not in source
     assert "shell=True" not in source
+
+
+def _init_scoped_repo(root: Path, relative_path: str, content: str) -> Path:
+    target = root / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "BDB Test"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "bdb-test@localhost.invalid"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "add", "--", relative_path], cwd=root, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "baseline"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    return target
+
+
+def test_scoped_json_validation_skips_full_theme_check(tmp_path: Path) -> None:
+    relative_path = "templates/page.example.json"
+    target = _init_scoped_repo(
+        tmp_path,
+        relative_path,
+        '{"sections": {"main": {"type": "main-page"}}}',
+    )
+    target.write_text(
+        '{"sections": {"main": {"type": "main-page", "settings": {}}}}',
+        encoding="utf-8",
+    )
+
+    outcome = run_shopify_theme_check_profile(
+        workspace_path=tmp_path,
+        command=("shopify-does-not-need-to-exist",),
+        timeout_seconds=30,
+        environment=os.environ.copy(),
+        changed_paths=(relative_path,),
+    )
+
+    assert outcome.status == "success"
+    assert outcome.exit_code == 0
+    summary = json.loads(outcome.stdout)
+    assert summary["validation_mode"] == "scoped_minimal"
+    assert summary["validated_files"] == [relative_path]
+    assert summary["checks_run"] == ["exact_diff_scope", "json_parse"]
+    assert summary["theme_check_runs"] == 0
+    assert summary["full_theme_check"] == "skipped"
+    assert summary["new_errors"] == []
+
+
+def test_scoped_json_validation_blocks_new_invalid_json(tmp_path: Path) -> None:
+    relative_path = "templates/page.example.json"
+    target = _init_scoped_repo(tmp_path, relative_path, '{"valid": true}')
+    target.write_text('{"valid": true', encoding="utf-8")
+
+    outcome = run_shopify_theme_check_profile(
+        workspace_path=tmp_path,
+        command=("shopify-does-not-need-to-exist",),
+        timeout_seconds=30,
+        environment=os.environ.copy(),
+        changed_paths=(relative_path,),
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.exit_code == 1
+    summary = json.loads(outcome.stdout)
+    assert len(summary["new_errors"]) == 1
+    assert summary["new_errors"][0]["path"] == relative_path
+    assert summary["new_errors"][0]["check"] == "json_parse"
+
+
+def test_scoped_json_validation_ignores_existing_invalid_json(tmp_path: Path) -> None:
+    relative_path = "templates/page.example.json"
+    target = _init_scoped_repo(tmp_path, relative_path, '{"already": invalid}')
+    target.write_text('{"still": invalid}', encoding="utf-8")
+
+    outcome = run_shopify_theme_check_profile(
+        workspace_path=tmp_path,
+        command=("shopify-does-not-need-to-exist",),
+        timeout_seconds=30,
+        environment=os.environ.copy(),
+        changed_paths=(relative_path,),
+    )
+
+    assert outcome.status == "success"
+    assert outcome.exit_code == 0
+    summary = json.loads(outcome.stdout)
+    assert summary["ignored_existing_errors"] == 1
+    assert summary["new_errors"] == []
+
+
+def test_scoped_liquid_runs_only_changed_file_differential(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relative_path = "snippets/example.liquid"
+    target = _init_scoped_repo(
+        tmp_path,
+        relative_path,
+        '<script src="example.js"></script>',
+    )
+    target.write_text(
+        '<script src="example.js"></script>\n<p>{{ product.title }}</p>',
+        encoding="utf-8",
+    )
+
+    calls: list[Path] = []
+
+    def fake_check(
+        _command: object,
+        root: Path,
+        **_kwargs: object,
+    ) -> tuple[object, int, str]:
+        calls.append(root)
+        return [
+            {
+                "path": str(root / relative_path),
+                "offenses": [_offense()],
+            }
+        ], 1, ""
+
+    monkeypatch.setattr(
+        "bdb_bridge.shopify_theme_check_profile._run_theme_check_document",
+        fake_check,
+    )
+
+    outcome = run_shopify_theme_check_profile(
+        workspace_path=tmp_path,
+        command=("shopify.cmd", "theme", "check"),
+        timeout_seconds=30,
+        environment=os.environ.copy(),
+        changed_paths=(relative_path,),
+    )
+
+    assert outcome.status == "success"
+    assert outcome.exit_code == 0
+    summary = json.loads(outcome.stdout)
+    assert summary["validation_mode"] == "scoped_minimal"
+    assert summary["theme_check_runs"] == 2
+    assert summary["ignored_existing_errors"] == 1
+    assert summary["new_errors"] == []
+    assert len(calls) == 2
+
+
+def test_fixed_profile_support_passes_controlled_changed_paths() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "bdb_bridge"
+        / "fixed_test_profile_support.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'callable(getattr(workspace, "controlled_changed_paths", None))' in source
+    assert "workspace.controlled_changed_paths()" in source
+    assert "else ()" in source

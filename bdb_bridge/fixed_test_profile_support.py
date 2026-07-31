@@ -122,6 +122,11 @@ def install_fixed_test_profile_support(
                 command=command,
                 timeout_seconds=self.config.test_timeout_seconds,
                 environment=_profile_environment(profile_id),
+                changed_paths=tuple(
+                    workspace.controlled_changed_paths()
+                    if callable(getattr(workspace, "controlled_changed_paths", None))
+                    else ()
+                ),
             )
 
         started = time.monotonic()
