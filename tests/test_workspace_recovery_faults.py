@@ -219,7 +219,9 @@ def test_ghb04_invalid_utf8_and_replace_mismatch_do_not_record_plan(tmp_path: Pa
         root = tmp_path / name
         cfg, db, _ = setup(root, document=command_document(old=old))
         j = Journal.open(db, now_fn=lambda: NOW)
-        with pytest.raises(BridgeError) as exc:
-            ExecutionCoordinator(cfg, j).execute_or_recover(COMMAND)
-        assert exc.value.code == BridgeErrorCode.REPLACE_MISMATCH and counts(j)[:2] == (0, 0)
+        outcome = ExecutionCoordinator(cfg, j).execute_or_recover(COMMAND)
+        assert outcome.status == "policy_denied"
+        assert outcome.error_code == BridgeErrorCode.REPLACE_MISMATCH
+        assert j.get_command(COMMAND).state == CommandState.POLICY_DENIED
+        assert counts(j)[:2] == (0, 0)
         j.close()

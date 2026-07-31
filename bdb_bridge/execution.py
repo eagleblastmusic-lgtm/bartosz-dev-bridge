@@ -381,7 +381,15 @@ class ExecutionCoordinator:
                 raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Target file is not strict UTF-8") from exc
             count = before_text.count(old_text)
             if count != 1:
-                raise BridgeError(BridgeErrorCode.REPLACE_MISMATCH, f"Expected exactly one match, found {count}")
+                return self._terminal_claimed_outcome(
+                    command_id,
+                    CommandState.POLICY_DENIED,
+                    "policy_denied",
+                    BridgeErrorCode.REPLACE_MISMATCH,
+                    f"Expected exactly one match, found {count}",
+                    workspace.revision,
+                    workspace.state_hash,
+                )
             after = before_text.replace(old_text, new_text, 1).encode("utf-8")
             candidate = OperationPlanRecord(
                 command_id=command_id,
