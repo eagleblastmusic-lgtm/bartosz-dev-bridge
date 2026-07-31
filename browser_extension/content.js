@@ -30,6 +30,37 @@ function compactAction(action) {
   );
 }
 
+
+function assistedElapsedLabel(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = String(totalSeconds % 60).padStart(2, "0");
+  return `BDB: wykonywanie… ${minutes}:${seconds}`;
+}
+
+function startAssistedProgress(button) {
+  const startedAt = Date.now();
+  let active = true;
+
+  const update = () => {
+    if (active) {
+      button.textContent = assistedElapsedLabel(Date.now() - startedAt);
+    }
+  };
+
+  update();
+  const timer = setInterval(update, 1000);
+
+  return () => {
+    if (!active) {
+      return;
+    }
+
+    active = false;
+    clearInterval(timer);
+  };
+}
+
 function resultText(response, marker = null) {
   const payload = response && response.result ? response.result : response;
   const prefix = marker ? `${marker}\n` : "";
@@ -267,7 +298,7 @@ function enhance(codeBlock, action) {
 
   button.addEventListener("click", async () => {
     button.disabled = true;
-    button.textContent = "BDB: wykonywanie…";
+    const stopProgress = startAssistedProgress(button);
     output.textContent = "";
     try {
       const currentAction = parseAction(codeBlock);
@@ -296,6 +327,7 @@ function enhance(codeBlock, action) {
 function scan(root) {
   const blocks = [];
   if (root instanceof HTMLElement && root.matches("code")) {
+      stopProgress();
     blocks.push(root);
   }
   if (root.querySelectorAll) {
