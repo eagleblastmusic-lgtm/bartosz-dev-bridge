@@ -77,17 +77,29 @@ maybeAuto = async function maybeAutoWithDecisionCatchUp(action, button, output, 
     }
 
     renderResult(output, auto.response, { compact });
-    if (!auto.shouldContinue) {
-      button.textContent = `BDB AUTO: zatrzymano (${auto.stopReason || "limit"})`;
+    if (auto.resultDelivered === true) {
+      button.textContent = `BDB AUTO: wynik odtworzony (${auto.stopReason || "zakończono"})`;
       return;
     }
 
     const sent = await autoSend(auto.response, auto.loopId, auto.iteration);
     if (sent.sent) {
-      button.textContent = `BDB AUTO: wysłano ${auto.iteration}`;
+      try {
+        await chrome.runtime.sendMessage({
+          type: "BDB_MARK_AUTO_RESULT_DELIVERED",
+          loopId: auto.loopId,
+          iteration: auto.iteration
+        });
+      } catch (_error) {
+      }
+      button.textContent = auto.shouldContinue
+        ? `BDB AUTO: wysłano ${auto.iteration}`
+        : `BDB AUTO: wynik wysłany; zatrzymano (${auto.stopReason || "zakończono"})`;
       return;
     }
-    button.textContent = `BDB AUTO → ASSISTED (${sent.reason})`;
+    button.textContent = auto.shouldContinue
+      ? `BDB AUTO → ASSISTED (${sent.reason})`
+      : `BDB AUTO: zatrzymano; wynik oczekuje na ponowienie (${sent.reason})`;
   } catch (error) {
     output.textContent = `BDB AUTO error: ${String(error && error.message ? error.message : error)}`;
     button.textContent = "BDB AUTO → ASSISTED";

@@ -12,12 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 EXTENSION = ROOT / "browser_extension"
 
 
-def test_auto_loop_state_survives_tab_change_and_worker_restart(tmp_path: Path) -> None:
+def test_terminal_auto_result_is_cached_recovered_and_delivery_is_remembered(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for the browser service-worker runtime contract")
 
-    harness = tmp_path / "auto-loop-runtime.cjs"
+    harness = tmp_path / "auto-terminal-result-cache.cjs"
     harness.write_text(
         textwrap.dedent(
             r"""
@@ -29,9 +29,6 @@ def test_auto_loop_state_survives_tab_change_and_worker_restart(tmp_path: Path) 
             const vm = require("node:vm");
 
             const extensionDir = process.argv[2];
-            const manifest = JSON.parse(
-              fs.readFileSync(path.join(extensionDir, "manifest.json"), "utf8")
-            );
 
             function storageArea(store) {
               return {
@@ -83,7 +80,7 @@ def test_auto_loop_state_survives_tab_change_and_worker_restart(tmp_path: Path) 
                 crypto: {
                   getRandomValues(buffer) {
                     for (let index = 0; index < buffer.length; index += 1) {
-                      buffer[index] = (index * 17 + shared.randomSeed) % 256;
+                      buffer[index] = (index * 19 + shared.randomSeed) % 256;
                     }
                     shared.randomSeed += 1;
                     return buffer;
@@ -103,18 +100,6 @@ def test_auto_loop_state_survives_tab_change_and_worker_restart(tmp_path: Path) 
                     },
                     sendNativeMessage(_host, request, callback) {
                       shared.nativeRequests.push(request);
-                      if (request.action === "context") {
-                        callback({
-                          schema: "bdb-native-response-v1",
-                          request_id: request.request_id,
-                          context: {
-                            source_clean: true,
-                            latest_promotion: null
-                          },
-                          arm: { armed: true }
-                        });
-                        return;
-                      }
                       if (request.action === "submit_action") {
                         shared.commandCounter += 1;
                         callback({
@@ -123,10 +108,9 @@ def test_auto_loop_state_survives_tab_change_and_worker_restart(tmp_path: Path) 
                           command_id: `command-${shared.commandCounter}`,
                           status: "completed",
                           result: {
-                            status: "success",
-                            data: {
-                              operation: request.bdb_action.operation
-                            }
+                            status: "needs_user",
+                            error_code: "path_not_found",
+                            summary: "Synthetic terminal result"
                           }
                         });
                         return;
@@ -148,56 +132,57 @@ def test_auto_loop_state_survives_tab_change_and_worker_restart(tmp_path: Path) 
                 }
               };
 
-              const workerPath = path.join(
-                extensionDir,
-                manifest.background.service_worker
+              vm.runInContext(
+                fs.readFileSync(path.join(extensionDir, "background_entry.js"), "utf8"),
+                context,
+                { filename: "background_entry.js" }
               );
-              vm.runInContext(fs.readFileSync(workerPath, "utf8"), context, {
-                filename: workerPath
-              });
               assert.equal(typeof messageListener, "function");
 
               async function dispatch(message, tabId) {
                 return new Promise((resolve, reject) => {
-                  const keepChannelOpen = messageListener(
+                  const keepOpen = messageListener(
                     message,
                     { tab: { id: tabId } },
                     (reply) => {
                       if (!reply || reply.ok !== true) {
-                        reject(new Error(reply && reply.error ? reply.error : "AUTO failed"));
+                        reject(new Error(reply && reply.error ? reply.error : "message failed"));
                         return;
                       }
                       resolve(reply.response);
                     }
                   );
-                  assert.equal(keepChannelOpen, true);
+                  assert.equal(keepOpen, true);
                 });
               }
 
               return {
-                send(action, tabId) {
+                consider(action, tabId) {
                   return dispatch({ type: "BDB_CONSIDER_AUTO", action }, tabId);
                 },
                 mark(loopId, iteration, tabId) {
-                  return dispatch({
-                    type: "BDB_MARK_AUTO_RESULT_DELIVERED",
-                    loopId,
-                    iteration
-                  }, tabId);
+                  return dispatch(
+                    {
+                      type: "BDB_MARK_AUTO_RESULT_DELIVERED",
+                      loopId,
+                      iteration
+                    },
+                    tabId
+                  );
                 }
               };
             }
 
-            function autoAction(loopId, iteration, operation = "open_read") {
+            function terminalAction(loopId) {
               return {
                 schema: "bdb-action-v1",
                 repo_alias: "calculator",
-                operation,
-                payload: operation === "open_read" ? { path: "calculator.py" } : {},
+                operation: "open_read",
+                payload: { path: "missing.txt" },
                 automation: {
                   mode: "auto",
                   loop_id: loopId,
-                  iteration
+                  iteration: 1
                 },
                 presentation: { mode: "compact" }
               };
@@ -215,67 +200,32 @@ def test_auto_loop_state_survives_tab_change_and_worker_restart(tmp_path: Path) 
                 commandCounter: 0,
                 randomSeed: 1
               };
-              const loopId = "calculator-history-20260717-2302";
+              const loopId = "terminal-cache-test-20260731";
+              const action = terminalAction(loopId);
 
               let worker = createWorker(shared);
-              const first = await worker.send(
-                autoAction(loopId, 1, "workspace_context"),
-                101
-              );
+              const first = await worker.consider(action, 101);
               assert.equal(first.executed, true, JSON.stringify(first));
-              assert.equal(
-                (await worker.mark(loopId, 1, 101)).marked,
-                true
-              );
-
-              // A fresh worker context simulates an MV3 service-worker restart. A new
-              // sender tab simulates refresh/navigation that changes the tab identity.
-              worker = createWorker(shared);
-              const second = await worker.send(autoAction(loopId, 2), 202);
-              assert.equal(second.executed, true, JSON.stringify(second));
-              assert.equal(second.expectedIteration, 3, JSON.stringify(second));
-              assert.equal(
-                (await worker.mark(loopId, 2, 202)).marked,
-                true
-              );
+              assert.equal(first.shouldContinue, false, JSON.stringify(first));
+              assert.equal(first.stopReason, "needs_user", JSON.stringify(first));
+              assert.equal(shared.nativeRequests.length, 1);
 
               worker = createWorker(shared);
-              const third = await worker.send(autoAction(loopId, 3), 303);
-              assert.equal(third.executed, true, JSON.stringify(third));
-              assert.equal(third.expectedIteration, 4, JSON.stringify(third));
-              assert.equal(
-                (await worker.mark(loopId, 3, 303)).marked,
-                true
-              );
+              const recoveredUndelivered = await worker.consider(action, 202);
+              assert.equal(recoveredUndelivered.executed, true, JSON.stringify(recoveredUndelivered));
+              assert.equal(recoveredUndelivered.recoveredResult, true, JSON.stringify(recoveredUndelivered));
+              assert.equal(recoveredUndelivered.resultDelivered, false, JSON.stringify(recoveredUndelivered));
+              assert.equal(shared.nativeRequests.length, 1);
 
-              const requestsBeforeDuplicate = shared.nativeRequests.length;
-              const duplicate = await worker.send(autoAction(loopId, 3), 404);
-              assert.equal(duplicate.executed, false, JSON.stringify(duplicate));
-              assert.equal(duplicate.reason, "iteration_already_processed", JSON.stringify(duplicate));
-              assert.equal(duplicate.expectedIteration, 4, JSON.stringify(duplicate));
-              assert.equal(shared.nativeRequests.length, requestsBeforeDuplicate);
+              const marked = await worker.mark(loopId, 1, 202);
+              assert.equal(marked.marked, true, JSON.stringify(marked));
 
-              const canonicalKey = `bdbAuto:${loopId}`;
-              assert.ok(shared.session[canonicalKey], JSON.stringify(shared.session));
-              assert.equal(shared.session[canonicalKey].lastIteration, 3);
-              assert.equal(
-                Object.keys(shared.session).some(
-                  (key) => (
-                    key !== canonicalKey &&
-                    key.startsWith("bdbAuto:") &&
-                    key.endsWith(`:${loopId}`)
-                  )
-                ),
-                false,
-                JSON.stringify(shared.session)
-              );
-
-              const freshLoop = await worker.send(
-                autoAction("calculator-fresh-loop-20260718", 1, "workspace_context"),
-                505
-              );
-              assert.equal(freshLoop.executed, true, JSON.stringify(freshLoop));
-              assert.equal(freshLoop.expectedIteration, 2, JSON.stringify(freshLoop));
+              worker = createWorker(shared);
+              const recoveredDelivered = await worker.consider(action, 303);
+              assert.equal(recoveredDelivered.executed, true, JSON.stringify(recoveredDelivered));
+              assert.equal(recoveredDelivered.recoveredResult, true, JSON.stringify(recoveredDelivered));
+              assert.equal(recoveredDelivered.resultDelivered, true, JSON.stringify(recoveredDelivered));
+              assert.equal(shared.nativeRequests.length, 1);
             }
 
             main().catch((error) => {

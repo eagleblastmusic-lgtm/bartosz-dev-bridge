@@ -33,6 +33,7 @@ def test_auto_decision_retries_only_transient_sequence_gaps(tmp_path: Path) -> N
 
             async function runScenario(responses, iteration = 3) {
               let calls = 0;
+              let deliveryCalls = 0;
               const button = { disabled: false, textContent: "" };
               const output = { textContent: "" };
               const rendered = [];
@@ -44,7 +45,11 @@ def test_auto_decision_retries_only_transient_sequence_gaps(tmp_path: Path) -> N
                 },
                 chrome: {
                   runtime: {
-                    async sendMessage() {
+                    async sendMessage(message) {
+                      if (message && message.type === "BDB_MARK_AUTO_RESULT_DELIVERED") {
+                        deliveryCalls += 1;
+                        return { ok: true, response: { marked: true } };
+                      }
                       const response = responses[Math.min(calls, responses.length - 1)];
                       calls += 1;
                       return { ok: true, response };
@@ -72,7 +77,7 @@ def test_auto_decision_retries_only_transient_sequence_gaps(tmp_path: Path) -> N
                 output,
                 true
               );
-              return { calls, button, output, rendered };
+              return { calls, deliveryCalls, button, output, rendered };
             }
 
             async function main() {
@@ -90,12 +95,18 @@ def test_auto_decision_retries_only_transient_sequence_gaps(tmp_path: Path) -> N
                 {
                   executed: true,
                   response: { status: "completed" },
+                  loopId: "loop",
+                  iteration: 3,
                   shouldContinue: false,
                   stopReason: "done"
                 }
               ]);
               assert.equal(recovered.calls, 3, JSON.stringify(recovered));
-              assert.equal(recovered.button.textContent, "BDB AUTO: zatrzymano (done)");
+              assert.equal(recovered.deliveryCalls, 1, JSON.stringify(recovered));
+              assert.equal(
+                recovered.button.textContent,
+                "BDB AUTO: wynik wysłany; zatrzymano (done)"
+              );
               assert.equal(recovered.rendered.length, 1);
 
               const stale = await runScenario([

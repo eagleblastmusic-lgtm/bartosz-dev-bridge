@@ -213,6 +213,17 @@ def test_auto_replay_claim_recovers_after_failure_and_deduplicates_in_flight(
                 "completed"
               );
 
+              assert.equal(
+                (
+                  await context.markAutoResultDelivered(
+                    recoveryLoop,
+                    6,
+                    101
+                  )
+                ).marked,
+                true
+              );
+
               const duplicateCompleted = await context.considerAuto(
                 action(recoveryLoop, 6),
                 101
@@ -250,6 +261,17 @@ def test_auto_replay_claim_recovers_after_failure_and_deduplicates_in_flight(
               const firstCompleted = await first;
               assert.equal(firstCompleted.executed, true, JSON.stringify(firstCompleted));
               assert.equal(sessionStore[concurrentStateKey].lastIteration, 1);
+
+              assert.equal(
+                (
+                  await context.markAutoResultDelivered(
+                    concurrentLoop,
+                    1,
+                    202
+                  )
+                ).marked,
+                true
+              );
 
               const duplicateAfterCompletion = await context.considerAuto(
                 action(concurrentLoop, 1),

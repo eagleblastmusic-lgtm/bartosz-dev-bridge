@@ -246,6 +246,34 @@ function autoStateKey(tabId, loopId) {
   return `bdbAuto:${tabId}:${loopId}`;
 }
 
+async function markAutoResultDelivered(loopId, iteration, tabId) {
+  if (typeof loopId !== "string" || !LOOP_ID_RE.test(loopId)) {
+    throw new Error("AUTO loop_id has an unsafe format");
+  }
+  if (!Number.isInteger(iteration) || iteration < 1) {
+    throw new Error("AUTO iteration must be a positive integer");
+  }
+  if (!Number.isInteger(tabId) || tabId < 0) {
+    throw new Error("AUTO delivery receipt requires a concrete sender tab");
+  }
+
+  const key = autoStateKey(tabId, loopId);
+  const stored = await chrome.storage.session.get(key);
+  const state = stored[key];
+  if (!state || typeof state !== "object" || Array.isArray(state)) {
+    return { marked: false, reason: "auto_state_missing" };
+  }
+  if (state.lastResponseIteration !== iteration || !state.lastResponse) {
+    return { marked: false, reason: "cached_result_missing" };
+  }
+
+  state.lastResponseDelivered = true;
+  state.lastResponseDeliveredAt = Date.now();
+  state.updatedAt = Date.now();
+  await chrome.storage.session.set({ [key]: state });
+  return { marked: true };
+}
+
 function autoReplayKey(loopId, iteration) {
   return `${loopId}:${iteration}`;
 }
@@ -343,6 +371,29 @@ async function considerAuto(action, tabId) {
     lastIteration: 0,
     status: "running"
   };
+  if (
+    state.lastResponse &&
+    typeof state.lastResponse === "object" &&
+    !Array.isArray(state.lastResponse) &&
+    (
+      state.status !== "running" ||
+      state.lastResponseDelivered !== true
+    ) &&
+    state.lastResponseIteration === metadata.iteration &&
+    metadata.iteration <= state.lastIteration
+  ) {
+    return {
+      executed: true,
+      response: state.lastResponse,
+      loopId: metadata.loopId,
+      iteration: metadata.iteration,
+      recoveredResult: true,
+      resultDelivered: state.lastResponseDelivered === true,
+      shouldContinue: false,
+      stopReason: state.status === "running" ? "iteration_already_processed" : state.status,
+      state
+    };
+  }
   if (state.status !== "running") {
     return { executed: false, reason: "loop_not_running", state };
   }
@@ -364,6 +415,9 @@ async function considerAuto(action, tabId) {
   const completed = response.status === "completed";
   state.lastIteration = metadata.iteration;
   state.lastCommandId = response.command_id || null;
+  state.lastResponse = response;
+  state.lastResponseIteration = metadata.iteration;
+  state.lastResponseDelivered = false;
   state.updatedAt = Date.now();
   state.status = terminal || (completed ? "running" : "needs_user");
   await chrome.storage.session.set({ [key]: state });
@@ -394,6 +448,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "BDB_SET_AUTO_SETTINGS":
         validateJsonObject(message.settings, "AUTO settings");
         return setAutoSettings(message.settings);
+      case "BDB_MARK_AUTO_RESULT_DELIVERED":
+        return markAutoResultDelivered(
+          message.loopId,
+          message.iteration,
+          sender.tab && sender.tab.id
+        );
       case "BDB_STATUS":
         return sendNative({
           schema: REQUEST_SCHEMA,
