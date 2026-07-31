@@ -13,12 +13,16 @@ from .repository_index_migration import install_repository_index_migration
 from .code_relationship_migration import install_code_relationship_migration
 from .multi_file_patch_migration import install_multi_file_patch_migration
 from .multi_file_patch_runtime_migration import install_multi_file_patch_runtime_migration
+from .direct_checkout_workspace_migration import (
+    install_direct_checkout_workspace_migration,
+)
 
 install_workspace_lifecycle_migration(Journal)
 install_repository_index_migration(Journal)
 install_code_relationship_migration(Journal)
 install_multi_file_patch_migration(Journal)
 install_multi_file_patch_runtime_migration(Journal)
+install_direct_checkout_workspace_migration(Journal)
 
 from .models import (
     BridgeErrorCode, CommandIngestionRecord, CommandRecord, CommandState, ExecutionOutcome,

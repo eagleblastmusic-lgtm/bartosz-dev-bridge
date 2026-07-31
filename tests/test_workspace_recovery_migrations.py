@@ -37,13 +37,14 @@ def test_ghb04_v1_through_v6_literal_golden_checksums() -> None:
         (8, "journal_v8_code_relationships", V8_CHECKSUM),
         (9, "journal_v9_multi_file_patch_recovery", V9_CHECKSUM),
         (10, "journal_v10_multi_file_patch_runtime", V10_CHECKSUM),
+        (11, "journal_v11_shared_direct_checkout_paths", "178a97cf4ebc1e879964b3b77a7650d994487b92f4d95c3b4541793a92ca921c"),
     ]
 
 
 def test_ghb04_empty_and_populated_v2_upgrade_to_v3(tmp_path: Path) -> None:
     empty = Journal.open(tmp_path / "empty.db", now_fn=fixed_now)
     assert empty._connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall() == [
-        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,),
+        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,),
     ]
     assert {r[0] for r in empty._connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")} == JOURNAL_TABLES
     empty.close()
@@ -104,7 +105,7 @@ def test_ghb04_v3_reopen_noop_checksum_mismatch_and_future_version(tmp_path: Pat
 
 
 def test_ghb04_migration_registry_is_exact() -> None:
-    assert tuple(m.version for m in MIGRATIONS) == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    assert tuple(m.version for m in MIGRATIONS) == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
     assert tuple(m.name for m in MIGRATIONS) == (
         "journal_v1_initial",
         "journal_v2_ingestion",
@@ -116,4 +117,5 @@ def test_ghb04_migration_registry_is_exact() -> None:
         "journal_v8_code_relationships",
         "journal_v9_multi_file_patch_recovery",
         "journal_v10_multi_file_patch_runtime",
+        "journal_v11_shared_direct_checkout_paths",
     )
