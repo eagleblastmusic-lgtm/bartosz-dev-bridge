@@ -26,7 +26,8 @@ def test_assisted_uses_short_messages_and_controlled_scope() -> None:
     assert "globalThis.bdbSubmitAssistedAction" in background
     assert "globalThis.bdbPollAssistedActionResult" in background
 
-    assert "context.controlled_clean === true" in background
+    assert "Array.isArray(context.source_changes)" in background
+    assert "context.source_changes.length === 0" in background
     assert "context.source_clean === true" not in background
 
     assert "const BDB_ASSISTED_RESULT_WAIT_SECONDS = 5;" in polling

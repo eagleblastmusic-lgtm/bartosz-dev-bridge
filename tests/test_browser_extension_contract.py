@@ -92,7 +92,8 @@ def test_required_promotion_blocks_auto_until_receipt_matches_command() -> None:
     assert "waitForRequiredPromotion(action, response)" in background
     assert "context.latest_promotion" in background
     assert "receipt.command_id === commandId" in background
-    assert "context.controlled_clean === true" in background
+    assert "Array.isArray(context.source_changes)" in background
+    assert "context.source_changes.length === 0" in background
     assert 'reason: "promotion_not_observed"' in background
     assert 'status: "needs_user"' in background
     assert "PROMOTION_WAIT_ATTEMPTS" in background

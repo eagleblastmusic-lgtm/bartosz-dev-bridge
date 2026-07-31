@@ -185,7 +185,8 @@ async function waitForRequiredPromotion(action, response) {
       receipt &&
       receipt.status === "promoted" &&
       receipt.command_id === commandId &&
-      context.controlled_clean === true
+      Array.isArray(context.source_changes) &&
+      context.source_changes.length === 0
     ) {
       return withPromotion(response, receipt);
     }

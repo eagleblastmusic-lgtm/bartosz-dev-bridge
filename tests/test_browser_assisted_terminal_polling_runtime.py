@@ -50,7 +50,8 @@ def test_required_promotion_accepts_exact_replacement_results() -> None:
     assert "const legacyExactResult = Boolean(" in source
     assert '"Command effect recorded"' in source
     assert "receipt.command_id === commandId" in source
-    assert "context.controlled_clean === true" in source
+    assert "Array.isArray(context.source_changes)" in source
+    assert "context.source_changes.length === 0" in source
 
 
 
