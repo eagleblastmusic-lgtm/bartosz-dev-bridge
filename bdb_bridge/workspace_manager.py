@@ -408,11 +408,13 @@ class WorkspaceManager:
         suffix = plan.plan_sha256.removeprefix("sha256:")[:16]
         if len(suffix) != 16 or any(ch not in "0123456789abcdef" for ch in suffix):
             raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Invalid canonical plan hash for temp artifact")
-        return target.parent / f".bdb_temp_{target.name}_{suffix}"
+        extension = target.suffix
+        stem = target.name[:-len(extension)] if extension else target.name
+        return target.parent / f".bdb_temp_{stem}_{suffix}{extension}"
 
     def verify_expected_temp(self, plan: OperationPlanRecord) -> Path | None:
         temp = self.temp_path_for(plan)
-        foreign = self.unauthorized_changed_paths(expected_temp=temp)
+        foreign = [] if self.direct_checkout else self.unauthorized_changed_paths(expected_temp=temp)
         if foreign:
             raise BridgeError(BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED, f"Foreign workspace paths: {foreign[:20]}")
         if not temp.exists():

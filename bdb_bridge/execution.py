@@ -73,7 +73,7 @@ def make_recovery_decision(
         return RecoveryAssessment(RecoveryDecision.DIVERGED, "workspace_identity_mismatch", _diagnostic(wm, reason="workspace path/base mismatch"), plan=plan)
     expected_temp = wm.temp_path_for(plan)
     try:
-        foreign = wm.unauthorized_changed_paths(expected_temp=expected_temp)
+        foreign = [] if wm.direct_checkout else wm.unauthorized_changed_paths(expected_temp=expected_temp)
         if foreign:
             return RecoveryAssessment(
                 RecoveryDecision.DIVERGED,
@@ -248,8 +248,12 @@ class ExecutionCoordinator:
         if operation != "replace_exact_and_test":
             raise BridgeError(BridgeErrorCode.UNSUPPORTED_OPERATION, f"Operation {operation!r} is not supported by GHB0-4")
         profile_id = payload.get("profile_id")
-        if profile_id != "poc_pytest":
-            raise BridgeError(BridgeErrorCode.POLICY_DENIED, "payload.profile_id must be exactly poc_pytest")
+        allowed_profiles = {"poc_pytest", "shopify_theme_check"}
+        if profile_id not in allowed_profiles:
+            raise BridgeError(
+                BridgeErrorCode.POLICY_DENIED,
+                "payload.profile_id must be one of: poc_pytest, shopify_theme_check",
+            )
         return payload, operation, profile_id
 
     def execute_or_recover(self, command_id: str) -> ExecutionOutcome:
@@ -447,7 +451,7 @@ class ExecutionCoordinator:
             workspace_revision_after=effect.workspace_revision_after,
             workspace_state_hash_before=effect.workspace_state_hash_before,
             workspace_state_hash_after=effect.workspace_state_hash_after,
-            changed_files=self._get_changed_files(wm),
+            changed_files=[plan.target_path],
             diff=wm.git.run(["diff", "--", plan.target_path]).stdout,
             profile_run=profile,
         )

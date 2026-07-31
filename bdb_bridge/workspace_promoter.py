@@ -359,10 +359,24 @@ class WorkspacePromoter:
         data = document.get("data")
         if not isinstance(data, dict):
             raise BridgeError("invalid_payload", "Promotion result has no data object")
-        if data.get("operation") != "multi_file_patch":
-            raise BridgeError("policy_denied", "Automatic promotion supports only multi_file_patch")
-        if data.get("checkpoint_state") != "committed" or data.get("rollback_performed") is not False:
-            raise BridgeError("policy_denied", "Promotion requires a committed checkpoint without rollback")
+        operation = data.get("operation")
+        if operation == "multi_file_patch":
+            if data.get("checkpoint_state") != "committed" or data.get("rollback_performed") is not False:
+                raise BridgeError(
+                    "policy_denied",
+                    "Promotion requires a committed checkpoint without rollback",
+                )
+        elif operation == "replace_exact_and_test":
+            if data.get("rollback_performed") is not False:
+                raise BridgeError(
+                    "policy_denied",
+                    "Exact replacement promotion requires completion without rollback",
+                )
+        else:
+            raise BridgeError(
+                "policy_denied",
+                "Automatic promotion supports only multi_file_patch or replace_exact_and_test",
+            )
         changed = document.get("changed_files")
         if (
             not isinstance(changed, list)
