@@ -54,6 +54,8 @@ def test_single_file_temp_keeps_real_extension_last(tmp_path: Path) -> None:
         ".bdb_temp_page.filozofia-marki_aaaaaaaaaaaaaaaa.json"
     )
     assert temp.suffix == ".json"
+    assert temp.parent != templates
+    assert ".bdb-temp" in temp.parts
 
 
 def _promoter_type() -> type:

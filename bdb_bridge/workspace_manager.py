@@ -410,7 +410,17 @@ class WorkspaceManager:
             raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Invalid canonical plan hash for temp artifact")
         extension = target.suffix
         stem = target.name[:-len(extension)] if extension else target.name
-        return target.parent / f".bdb_temp_{stem}_{suffix}{extension}"
+        workspace_digest = hashlib.sha256(
+            str(self.path).encode("utf-8")
+        ).hexdigest()[:16]
+        temp_root = self.path.parent / ".bdb-temp" / workspace_digest
+        temp_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if temp_root.is_symlink() or not temp_root.is_dir():
+            raise BridgeError(
+                BridgeErrorCode.UNSAFE_WORKTREE_PATH,
+                "Unsafe BDB temp root",
+            )
+        return temp_root / f".bdb_temp_{stem}_{suffix}{extension}"
 
     def verify_expected_temp(self, plan: OperationPlanRecord) -> Path | None:
         temp = self.temp_path_for(plan)
