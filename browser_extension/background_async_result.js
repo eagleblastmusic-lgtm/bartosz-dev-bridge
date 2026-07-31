@@ -3,7 +3,7 @@
 // Native Host may accept a command before its durable result is available. Keep
 // the AUTO decision open and poll the existing bounded `result` action instead
 // of treating `accepted`/`pending` as a user-intervention terminal state.
-const BDB_ASYNC_RESULT_ATTEMPTS = 4;
+const BDB_ASYNC_RESULT_ATTEMPTS = 8;
 const submitActionBeforeAsyncResultPolling = submitAction;
 
 function parseBdbCommandId(value) {

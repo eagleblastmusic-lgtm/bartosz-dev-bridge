@@ -126,14 +126,45 @@ async function waitForRequiredPromotion(action, response) {
     return response;
   }
   const result = response && response.result;
+  const dataOperation =
+    result &&
+    result.data &&
+    typeof result.data === "object" &&
+    !Array.isArray(result.data)
+      ? result.data.operation
+      : null;
+
+  const legacyExactResult = Boolean(
+    result &&
+    result.status === "success" &&
+    result.executor_version === "0.5.0-ghb0" &&
+    [
+      "Command effect recorded",
+      "Idempotent effect replay",
+      "Recovered PLANNED-AFTER effect"
+    ].includes(result.summary) &&
+    Number.isInteger(result.workspace_revision_before) &&
+    result.workspace_revision_after ===
+      result.workspace_revision_before + 1 &&
+    Array.isArray(result.changed_files) &&
+    result.changed_files.length === 1 &&
+    typeof result.changed_files[0] === "string" &&
+    typeof result.diff === "string" &&
+    result.diff.length > 0
+  );
+
   const successfulPatch = Boolean(
     response &&
     response.status === "completed" &&
     result &&
     result.status === "success" &&
-    result.data &&
-    result.data.operation === "multi_file_patch"
+    (
+      dataOperation === "multi_file_patch" ||
+      dataOperation === "replace_exact_and_test" ||
+      legacyExactResult
+    )
   );
+
   if (!successfulPatch) {
     return response;
   }
