@@ -11,8 +11,10 @@ from bdb_bridge.fixed_test_profiles import (
     ALLOWED_FIXED_TEST_PROFILES,
     DOTNET_PROFILE,
     PYTEST_PROFILE,
+    SHOPIFY_THEME_CHECK_PROFILE,
     UNITTEST_PROFILE,
     fixed_profile_arguments,
+    fixed_profile_command,
 )
 from bdb_bridge.protocol import BridgeError
 
@@ -25,6 +27,7 @@ def test_fixed_profiles_have_exact_bounded_arguments() -> None:
         PYTEST_PROFILE,
         UNITTEST_PROFILE,
         DOTNET_PROFILE,
+        SHOPIFY_THEME_CHECK_PROFILE,
     }
     assert fixed_profile_arguments(PYTEST_PROFILE) == ("-m", "pytest", "-q")
     assert fixed_profile_arguments(UNITTEST_PROFILE) == (
@@ -44,6 +47,17 @@ def test_fixed_profiles_have_exact_bounded_arguments() -> None:
         "--nologo",
         "--verbosity",
         "minimal",
+    )
+    assert fixed_profile_arguments(SHOPIFY_THEME_CHECK_PROFILE) == (
+        "theme",
+        "check",
+        "--config",
+        "theme-check:recommended",
+        "--fail-level",
+        "error",
+        "--output",
+        "json",
+        "--no-color",
     )
 
 
@@ -168,6 +182,135 @@ def test_dotnet_profile_reports_missing_runtime(
     assert "dotnet executable was not found on PATH" in outcome.stderr
 
 
+def test_shopify_profile_resolves_only_fixed_cli_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shopify = tmp_path / "shopify.cmd"
+
+    def fake_which(candidate: str, **_kwargs: object) -> str | None:
+        return str(shopify) if candidate == "shopify.cmd" else None
+
+    monkeypatch.setattr(
+        "bdb_bridge.fixed_test_profiles.shutil.which",
+        fake_which,
+    )
+    command = fixed_profile_command(
+        SHOPIFY_THEME_CHECK_PROFILE,
+        python_executable=sys.executable,
+        environment={"PATH": str(tmp_path)},
+    )
+
+    assert command == (
+        str(shopify.resolve()),
+        "theme",
+        "check",
+        "--config",
+        "theme-check:recommended",
+        "--fail-level",
+        "error",
+        "--output",
+        "json",
+        "--no-color",
+    )
+
+
+def test_shopify_profile_is_restricted_to_gicleeapp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "bdb_bridge.fixed_test_profiles.shutil.which",
+        lambda candidate, **_kwargs: (
+            str(tmp_path / "shopify.cmd")
+            if candidate == "shopify.cmd"
+            else None
+        ),
+    )
+
+    class Execution:
+        pass
+
+    class Runtime:
+        pass
+
+    install_fixed_test_profile_support(Execution, Runtime)
+    execution = Execution()
+    execution.config = SimpleNamespace(
+        python_executable=sys.executable,
+        test_timeout_seconds=120,
+        repository_id="other-repository",
+    )
+    outcome = execution._run_profile(
+        SimpleNamespace(path=tmp_path),
+        SHOPIFY_THEME_CHECK_PROFILE,
+    )
+
+    assert outcome.status == "internal_error"
+    assert outcome.exit_code is None
+    assert "restricted to repository_id=bdb-workspace-gicleeapp" in outcome.stderr
+
+
+def test_shopify_profile_delegates_to_differential_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "bdb_bridge.fixed_test_profiles.shutil.which",
+        lambda candidate, **_kwargs: (
+            str(tmp_path / "shopify.cmd")
+            if candidate == "shopify.cmd"
+            else None
+        ),
+    )
+
+    def fake_runner(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            status="success",
+            exit_code=0,
+            stdout="{}",
+            stderr="",
+            duration_ms=5,
+        )
+
+    monkeypatch.setattr(
+        "bdb_bridge.fixed_test_profile_support.run_shopify_theme_check_profile",
+        fake_runner,
+    )
+
+    class Execution:
+        pass
+
+    class Runtime:
+        pass
+
+    install_fixed_test_profile_support(Execution, Runtime)
+    execution = Execution()
+    execution.config = SimpleNamespace(
+        python_executable=sys.executable,
+        test_timeout_seconds=180,
+        repository_id="bdb-workspace-gicleeapp",
+    )
+    outcome = execution._run_profile(
+        SimpleNamespace(path=tmp_path),
+        SHOPIFY_THEME_CHECK_PROFILE,
+    )
+
+    assert outcome.status == "success"
+    assert captured["workspace_path"] == tmp_path
+    assert captured["timeout_seconds"] == 180
+    command = captured["command"]
+    assert isinstance(command, tuple)
+    assert "--path" not in command
+    environment = captured["environment"]
+    assert isinstance(environment, dict)
+    assert environment["CI"] == "1"
+    assert environment["NO_COLOR"] == "1"
+    assert environment["SHOPIFY_CLI_NO_ANALYTICS"] == "1"
+
+
 def test_profile_support_has_no_arbitrary_shell_path() -> None:
     support = (ROOT / "bdb_bridge" / "fixed_test_profile_support.py").read_text(
         encoding="utf-8"
@@ -175,9 +318,15 @@ def test_profile_support_has_no_arbitrary_shell_path() -> None:
     registry = (ROOT / "bdb_bridge" / "fixed_test_profiles.py").read_text(
         encoding="utf-8"
     )
+    shopify = (ROOT / "bdb_bridge" / "shopify_theme_check_profile.py").read_text(
+        encoding="utf-8"
+    )
 
     assert "shell=False" in support
     assert "shell=True" not in support
+    assert "shell=False" in shopify
+    assert "shell=True" not in shopify
     assert "input(" not in support
+    assert "input(" not in shopify
     assert "user-supplied" not in registry
     assert "_FIXED_PROFILE_ARGUMENTS" in registry

@@ -4,18 +4,21 @@ import json
 import os
 import subprocess
 import time
+from pathlib import Path
 from typing import Any, Type
 
 from .execution import sanitized_test_environment
 from .fixed_test_profiles import (
     DOTNET_PROFILE,
     PYTEST_PROFILE,
+    SHOPIFY_THEME_CHECK_PROFILE,
     fixed_profile_arguments,
     fixed_profile_command,
 )
 from .models import BridgeErrorCode, ProfileRunOutcome
 from .multi_file_patch_recovery_models import MultiFileCheckpointState
 from .protocol import BridgeError
+from .shopify_theme_check_profile import run_shopify_theme_check_profile
 
 
 _DOTNET_ENVIRONMENT_KEYS = (
@@ -25,6 +28,15 @@ _DOTNET_ENVIRONMENT_KEYS = (
     "HOME",
     "LOCALAPPDATA",
     "NUGET_PACKAGES",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "USERPROFILE",
+)
+_SHOPIFY_ENVIRONMENT_KEYS = (
+    "APPDATA",
+    "HOME",
+    "LOCALAPPDATA",
     "PROGRAMDATA",
     "PROGRAMFILES",
     "PROGRAMFILES(X86)",
@@ -44,6 +56,18 @@ def _profile_environment(profile_id: str) -> dict[str, str]:
                 "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
                 "DOTNET_NOLOGO": "1",
                 "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1",
+            }
+        )
+    elif profile_id == SHOPIFY_THEME_CHECK_PROFILE:
+        for key in _SHOPIFY_ENVIRONMENT_KEYS:
+            value = os.environ.get(key)
+            if value:
+                environment[key] = value
+        environment.update(
+            {
+                "CI": "1",
+                "NO_COLOR": "1",
+                "SHOPIFY_CLI_NO_ANALYTICS": "1",
             }
         )
     return environment
@@ -82,6 +106,22 @@ def install_fixed_test_profile_support(
                 "",
                 str(exc),
                 0,
+            )
+
+        if profile_id == SHOPIFY_THEME_CHECK_PROFILE:
+            if getattr(self.config, "repository_id", None) != "bdb-workspace-gicleeapp":
+                return ProfileRunOutcome(
+                    "internal_error",
+                    None,
+                    "",
+                    "shopify_theme_check is restricted to repository_id=bdb-workspace-gicleeapp",
+                    0,
+                )
+            return run_shopify_theme_check_profile(
+                workspace_path=Path(workspace.path),
+                command=command,
+                timeout_seconds=self.config.test_timeout_seconds,
+                environment=_profile_environment(profile_id),
             )
 
         started = time.monotonic()
