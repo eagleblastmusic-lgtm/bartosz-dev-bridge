@@ -87,21 +87,22 @@ def test_auto_workspace_context_is_bounded_before_composer_insertion(tmp_path: P
               `autoResultText(${JSON.stringify(payload)}, ${JSON.stringify(marker)})`,
               context
             );
-            assert.ok(Buffer.byteLength(text, "utf8") <= 32768, Buffer.byteLength(text, "utf8"));
+            assert.ok(Buffer.byteLength(text, "utf8") <= 4096, Buffer.byteLength(text, "utf8"));
             assert.ok(text.startsWith(`${marker}\nBDB_RESULT:\n`));
             const parsed = JSON.parse(text.split("BDB_RESULT:\n", 2)[1]);
             assert.equal(parsed.operation, "workspace_context");
             assert.equal(parsed.auto_payload.bounded, true);
             assert.equal(parsed.auto_payload.reason, "workspace_context_compacted");
-            assert.ok(parsed.context.snapshot_files.length === 40);
-            assert.ok(parsed.context.snapshot_files.every((item) => !("content" in item)));
+            assert.equal(parsed.context.snapshot_paths.length, 8);
+            assert.equal(parsed.context.snapshot_file_count, 40);
+            assert.equal(parsed.context.snapshot_paths_omitted_for_auto, 32);
             assert.equal(parsed.context.snapshot_contents_omitted_for_auto, true);
-            assert.equal(parsed.context.tracked_paths.length, 80);
+            assert.equal(parsed.context.tracked_paths.length, 20);
             assert.equal(parsed.context.tracked_paths_total, 2000);
-            assert.equal(parsed.context.tracked_paths_omitted_for_auto, 1920);
-            assert.equal(parsed.context.symbols.length, 50);
+            assert.equal(parsed.context.tracked_paths_omitted_for_auto, 1980);
+            assert.equal(parsed.context.symbols.length, 8);
             assert.equal(parsed.context.symbols_total, 500);
-            assert.equal(parsed.context.symbols_omitted_for_auto, 450);
+            assert.equal(parsed.context.symbols_omitted_for_auto, 492);
             '''
         ),
         encoding="utf-8",
@@ -121,10 +122,11 @@ def test_auto_send_uses_bounded_payload_and_composer_guard() -> None:
     content = (EXTENSION / "content.js").read_text(encoding="utf-8")
     auto_send = (EXTENSION / "content_auto_send.js").read_text(encoding="utf-8")
 
-    assert "const BDB_AUTO_CONTINUATION_MAX_BYTES = 32 * 1024;" in content
+    assert "const BDB_AUTO_CONTINUATION_MAX_BYTES = 4 * 1024;" in content
     assert "const BDB_COMPOSER_INSERT_MAX_BYTES = 64 * 1024;" in content
     assert "function autoResultText(response, marker = null)" in content
     assert "snapshot_contents_omitted_for_auto" in content
+    assert "snapshot_paths_omitted_for_auto" in content
     assert "tracked_paths_omitted_for_auto" in content
     assert "symbols_omitted_for_auto" in content
     assert "maxBytes = BDB_COMPOSER_INSERT_MAX_BYTES" in content
@@ -133,4 +135,5 @@ def test_auto_send_uses_bounded_payload_and_composer_guard() -> None:
     assert 'typeof autoResultText === "function"' in auto_send
     assert "autoResultText(response, marker)" in auto_send
     assert 'typeof BDB_AUTO_CONTINUATION_MAX_BYTES === "number"' in auto_send
-    assert "maxBytes: autoContinuationMaxBytes" in auto_send
+    assert "const prepared = bdbPrepareAutoContinuation(" in auto_send
+    assert "autoContinuationMaxBytes" in auto_send

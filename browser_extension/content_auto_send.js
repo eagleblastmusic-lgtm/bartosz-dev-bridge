@@ -18,6 +18,60 @@ function bdbAutoSendSleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function bdbAutoUtf8ByteLength(value) {
+  let bytes = 0;
+  for (const character of String(value || "")) {
+    const code = character.codePointAt(0);
+    if (code <= 0x7f) bytes += 1;
+    else if (code <= 0x7ff) bytes += 2;
+    else if (code <= 0xffff) bytes += 3;
+    else bytes += 4;
+  }
+  return bytes;
+}
+
+function bdbPrepareAutoContinuation(text, composer, maxBytes) {
+  if (!composer || bdbAutoUtf8ByteLength(text) > maxBytes) {
+    return null;
+  }
+
+  // ChatGPT currently exposes a contenteditable composer.  execCommand inserts
+  // long strings character-by-character through Blink editing and repeatedly
+  // forces style/layout.  Replace the editor contents once and emit one input
+  // event instead.  Non-contenteditable/fake harnesses keep the proven legacy
+  // path so existing fallbacks and runtime contracts remain intact.
+  if (
+    composer.isContentEditable &&
+    typeof composer.replaceChildren === "function" &&
+    document &&
+    typeof document.createElement === "function"
+  ) {
+    try {
+      composer.focus();
+      const paragraph = document.createElement("p");
+      paragraph.textContent = text;
+      composer.replaceChildren(paragraph);
+      if (typeof composer.dispatchEvent === "function" && typeof InputEvent === "function") {
+        composer.dispatchEvent(new InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: text
+        }));
+      }
+      return composer;
+    } catch (_directInsertError) {
+      // Fall through to the existing insertion path.  AUTO is capped at 4 KiB,
+      // so even the compatibility fallback cannot reproduce the former 426 KiB
+      // or 15 KiB renderer stall.
+    }
+  }
+
+  return prepareContinuation(text, {
+    requireEmpty: true,
+    maxBytes
+  });
+}
+
 function bdbComposerContains(marker) {
   const current = findComposer();
   return Boolean(current && composerText(current).includes(marker));
@@ -163,7 +217,7 @@ autoSend = async function autoSendWithConfirmedFallbacks(response, loopId, itera
   const marker = `BDB_AUTO_RESULT:${loopId}:${iteration}`;
   const autoContinuationMaxBytes = typeof BDB_AUTO_CONTINUATION_MAX_BYTES === "number"
     ? BDB_AUTO_CONTINUATION_MAX_BYTES
-    : 32 * 1024;
+    : 4 * 1024;
   const text = typeof autoResultText === "function"
     ? autoResultText(response, marker)
     : resultText(response, marker);
@@ -172,10 +226,11 @@ autoSend = async function autoSendWithConfirmedFallbacks(response, loopId, itera
     return { sent: false, reason: initial.reason };
   }
 
-  const prepared = prepareContinuation(text, {
-    requireEmpty: true,
-    maxBytes: autoContinuationMaxBytes
-  });
+  const prepared = bdbPrepareAutoContinuation(
+    text,
+    initial.composer,
+    autoContinuationMaxBytes
+  );
   if (!prepared) {
     return { sent: false, reason: "insertion_failed" };
   }

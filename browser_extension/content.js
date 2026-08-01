@@ -311,11 +311,11 @@ function resultText(response, marker = null) {
   return `${prefix}BDB_RESULT:\n${JSON.stringify(payload, null, 2)}`;
 }
 
-const BDB_AUTO_CONTINUATION_MAX_BYTES = 32 * 1024;
+const BDB_AUTO_CONTINUATION_MAX_BYTES = 4 * 1024;
 const BDB_COMPOSER_INSERT_MAX_BYTES = 64 * 1024;
-const BDB_AUTO_TRACKED_PATH_LIMIT = 80;
-const BDB_AUTO_SYMBOL_LIMIT = 50;
-const BDB_AUTO_TEXT_TAIL_LIMIT = 6000;
+const BDB_AUTO_TRACKED_PATH_LIMIT = 20;
+const BDB_AUTO_SYMBOL_LIMIT = 8;
+const BDB_AUTO_TEXT_TAIL_LIMIT = 1000;
 
 function bdbUtf8ByteLength(value) {
   let bytes = 0;
@@ -366,15 +366,15 @@ function bdbAutoWorkspaceContextPayload(payload) {
   }
 
   const snapshotFiles = Array.isArray(context.snapshot_files) ? context.snapshot_files : [];
-  reducedContext.snapshot_files = snapshotFiles.map((file) => {
-    if (!file || typeof file !== "object" || Array.isArray(file)) return file;
-    const metadata = {};
-    for (const key of ["path", "bytes", "sha256", "file_sha256", "content_sha256"]) {
-      if (Object.prototype.hasOwnProperty.call(file, key)) metadata[key] = file[key];
-    }
-    return metadata;
-  });
+  reducedContext.snapshot_paths = snapshotFiles
+    .slice(0, 8)
+    .map((file) => (file && typeof file === "object" && !Array.isArray(file) ? file.path : null))
+    .filter((path) => typeof path === "string" && path.length > 0);
   reducedContext.snapshot_file_count = snapshotFiles.length;
+  reducedContext.snapshot_paths_omitted_for_auto = Math.max(
+    0,
+    snapshotFiles.length - reducedContext.snapshot_paths.length
+  );
   reducedContext.snapshot_contents_omitted_for_auto = snapshotFiles.some(
     (file) => file && typeof file === "object" && typeof file.content === "string"
   );
@@ -546,7 +546,7 @@ function composerText(composer) {
   if (composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement) {
     return composer.value;
   }
-  return composer.innerText || composer.textContent || "";
+  return composer.textContent || "";
 }
 
 function prepareContinuation(text, { requireEmpty = false, maxBytes = BDB_COMPOSER_INSERT_MAX_BYTES } = {}) {
