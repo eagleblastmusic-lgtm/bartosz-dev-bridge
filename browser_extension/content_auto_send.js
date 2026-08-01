@@ -161,13 +161,21 @@ async function bdbAttemptSend(marker, strategy) {
 
 autoSend = async function autoSendWithConfirmedFallbacks(response, loopId, iteration) {
   const marker = `BDB_AUTO_RESULT:${loopId}:${iteration}`;
-  const text = resultText(response, marker);
+  const autoContinuationMaxBytes = typeof BDB_AUTO_CONTINUATION_MAX_BYTES === "number"
+    ? BDB_AUTO_CONTINUATION_MAX_BYTES
+    : 32 * 1024;
+  const text = typeof autoResultText === "function"
+    ? autoResultText(response, marker)
+    : resultText(response, marker);
   const initial = bdbInitialComposerState();
   if (initial.reason) {
     return { sent: false, reason: initial.reason };
   }
 
-  const prepared = prepareContinuation(text, { requireEmpty: true });
+  const prepared = prepareContinuation(text, {
+    requireEmpty: true,
+    maxBytes: autoContinuationMaxBytes
+  });
   if (!prepared) {
     return { sent: false, reason: "insertion_failed" };
   }

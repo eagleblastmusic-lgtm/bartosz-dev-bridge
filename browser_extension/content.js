@@ -311,6 +311,182 @@ function resultText(response, marker = null) {
   return `${prefix}BDB_RESULT:\n${JSON.stringify(payload, null, 2)}`;
 }
 
+const BDB_AUTO_CONTINUATION_MAX_BYTES = 32 * 1024;
+const BDB_COMPOSER_INSERT_MAX_BYTES = 64 * 1024;
+const BDB_AUTO_TRACKED_PATH_LIMIT = 80;
+const BDB_AUTO_SYMBOL_LIMIT = 50;
+const BDB_AUTO_TEXT_TAIL_LIMIT = 6000;
+
+function bdbUtf8ByteLength(value) {
+  let bytes = 0;
+  for (const character of String(value || "")) {
+    const code = character.codePointAt(0);
+    if (code <= 0x7f) bytes += 1;
+    else if (code <= 0x7ff) bytes += 2;
+    else if (code <= 0xffff) bytes += 3;
+    else bytes += 4;
+  }
+  return bytes;
+}
+
+function bdbAutoTail(value, limit = BDB_AUTO_TEXT_TAIL_LIMIT) {
+  if (typeof value !== "string") return value;
+  return value.length <= limit ? value : value.slice(-limit);
+}
+
+function bdbAutoWorkspaceContextPayload(payload) {
+  const context = payload && payload.context && typeof payload.context === "object"
+    ? payload.context
+    : {};
+  const reducedContext = {};
+  const preservedKeys = [
+    "repo_alias",
+    "repository_id",
+    "base_sha",
+    "session_clean",
+    "source_clean",
+    "source_changes",
+    "source_changes_outside_scope",
+    "source_changes_truncated",
+    "initial_revision",
+    "initial_state_hash",
+    "max_sequence",
+    "capabilities",
+    "latest_promotion",
+    "limits",
+    "snapshot_bytes",
+    "snapshot_truncated",
+    "tracked_paths_truncated",
+    "symbols_truncated"
+  ];
+  for (const key of preservedKeys) {
+    if (Object.prototype.hasOwnProperty.call(context, key)) {
+      reducedContext[key] = context[key];
+    }
+  }
+
+  const snapshotFiles = Array.isArray(context.snapshot_files) ? context.snapshot_files : [];
+  reducedContext.snapshot_files = snapshotFiles.map((file) => {
+    if (!file || typeof file !== "object" || Array.isArray(file)) return file;
+    const metadata = {};
+    for (const key of ["path", "bytes", "sha256", "file_sha256", "content_sha256"]) {
+      if (Object.prototype.hasOwnProperty.call(file, key)) metadata[key] = file[key];
+    }
+    return metadata;
+  });
+  reducedContext.snapshot_file_count = snapshotFiles.length;
+  reducedContext.snapshot_contents_omitted_for_auto = snapshotFiles.some(
+    (file) => file && typeof file === "object" && typeof file.content === "string"
+  );
+
+  const trackedPaths = Array.isArray(context.tracked_paths) ? context.tracked_paths : [];
+  reducedContext.tracked_paths = trackedPaths.slice(0, BDB_AUTO_TRACKED_PATH_LIMIT);
+  reducedContext.tracked_paths_total = trackedPaths.length;
+  reducedContext.tracked_paths_omitted_for_auto = Math.max(
+    0,
+    trackedPaths.length - reducedContext.tracked_paths.length
+  );
+
+  const symbols = Array.isArray(context.symbols) ? context.symbols : [];
+  reducedContext.symbols = symbols.slice(0, BDB_AUTO_SYMBOL_LIMIT);
+  reducedContext.symbols_total = symbols.length;
+  reducedContext.symbols_omitted_for_auto = Math.max(
+    0,
+    symbols.length - reducedContext.symbols.length
+  );
+
+  if (Array.isArray(context.skipped_files)) {
+    reducedContext.skipped_files = context.skipped_files;
+  }
+
+  const reduced = {
+    status: payload && payload.status,
+    operation: payload && payload.operation,
+    context: reducedContext,
+    auto_payload: {
+      bounded: true,
+      reason: "workspace_context_compacted",
+      note: "AUTO omitted snapshot contents and excess paths/symbols. Use open_read for exact file content."
+    }
+  };
+  if (payload && Object.prototype.hasOwnProperty.call(payload, "arm")) {
+    reduced.arm = payload.arm;
+  }
+  return reduced;
+}
+
+function bdbAutoFallbackPayload(payload, originalBytes) {
+  const reduced = {};
+  const keys = [
+    "status",
+    "operation",
+    "command_id",
+    "session_id",
+    "sequence",
+    "changed_files",
+    "workspace_revision",
+    "workspace_state_hash",
+    "revision_after",
+    "state_hash_after",
+    "reason",
+    "error",
+    "error_code",
+    "message",
+    "stopReason",
+    "arm"
+  ];
+  for (const key of keys) {
+    if (payload && Object.prototype.hasOwnProperty.call(payload, key)) {
+      reduced[key] = payload[key];
+    }
+  }
+  for (const key of ["stdout_tail", "stderr_tail", "stdout", "stderr"]) {
+    if (payload && Object.prototype.hasOwnProperty.call(payload, key)) {
+      reduced[key] = bdbAutoTail(payload[key]);
+    }
+  }
+  reduced.auto_payload = {
+    bounded: true,
+    reason: "generic_result_compacted",
+    original_bytes: originalBytes,
+    note: "AUTO compacted an oversized result. Request a focused read for omitted details."
+  };
+  return reduced;
+}
+
+function autoResultText(response, marker = null) {
+  const payload = response && response.result ? response.result : response;
+  const prefix = marker ? `${marker}\n` : "";
+  const originalJson = JSON.stringify(payload, null, 2);
+  let projected = payload;
+  if (payload && payload.operation === "workspace_context" && payload.context) {
+    projected = bdbAutoWorkspaceContextPayload(payload);
+  }
+
+  let text = `${prefix}BDB_RESULT:\n${JSON.stringify(projected, null, 2)}`;
+  if (bdbUtf8ByteLength(text) <= BDB_AUTO_CONTINUATION_MAX_BYTES) {
+    return text;
+  }
+
+  projected = bdbAutoFallbackPayload(payload, bdbUtf8ByteLength(originalJson));
+  text = `${prefix}BDB_RESULT:\n${JSON.stringify(projected, null, 2)}`;
+  if (bdbUtf8ByteLength(text) <= BDB_AUTO_CONTINUATION_MAX_BYTES) {
+    return text;
+  }
+
+  const minimal = {
+    status: payload && payload.status,
+    operation: payload && payload.operation,
+    auto_payload: {
+      bounded: true,
+      reason: "minimal_result",
+      original_bytes: bdbUtf8ByteLength(originalJson),
+      note: "Result exceeded the AUTO composer limit. Request a focused read for details."
+    }
+  };
+  return `${prefix}BDB_RESULT:\n${JSON.stringify(minimal, null, 2)}`;
+}
+
 function resultSummary(response) {
   const payload = response && response.result ? response.result : response;
   if (payload && payload.operation === "workspace_context" && payload.context) {
@@ -373,7 +549,10 @@ function composerText(composer) {
   return composer.innerText || composer.textContent || "";
 }
 
-function prepareContinuation(text, { requireEmpty = false } = {}) {
+function prepareContinuation(text, { requireEmpty = false, maxBytes = BDB_COMPOSER_INSERT_MAX_BYTES } = {}) {
+  if (bdbUtf8ByteLength(text) > maxBytes) {
+    return null;
+  }
   const composer = findComposer();
   if (!composer) {
     return null;
