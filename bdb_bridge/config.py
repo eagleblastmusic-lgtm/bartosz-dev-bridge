@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,12 @@ class BridgeConfig:
     direct_spool_dir: Path | None = None
     direct_result_dir: Path | None = None
     workspace_mode: str = "isolated_worktree"
+    mirror_sync_enabled: bool = False
+    mirror_remote_name: str | None = None
+    mirror_remote_url: str | None = None
+    mirror_local_branch: str | None = None
+    mirror_remote_branch: str | None = None
+    mirror_timeout_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         c_repo = Path(self.control_repo_path).expanduser().resolve(strict=False)
@@ -73,6 +80,18 @@ class BridgeConfig:
                 "workspace_mode must be isolated_worktree or direct_checkout",
             )
 
+        if not isinstance(self.mirror_sync_enabled, bool):
+            raise BridgeError("invalid_config", "mirror_sync_enabled must be a boolean")
+        if not 5.0 <= float(self.mirror_timeout_seconds) <= 120.0:
+            raise BridgeError(
+                "invalid_config",
+                "mirror_timeout_seconds must be between 5 and 120",
+            )
+        if self.mirror_sync_enabled:
+            from .mirror_sync import MirrorSyncSettings
+
+            MirrorSyncSettings.from_config(self)
+
         for name, val in [
             ("poll_interval_seconds", self.poll_interval_seconds),
             ("max_poll_seconds", self.max_poll_seconds),
@@ -90,10 +109,20 @@ class BridgeConfig:
                 f"heartbeat_stale_seconds ({self.heartbeat_stale_seconds}) must be greater than heartbeat_interval_seconds ({self.heartbeat_interval_seconds})",
             )
 
+        def comparable_path(path: Path) -> str:
+            value = str(path)
+            if sys.platform == "win32":
+                if value.startswith("\\\\?\\UNC\\"):
+                    value = "\\\\" + value[8:]
+                elif value.startswith("\\\\?\\"):
+                    value = value[4:]
+            return os.path.normcase(os.path.normpath(value))
+
         def is_subpath(p1: Path, p2: Path) -> bool:
+            child = comparable_path(p1)
+            parent = comparable_path(p2)
             try:
-                p1.relative_to(p2)
-                return True
+                return os.path.commonpath((child, parent)) == parent
             except ValueError:
                 return False
 
@@ -168,4 +197,10 @@ class BridgeConfig:
             direct_spool_dir=direct_spool_dir,
             direct_result_dir=direct_result_dir,
             workspace_mode=str(raw.get("workspace_mode") or "isolated_worktree"),
+            mirror_sync_enabled=raw.get("mirror_sync_enabled", False),
+            mirror_remote_name=raw.get("mirror_remote_name"),
+            mirror_remote_url=raw.get("mirror_remote_url"),
+            mirror_local_branch=raw.get("mirror_local_branch"),
+            mirror_remote_branch=raw.get("mirror_remote_branch"),
+            mirror_timeout_seconds=float(raw.get("mirror_timeout_seconds", 60.0)),
         )

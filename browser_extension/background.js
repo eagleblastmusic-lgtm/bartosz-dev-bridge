@@ -4,6 +4,7 @@ const HOST_NAME = "com.bartosz.dev_bridge";
 const REQUEST_SCHEMA = "bdb-native-request-v1";
 const ACTION_SCHEMA = "bdb-action-v1";
 const WORKSPACE_CONTEXT_OPERATION = "workspace_context";
+const SEARCH_TEXT_OPERATION = "search_text";
 const MAX_SERIALIZED_BYTES = 1024 * 1024;
 const DEFAULT_WAIT_SECONDS = 30;
 const PROMOTION_WAIT_ATTEMPTS = 300;
@@ -78,18 +79,19 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function nativeContext(repoAlias) {
+async function nativeContext(repoAlias, { syncMirror = false } = {}) {
   return sendNative({
     schema: REQUEST_SCHEMA,
     request_id: requestId("workspace-context"),
     action: "context",
-    repo_alias: validateRepoAlias(repoAlias)
+    repo_alias: validateRepoAlias(repoAlias),
+    sync_mirror: syncMirror === true
   });
 }
 
 async function workspaceContext(action) {
   const repoAlias = validateRepoAlias(action.repo_alias);
-  const native = await nativeContext(repoAlias);
+  const native = await nativeContext(repoAlias, { syncMirror: true });
   return {
     schema: native.schema,
     request_id: native.request_id,
@@ -102,6 +104,17 @@ async function workspaceContext(action) {
       arm: native.arm
     }
   };
+}
+
+async function repositorySearch(action) {
+  const repoAlias = validateRepoAlias(action.repo_alias);
+  return sendNative({
+    schema: REQUEST_SCHEMA,
+    request_id: requestId("search-text"),
+    action: "search_text",
+    wait_seconds: DEFAULT_WAIT_SECONDS,
+    bdb_action: { ...action, repo_alias: repoAlias }
+  });
 }
 
 function requiresPromotion(action) {
@@ -215,6 +228,9 @@ async function submitAction(action, tabId) {
   try {
     if (action.operation === WORKSPACE_CONTEXT_OPERATION) {
       return await workspaceContext(action);
+    }
+    if (action.operation === SEARCH_TEXT_OPERATION) {
+      return await repositorySearch(action);
     }
     const response = await sendNative({
       schema: REQUEST_SCHEMA,

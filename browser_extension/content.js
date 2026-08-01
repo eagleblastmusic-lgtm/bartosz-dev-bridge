@@ -316,6 +316,8 @@ const BDB_COMPOSER_INSERT_MAX_BYTES = 64 * 1024;
 const BDB_AUTO_TRACKED_PATH_LIMIT = 20;
 const BDB_AUTO_SYMBOL_LIMIT = 8;
 const BDB_AUTO_TEXT_TAIL_LIMIT = 1000;
+const BDB_AUTO_READ_CONTENT_BYTES = 2200;
+const BDB_AUTO_SEARCH_MATCH_LIMIT = 12;
 
 function bdbUtf8ByteLength(value) {
   let bytes = 0;
@@ -332,6 +334,76 @@ function bdbUtf8ByteLength(value) {
 function bdbAutoTail(value, limit = BDB_AUTO_TEXT_TAIL_LIMIT) {
   if (typeof value !== "string") return value;
   return value.length <= limit ? value : value.slice(-limit);
+}
+
+function bdbAutoHeadBytes(value, maxBytes) {
+  if (typeof value !== "string") return value;
+  let bytes = 0;
+  let output = "";
+  for (const character of value) {
+    const code = character.codePointAt(0);
+    const width = code <= 0x7f ? 1 : (code <= 0x7ff ? 2 : (code <= 0xffff ? 3 : 4));
+    if (bytes + width > maxBytes) break;
+    output += character;
+    bytes += width;
+  }
+  return output;
+}
+
+function bdbAutoOpenReadPayload(payload) {
+  const data = payload && payload.data && typeof payload.data === "object"
+    ? payload.data
+    : {};
+  const content = bdbAutoHeadBytes(data.content || "", BDB_AUTO_READ_CONTENT_BYTES);
+  return {
+    status: payload && payload.status,
+    operation: "open_read",
+    command_id: payload && payload.command_id,
+    path: data.path,
+    start_line: data.start_line,
+    end_line: data.end_line,
+    total_lines: data.total_lines,
+    content,
+    content_sha256: data.content_sha256,
+    file_sha256: data.file_sha256,
+    returned_bytes: bdbUtf8ByteLength(content),
+    file_bytes: data.file_bytes,
+    changed_files: [],
+    mirror_sync: payload && payload.mirror_sync,
+    auto_payload: {
+      bounded: true,
+      reason: "open_read_compacted",
+      original_returned_bytes: data.returned_bytes,
+      content_truncated_for_auto: bdbUtf8ByteLength(data.content || "") > BDB_AUTO_READ_CONTENT_BYTES,
+      note: "AUTO preserved a bounded beginning of the requested local line range."
+    }
+  };
+}
+
+function bdbAutoSearchTextPayload(payload) {
+  const matches = Array.isArray(payload && payload.matches)
+    ? payload.matches.slice(0, BDB_AUTO_SEARCH_MATCH_LIMIT)
+    : [];
+  return {
+    status: payload && payload.status,
+    operation: "search_text",
+    query: payload && payload.query,
+    case_sensitive: payload && payload.case_sensitive,
+    matches,
+    returned_matches: matches.length,
+    total_matches: payload && payload.total_matches,
+    truncated: Boolean(payload && (payload.truncated || payload.matches && payload.matches.length > matches.length)),
+    scanned_files: payload && payload.scanned_files,
+    skipped_files: payload && payload.skipped_files,
+    base_sha: payload && payload.base_sha,
+    changed_files: [],
+    mirror_sync: payload && payload.mirror_sync,
+    auto_payload: {
+      bounded: true,
+      reason: "search_text_compacted",
+      note: "AUTO preserved bounded local search matches with file paths and line numbers."
+    }
+  };
 }
 
 function bdbAutoWorkspaceContextPayload(payload) {
@@ -353,6 +425,7 @@ function bdbAutoWorkspaceContextPayload(payload) {
     "max_sequence",
     "capabilities",
     "latest_promotion",
+    "mirror_sync",
     "limits",
     "snapshot_bytes",
     "snapshot_truncated",
@@ -433,12 +506,23 @@ function bdbAutoFallbackPayload(payload, originalBytes) {
     "error_code",
     "message",
     "stopReason",
-    "arm"
+    "arm",
+    "mirror_sync"
   ];
   for (const key of keys) {
     if (payload && Object.prototype.hasOwnProperty.call(payload, key)) {
       reduced[key] = payload[key];
     }
+  }
+  if (payload && payload.promotion && typeof payload.promotion === "object") {
+    const promotion = payload.promotion;
+    reduced.promotion = {
+      status: promotion.status,
+      command_id: promotion.command_id,
+      source_commit: promotion.source_commit,
+      changed_files: promotion.changed_files,
+      mirror_sync: promotion.mirror_sync
+    };
   }
   for (const key of ["stdout_tail", "stderr_tail", "stdout", "stderr"]) {
     if (payload && Object.prototype.hasOwnProperty.call(payload, key)) {
@@ -461,6 +545,10 @@ function autoResultText(response, marker = null) {
   let projected = payload;
   if (payload && payload.operation === "workspace_context" && payload.context) {
     projected = bdbAutoWorkspaceContextPayload(payload);
+  } else if (payload && payload.data && payload.data.operation === "open_read") {
+    projected = bdbAutoOpenReadPayload(payload);
+  } else if (payload && payload.operation === "search_text") {
+    projected = bdbAutoSearchTextPayload(payload);
   }
 
   let text = `${prefix}BDB_RESULT:\n${JSON.stringify(projected, null, 2)}`;

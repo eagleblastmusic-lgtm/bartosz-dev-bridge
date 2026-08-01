@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .protocol import BridgeError, path_matches, validate_repo_relative_path
+from .mirror_sync import MirrorSynchronizer
 from .workspace_manager import Git, changed_paths
 
 
@@ -157,12 +158,15 @@ class WorkspaceContextBuilder:
             "symbols_truncated": len(symbols) >= _MAX_SYMBOLS,
             "skipped_files": skipped[:100],
             "latest_promotion": self._latest_promotion(),
+            "mirror_sync": MirrorSynchronizer(self.config).read_status(),
             "capabilities": {
                 "workspace_context": True,
                 "open_read": True,
+                "search_text": True,
                 "multi_file_patch": True,
                 "automatic_continuation": True,
                 "promotion_receipts": True,
+                "automatic_mirror_sync": bool(getattr(self.config, "mirror_sync_enabled", False)),
             },
             "limits": {
                 "tracked_paths": _MAX_TRACKED_PATHS,
@@ -233,7 +237,7 @@ class WorkspaceContextBuilder:
             ]
             if allowed_changed != changed:
                 continue
-            return {
+            result = {
                 "status": "promoted",
                 "command_id": raw["command_id"],
                 "source_commit": raw["source_commit"],
@@ -241,6 +245,10 @@ class WorkspaceContextBuilder:
                 "file_sha256": hashes,
                 "promoted_at": raw["promoted_at"],
             }
+            mirror_sync = raw.get("mirror_sync")
+            if isinstance(mirror_sync, dict):
+                result["mirror_sync"] = mirror_sync
+            return result
         return None
 
     @staticmethod

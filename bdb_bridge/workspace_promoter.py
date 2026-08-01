@@ -10,6 +10,7 @@ from typing import Any
 
 from .config import BridgeConfig
 from .journal import Journal
+from .mirror_sync import MirrorSynchronizer
 from .protocol import BridgeError, path_matches, validate_repo_relative_path, validate_session_id
 from .workspace_manager import Git, changed_paths
 
@@ -88,6 +89,7 @@ class WorkspacePromoter:
         self.commit_name = commit_name
         self.commit_email = commit_email
         self.source_git = Git(self.source)
+        self.mirror = MirrorSynchronizer(config)
 
     def promote_file(self, result_path: str | Path) -> PromotionOutcome:
         path = Path(result_path).expanduser().resolve(strict=True)
@@ -222,6 +224,9 @@ class WorkspacePromoter:
             "file_sha256": file_hashes,
             "promoted_at": _utc_now(),
         }
+        mirror_sync = self._post_promotion_mirror(commit_sha)
+        if mirror_sync is not None:
+            receipt_document["mirror_sync"] = mirror_sync
         _atomic_json(receipt, receipt_document)
         return PromotionOutcome("promoted", session_id, sequence, commit_sha, receipt, changed)
 
@@ -343,8 +348,20 @@ class WorkspacePromoter:
             "file_sha256": file_hashes,
             "promoted_at": _utc_now(),
         }
+        mirror_sync = self._post_promotion_mirror(commit_sha)
+        if mirror_sync is not None:
+            receipt_document["mirror_sync"] = mirror_sync
         _atomic_json(receipt, receipt_document)
         return PromotionOutcome("promoted", session_id, sequence, commit_sha, receipt, changed)
+
+
+    def _post_promotion_mirror(self, commit_sha: str) -> dict[str, Any] | None:
+        if not self.mirror.enabled:
+            return None
+        return self.mirror.try_sync(
+            phase="post_promotion",
+            expected_head=commit_sha,
+        )
 
     def _validate_result(self, document: dict[str, Any]) -> tuple[str, int, tuple[str, ...]]:
         if document.get("status") != "success" or document.get("exit_code") != 0:

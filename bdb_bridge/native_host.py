@@ -15,7 +15,9 @@ from typing import Any, BinaryIO, Callable
 from .local_result_sink import LocalResultSink
 from .local_spool_transport import LOCAL_ENVELOPE_SCHEMA, LocalSpoolWriter
 from .local_wake import signal_running_bridge
-from .native_actions import NativeActionComposer, NativeSessionStore, RepositoryAlias
+from .mirror_sync import MirrorSynchronizer
+from .native_actions import ACTION_SCHEMA, NativeActionComposer, NativeSessionStore, RepositoryAlias
+from .repository_search import SEARCH_TEXT_OPERATION, search_repository
 from .native_messaging import DEFAULT_MAX_MESSAGE_BYTES, read_native_message, write_native_message
 from .protocol import (
     BridgeError,
@@ -47,6 +49,7 @@ _SAFE_CLIENT_ERROR_CODES = frozenset(
         "dirty_source_checkout",
         "unsafe_path",
         "result_too_large",
+        "mirror_sync_failed",
     }
 )
 
@@ -285,13 +288,26 @@ class NativeHostService:
             )
         if action == "context":
             alias = require_string(request, "repo_alias")
+            repository = self._repository(alias)
+            sync_requested = request.get("sync_mirror", False)
+            if not isinstance(sync_requested, bool):
+                raise BridgeError("invalid_payload", "context sync_mirror must be boolean")
+            mirror_sync = None
+            if sync_requested:
+                arm = self.arm_store.status()
+                if not arm.armed:
+                    raise BridgeError("policy_denied", "Native host is DISARMED or its TTL expired")
+                mirror_sync = self._sync_repository(repository, phase="pre_workspace_context")
+            context = self.action_composer.context(alias)
+            if mirror_sync is not None:
+                context["mirror_sync"] = mirror_sync
             return self._response(
                 request_id,
                 "context",
-                context=self.action_composer.context(alias),
+                context=context,
                 arm=self._arm_payload(),
             )
-        if action not in {"submit", "submit_action", "result"}:
+        if action not in {"submit", "submit_action", "search_text", "result"}:
             raise BridgeError("policy_denied", "Native action is not allowed")
 
         arm = self.arm_store.status()
@@ -299,11 +315,39 @@ class NativeHostService:
             raise BridgeError("policy_denied", "Native host is DISARMED or its TTL expired")
         wait_seconds = self._wait_seconds(request)
 
+        if action == "search_text":
+            bdb_action = request.get("bdb_action")
+            if not isinstance(bdb_action, dict) or bdb_action.get("schema") != ACTION_SCHEMA:
+                raise BridgeError("unsupported_schema", f"search_text requires {ACTION_SCHEMA}")
+            alias = require_string(bdb_action, "repo_alias")
+            if bdb_action.get("operation") != SEARCH_TEXT_OPERATION:
+                raise BridgeError("invalid_payload", "search_text request operation mismatch")
+            payload = bdb_action.get("payload")
+            if not isinstance(payload, dict):
+                raise BridgeError("invalid_payload", "search_text payload must be an object")
+            repository = self._repository(alias)
+            mirror_sync = self._sync_repository(repository, phase="pre_search_text")
+            result = search_repository(repository.bridge_config, payload)
+            if mirror_sync is not None:
+                result["mirror_sync"] = mirror_sync
+            return self._response(
+                request_id,
+                "completed",
+                repo_alias=repository.alias,
+                result=result,
+                arm=self._arm_payload(),
+            )
+
         if action == "submit_action":
             bdb_action = request.get("bdb_action")
             if not isinstance(bdb_action, dict):
                 raise BridgeError("invalid_payload", "submit_action requires bdb_action")
-            repository, envelope = self.action_composer.compose(bdb_action)
+            alias = require_string(bdb_action, "repo_alias")
+            repository = self._repository(alias)
+            mirror_sync = self._sync_repository(repository, phase="pre_action")
+            composed_repository, envelope = self.action_composer.compose(bdb_action)
+            if composed_repository.alias != repository.alias:
+                raise BridgeError("journal_conflict", "Composed repository alias changed unexpectedly")
             command = envelope["command"]
             assert isinstance(command, dict)
             session_id = require_string(command, "session_id")
@@ -318,11 +362,13 @@ class NativeHostService:
                 envelope,
                 filename=filename,
                 wait_seconds=wait_seconds,
+                mirror_sync=mirror_sync,
             )
 
         if action == "submit":
             alias = require_string(request, "repo_alias")
             repository = self._repository(alias)
+            mirror_sync = self._sync_repository(repository, phase="pre_envelope")
             envelope = request.get("envelope")
             if not isinstance(envelope, dict) or envelope.get("schema") != LOCAL_ENVELOPE_SCHEMA:
                 raise BridgeError("invalid_payload", "submit requires bdb-local-envelope-v1")
@@ -335,6 +381,7 @@ class NativeHostService:
                 envelope,
                 filename=filename,
                 wait_seconds=wait_seconds,
+                mirror_sync=mirror_sync,
             )
 
         session_id = require_string(request, "session_id")
@@ -369,6 +416,7 @@ class NativeHostService:
         *,
         filename: str,
         wait_seconds: float,
+        mirror_sync: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         command = envelope.get("command")
         manifest = envelope.get("manifest")
@@ -399,17 +447,26 @@ class NativeHostService:
                 repo_alias=repository.alias,
                 filename=destination.name,
                 wake_signaled=wake_signaled,
+                mirror_sync=mirror_sync,
                 arm=self._arm_payload(),
             )
+        client_result = dict(result)
+        if mirror_sync is not None:
+            client_result["mirror_sync"] = mirror_sync
         return self._response(
             request_id,
             "completed",
             command_id=expected_command_id,
             repo_alias=repository.alias,
             wake_signaled=wake_signaled,
-            result=result,
+            result=client_result,
             arm=self._arm_payload(),
         )
+
+
+    @staticmethod
+    def _sync_repository(repository: RepositoryAlias, *, phase: str) -> dict[str, Any] | None:
+        return MirrorSynchronizer(repository.bridge_config).sync(phase=phase)
 
     def _repository_for_session(self, request: dict[str, Any], session_id: str) -> RepositoryAlias:
         requested_alias = request.get("repo_alias")
