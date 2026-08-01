@@ -6,7 +6,7 @@
 // to the mature scanner. Duplicate execution remains protected by the background
 // replay guard keyed by <loop_id>:<iteration>.
 const scanBeforeRerenderReconciliation = scan;
-const BDB_DOCUMENT_RECONCILIATION_DELAY_MS = 200;
+const BDB_DOCUMENT_RECONCILIATION_DELAY_MS = 600;
 let bdbDocumentReconciliationTimer = null;
 
 function bdbActionBlocks(root) {
@@ -38,6 +38,16 @@ function containsRemovedBdbPanel(node) {
   );
 }
 
+function bdbMutationNodeBelongsToPanel(node) {
+  const element = node instanceof HTMLElement
+    ? node
+    : node && node.parentElement;
+  return Boolean(
+    element instanceof HTMLElement &&
+    element.closest(".bdb-assisted")
+  );
+}
+
 function elementTouchesCode(node) {
   return Boolean(
     node instanceof HTMLElement &&
@@ -54,16 +64,26 @@ function mutationMayAffectBdbAction(record) {
     return Boolean(
       record.target &&
       record.target.parentElement &&
+      !bdbMutationNodeBelongsToPanel(record.target) &&
       elementTouchesCode(record.target.parentElement)
     );
   }
   if (record.type !== "childList") {
     return false;
   }
-  if (elementTouchesCode(record.target)) {
+  if (
+    !bdbMutationNodeBelongsToPanel(record.target) &&
+    elementTouchesCode(record.target)
+  ) {
     return true;
   }
-  if (Array.from(record.addedNodes).some(elementTouchesCode)) {
+  if (
+    Array.from(record.addedNodes).some(
+      (node) =>
+        !bdbMutationNodeBelongsToPanel(node) &&
+        elementTouchesCode(node)
+    )
+  ) {
     return true;
   }
   return Array.from(record.removedNodes).some(containsRemovedBdbPanel);
@@ -71,7 +91,7 @@ function mutationMayAffectBdbAction(record) {
 
 function scheduleBdbDocumentReconciliation() {
   if (bdbDocumentReconciliationTimer !== null) {
-    return;
+    clearTimeout(bdbDocumentReconciliationTimer);
   }
   bdbDocumentReconciliationTimer = setTimeout(() => {
     bdbDocumentReconciliationTimer = null;
