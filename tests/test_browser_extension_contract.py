@@ -15,7 +15,7 @@ def read(name: str) -> str:
 def test_manifest_has_minimal_mv3_permissions() -> None:
     manifest = json.loads(read("manifest.json"))
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "0.3.0"
+    assert manifest["version"] == "0.4.3"
     assert manifest["permissions"] == ["nativeMessaging", "storage"]
     assert manifest["host_permissions"] == ["https://chatgpt.com/*"]
     assert manifest["background"] == {"service_worker": "background_full_entry.js"}
@@ -28,6 +28,7 @@ def test_manifest_has_minimal_mv3_permissions() -> None:
         "content_project_launcher.js",
         "content_project_tab_binding.js",
         "content_repair_retry.js",
+        "content_health.js",
     ]
     serialized = json.dumps(manifest)
     for forbidden in ("<all_urls>", "tabs", "debugger", "webRequest", "downloads"):
@@ -67,6 +68,9 @@ def test_background_accepts_only_versioned_actions_and_native_host() -> None:
     assert 'const HOST_NAME = "com.bartosz.dev_bridge"' in background
     assert 'const ACTION_SCHEMA = "bdb-action-v1"' in background
     assert 'action: "submit_action"' in background
+    assert 'const BDB_EXTENSION_VERSION = "0.4.3"' in background
+    assert "validateNativeVersion" in background
+    assert "sendNativeSubmission" in background
     assert "chrome.runtime.sendNativeMessage" in background
     assert "eval(" not in background
     assert "new Function" not in background
@@ -97,6 +101,8 @@ def test_required_promotion_blocks_auto_until_receipt_matches_command() -> None:
     assert 'reason: "promotion_not_observed"' in background
     assert 'status: "needs_user"' in background
     assert "PROMOTION_WAIT_ATTEMPTS" in background
+    assert 'schema: "bdb-post-action-verification-v1"' in background
+    assert '"verified"' in background
 
 
 def test_auto_continues_only_after_verified_rollback_profile_failure() -> None:
@@ -107,7 +113,8 @@ def test_auto_continues_only_after_verified_rollback_profile_failure() -> None:
     assert 'data.operation === "multi_file_patch"' in background
     assert "data.rollback_performed === true" in background
     assert 'data.checkpoint_state === "rolled_back"' in background
-    assert "const terminal = recoverableFailure ? null" in background
+    assert "recoverableFailure || recoverableNativeError" in background
+    assert 'response.error.code === "internal_error"' in background
     assert "recoverableFailure," in background
 
 
@@ -122,6 +129,7 @@ def test_auto_remains_bounded_and_explicitly_opt_in() -> None:
     assert 'automation.mode !== "auto"' in content
     assert "BDB_CONSIDER_AUTO" in content
     assert "BDB_AUTO_RESULT" in content
+    assert "{0,127}" in background
 
 
 def test_auto_entry_synchronizes_loop_state_and_recovers_replay_claims() -> None:
@@ -139,6 +147,7 @@ def test_auto_entry_synchronizes_loop_state_and_recovers_replay_claims() -> None
     assert '"background_action_preflight.js"' in full_entry
     assert '"background_repair_correlation.js"' in full_entry
     assert '"background_conversation_binding.js"' in full_entry
+    assert '"background_task_controller.js"' in full_entry
     assert "canonicalAutoStateKey" in entry
     assert "chrome.storage.session.get(null)" in entry
     assert "legacyAutoStateEntries" in entry

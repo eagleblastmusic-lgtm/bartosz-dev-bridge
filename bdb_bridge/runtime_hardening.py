@@ -52,7 +52,7 @@ def _canonicalize_promotion_hashes(
     *,
     commit_sha: str,
     entries: dict[str, Any],
-    reader: GitObjectReader,
+    blobs: dict[str, bytes],
 ) -> object:
     if not isinstance(promotion, dict):
         return promotion
@@ -70,7 +70,8 @@ def _canonicalize_promotion_hashes(
         if entry is None:
             canonical_hashes[raw_path] = raw_hash
             continue
-        canonical_hashes[raw_path] = _sha256(reader.read_blob(entry.object_sha))
+        data = blobs.get(entry.object_sha)
+        canonical_hashes[raw_path] = _sha256(data) if data is not None else raw_hash
 
     return {
         **promotion,
@@ -92,6 +93,21 @@ def _canonicalize_clean_snapshot(
         for entry in reader.list_tree(commit_sha)
         if entry.object_type == "blob" and entry.mode not in {"120000", "160000"}
     }
+    requested_shas: list[str] = []
+    for raw in snapshot.get("snapshot_files", []):
+        if isinstance(raw, dict) and isinstance(raw.get("path"), str):
+            entry = entries.get(raw["path"])
+            if entry is not None:
+                requested_shas.append(entry.object_sha)
+    promotion = snapshot.get("latest_promotion")
+    if isinstance(promotion, dict) and promotion.get("source_commit") == commit_sha:
+        hashes = promotion.get("file_sha256")
+        if isinstance(hashes, dict):
+            for relative in hashes:
+                entry = entries.get(relative) if isinstance(relative, str) else None
+                if entry is not None:
+                    requested_shas.append(entry.object_sha)
+    blobs = reader.read_blobs(tuple(dict.fromkeys(requested_shas)))
 
     canonical_files: list[dict[str, Any]] = []
     for raw in snapshot.get("snapshot_files", []):
@@ -103,7 +119,10 @@ def _canonicalize_clean_snapshot(
         if entry is None:
             canonical_files.append(raw)
             continue
-        data = reader.read_blob(entry.object_sha)
+        data = blobs.get(entry.object_sha)
+        if data is None:
+            canonical_files.append(raw)
+            continue
         try:
             text = data.decode("utf-8", errors="strict")
         except UnicodeDecodeError:
@@ -131,7 +150,7 @@ def _canonicalize_clean_snapshot(
             snapshot.get("latest_promotion"),
             commit_sha=commit_sha,
             entries=entries,
-            reader=reader,
+            blobs=blobs,
         ),
     }
     capabilities = result.get("capabilities")
@@ -147,18 +166,22 @@ def _terminal_result_from_journal(
     journal_path: str | Path,
     session_id: str,
     sequence: int,
+    *,
+    connection: sqlite3.Connection | None = None,
 ) -> dict[str, Any] | None:
     database = Path(journal_path).expanduser().resolve(strict=False)
     if not database.is_file() or database.is_symlink():
         return None
 
+    owns_connection = connection is None
     try:
-        connection = sqlite3.connect(
-            f"file:{database.as_posix()}?mode=ro",
-            uri=True,
-            timeout=1.0,
-        )
-        connection.row_factory = sqlite3.Row
+        if connection is None:
+            connection = sqlite3.connect(
+                f"file:{database.as_posix()}?mode=ro",
+                uri=True,
+                timeout=1.0,
+            )
+            connection.row_factory = sqlite3.Row
         try:
             command = connection.execute(
                 """
@@ -183,7 +206,8 @@ def _terminal_result_from_journal(
                 (session_id,),
             ).fetchone()
         finally:
-            connection.close()
+            if owns_connection:
+                connection.close()
     except sqlite3.Error:
         return None
 
@@ -238,6 +262,25 @@ def _terminal_result_from_journal(
     }
 
 
+def _journal_change_token(journal_path: str | Path) -> tuple[int, int, int, int] | None:
+    database = Path(journal_path).expanduser().resolve(strict=False)
+    try:
+        database_stat = database.stat()
+    except OSError:
+        return None
+    wal = Path(str(database) + "-wal")
+    try:
+        wal_stat = wal.stat()
+        return (
+            database_stat.st_mtime_ns,
+            database_stat.st_size,
+            wal_stat.st_mtime_ns,
+            wal_stat.st_size,
+        )
+    except OSError:
+        return (database_stat.st_mtime_ns, database_stat.st_size, 0, 0)
+
+
 def _parse_result_bytes(content: bytes) -> dict[str, Any]:
     try:
         parsed = json.loads(content.decode("utf-8", errors="strict"))
@@ -263,8 +306,8 @@ def install_runtime_hardening() -> None:
 
     original_context_build = WorkspaceContextBuilder.build
 
-    def hardened_context_build(self: WorkspaceContextBuilder) -> dict[str, Any]:
-        return _canonicalize_clean_snapshot(self, original_context_build(self))
+    def hardened_context_build(self: WorkspaceContextBuilder, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return _canonicalize_clean_snapshot(self, original_context_build(self, *args, **kwargs))
 
     WorkspaceContextBuilder.build = hardened_context_build  # type: ignore[method-assign]
 
@@ -278,30 +321,53 @@ def install_runtime_hardening() -> None:
         remote_path = result_path_for(session_id, sequence)
         sink = LocalResultSink(repository.bridge_config.direct_result_dir)
         deadline = self.monotonic() + wait_seconds
-        while True:
-            content = sink.read(remote_path)
-            if content is not None:
-                return _parse_result_bytes(content)
+        journal_connection: sqlite3.Connection | None = None
+        last_token: tuple[int, int, int, int] | None = None
+        try:
+            while True:
+                content = sink.read(remote_path)
+                if content is not None:
+                    return _parse_result_bytes(content)
 
-            terminal = _terminal_result_from_journal(
-                repository.bridge_config.journal_path,
-                session_id,
-                sequence,
-            )
-            if terminal is not None:
-                payload = finalize_result(terminal).encode("utf-8", errors="strict")
-                try:
-                    sink.publish(remote_path, payload)
-                except BridgeError:
-                    existing = sink.read(remote_path)
-                    if existing is None:
-                        raise
-                    return _parse_result_bytes(existing)
-                return _parse_result_bytes(payload)
+                token = _journal_change_token(repository.bridge_config.journal_path)
+                terminal = None
+                if token is not None and (journal_connection is None or token != last_token):
+                    if journal_connection is None:
+                        database = Path(repository.bridge_config.journal_path).expanduser().resolve(strict=False)
+                        try:
+                            journal_connection = sqlite3.connect(
+                                f"file:{database.as_posix()}?mode=ro",
+                                uri=True,
+                                timeout=1.0,
+                            )
+                            journal_connection.row_factory = sqlite3.Row
+                        except sqlite3.Error:
+                            journal_connection = None
+                    if journal_connection is not None:
+                        terminal = _terminal_result_from_journal(
+                            repository.bridge_config.journal_path,
+                            session_id,
+                            sequence,
+                            connection=journal_connection,
+                        )
+                    last_token = token
+                if terminal is not None:
+                    payload = finalize_result(terminal).encode("utf-8", errors="strict")
+                    try:
+                        sink.publish(remote_path, payload)
+                    except BridgeError:
+                        existing = sink.read(remote_path)
+                        if existing is None:
+                            raise
+                        return _parse_result_bytes(existing)
+                    return _parse_result_bytes(payload)
 
-            remaining = deadline - self.monotonic()
-            if remaining <= 0:
-                return None
-            self.sleeper(min(0.05, remaining))
+                remaining = deadline - self.monotonic()
+                if remaining <= 0:
+                    return None
+                self.sleeper(min(0.05, remaining))
+        finally:
+            if journal_connection is not None:
+                journal_connection.close()
 
     NativeHostService._wait_for_result = hardened_wait_for_result  # type: ignore[method-assign]

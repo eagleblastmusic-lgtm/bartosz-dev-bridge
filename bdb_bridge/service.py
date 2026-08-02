@@ -22,6 +22,7 @@ from .scheduler import SingleQueueScheduler
 from .result_outbox import OutboxProcessor, ResultCoordinator, OutboxProcessState
 from .instance_lock import InstanceLock
 from .heartbeat import HeartbeatWorker
+from .runtime_version import BDB_RUNTIME_VERSION
 from .execution import SystemCrash
 
 
@@ -240,7 +241,12 @@ class BridgeService:
         now = self.clock()
         try:
             self.journal.mark_abandoned_service_instances_stale("Abandoned after process crash")
-            self.journal.start_service_instance(instance_id, os.getpid(), now)
+            self.journal.start_service_instance(
+                instance_id,
+                os.getpid(),
+                now,
+                runtime_version=BDB_RUNTIME_VERSION,
+            )
         except Exception as exc:
             return ServiceRunOutcome(instance_id, 1, f"Failed to register service instance: {exc}")
 

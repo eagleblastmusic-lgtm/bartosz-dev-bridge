@@ -127,8 +127,15 @@ def install_terminal_diagnostics() -> None:
         journal_path: str | Path,
         session_id: str,
         sequence: int,
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any] | None:
-        result = original_terminal_result(journal_path, session_id, sequence)
+        result = original_terminal_result(
+            journal_path,
+            session_id,
+            sequence,
+            connection=connection,
+        )
         if result is None:
             return None
         command_id = result.get("command_id")

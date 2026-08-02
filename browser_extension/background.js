@@ -5,6 +5,8 @@ const REQUEST_SCHEMA = "bdb-native-request-v1";
 const ACTION_SCHEMA = "bdb-action-v1";
 const WORKSPACE_CONTEXT_OPERATION = "workspace_context";
 const SEARCH_TEXT_OPERATION = "search_text";
+const INSPECT_BUNDLE_OPERATION = "inspect_bundle";
+const BDB_EXTENSION_VERSION = "0.4.3";
 const MAX_SERIALIZED_BYTES = 1024 * 1024;
 const DEFAULT_WAIT_SECONDS = 30;
 const PROMOTION_WAIT_ATTEMPTS = 300;
@@ -12,11 +14,12 @@ const PROMOTION_WAIT_MILLISECONDS = 100;
 const DEFAULT_AUTO_SETTINGS = Object.freeze({
   autoEnabled: false,
   autoMaxIterations: 4,
-  autoMaxMinutes: 10
+  autoMaxMinutes: 10,
+  autoShadowMode: false
 });
 const AUTO_REPLAY_GUARD_KEY = "bdbAutoReplayGuard";
 const AUTO_REPLAY_GUARD_LIMIT = 512;
-const LOOP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+const LOOP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const REPO_ALIAS_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const TERMINAL_VALUES = new Set([
   "done",
@@ -29,11 +32,29 @@ const TERMINAL_VALUES = new Set([
 ]);
 const inFlightTabs = new Set();
 const replayClaimsInFlight = new Set();
+const nativeRequests = new Map();
+let nativePort = null;
+const NATIVE_REQUEST_TIMEOUT_MILLISECONDS = 125 * 1000;
 
 function requestId(prefix) {
   const bytes = new Uint8Array(12);
   crypto.getRandomValues(bytes);
   return `${prefix}-${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function bdbRandomUuid() {
+  if (typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex
+    .slice(6, 8)
+    .join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
 }
 
 function serializedSize(value) {
@@ -56,10 +77,36 @@ function validateRepoAlias(value) {
   return value;
 }
 
-function sendNative(request) {
-  validateJsonObject(request, "native request");
+function currentExtensionVersion() {
+  if (chrome.runtime && typeof chrome.runtime.getManifest === "function") {
+    const manifest = chrome.runtime.getManifest();
+    return manifest && typeof manifest.version === "string"
+      ? manifest.version
+      : BDB_EXTENSION_VERSION;
+  }
+  return null;
+}
+
+function versionedNativeRequest(request) {
+  const version = currentExtensionVersion();
+  return version ? { ...request, client_version: version } : request;
+}
+
+function validateNativeVersion(response) {
+  const version = currentExtensionVersion();
+  if (version && response.host_version !== version) {
+    throw new Error(
+      `BDB version mismatch: extension=${version}, native_host=${response.host_version || "missing"}. ` +
+      "Reload the extension and the ChatGPT tab."
+    );
+  }
+}
+
+function sendNativeOnce(request) {
+  const nativeRequest = versionedNativeRequest(request);
+  validateJsonObject(nativeRequest, "native request");
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendNativeMessage(HOST_NAME, request, (response) => {
+    chrome.runtime.sendNativeMessage(HOST_NAME, nativeRequest, (response) => {
       const runtimeError = chrome.runtime.lastError;
       if (runtimeError) {
         reject(new Error(runtimeError.message || "Native host unavailable"));
@@ -67,6 +114,7 @@ function sendNative(request) {
       }
       try {
         validateJsonObject(response, "native response");
+        validateNativeVersion(response);
         resolve(response);
       } catch (error) {
         reject(error);
@@ -75,8 +123,101 @@ function sendNative(request) {
   });
 }
 
+function rejectNativeRequests(message) {
+  for (const pending of nativeRequests.values()) {
+    clearTimeout(pending.timer);
+    pending.reject(new Error(message));
+  }
+  nativeRequests.clear();
+}
+
+function persistentNativePort() {
+  if (nativePort) {
+    return nativePort;
+  }
+  if (typeof chrome.runtime.connectNative !== "function") {
+    return null;
+  }
+  const port = chrome.runtime.connectNative(HOST_NAME);
+  port.onMessage.addListener((response) => {
+    try {
+      validateJsonObject(response, "native response");
+      validateNativeVersion(response);
+      const pending = nativeRequests.get(response.request_id);
+      if (!pending) {
+        return;
+      }
+      nativeRequests.delete(response.request_id);
+      clearTimeout(pending.timer);
+      pending.resolve(response);
+    } catch (error) {
+      rejectNativeRequests(error instanceof Error ? error.message : String(error));
+    }
+  });
+  port.onDisconnect.addListener(() => {
+    const runtimeError = chrome.runtime.lastError;
+    nativePort = null;
+    rejectNativeRequests(
+      (runtimeError && runtimeError.message) || "Persistent Native Host disconnected"
+    );
+  });
+  nativePort = port;
+  return nativePort;
+}
+
+function sendNative(request) {
+  const nativeRequest = versionedNativeRequest(request);
+  validateJsonObject(nativeRequest, "native request");
+  const port = persistentNativePort();
+  if (!port) {
+    return sendNativeOnce(nativeRequest);
+  }
+  if (nativeRequests.has(nativeRequest.request_id)) {
+    return Promise.reject(new Error("Duplicate native request_id"));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      nativeRequests.delete(nativeRequest.request_id);
+      reject(new Error("Persistent Native Host request timed out"));
+    }, NATIVE_REQUEST_TIMEOUT_MILLISECONDS);
+    nativeRequests.set(nativeRequest.request_id, { resolve, reject, timer });
+    try {
+      port.postMessage(nativeRequest);
+    } catch (error) {
+      nativeRequests.delete(nativeRequest.request_id);
+      clearTimeout(timer);
+      nativePort = null;
+      reject(error);
+    }
+  });
+}
+
 function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function recoverableNativeFailure(response) {
+  return Boolean(
+    response &&
+    response.status === "failed" &&
+    response.error &&
+    response.error.code === "internal_error"
+  );
+}
+
+async function sendNativeSubmission(request) {
+  let response;
+  try {
+    response = await sendNative(request);
+  } catch (_firstError) {
+    await sleep(100);
+    return sendNative(request);
+  }
+  if (!recoverableNativeFailure(response)) {
+    return response;
+  }
+  await sleep(100);
+  return sendNative(request);
 }
 
 async function nativeContext(repoAlias, { syncMirror = false } = {}) {
@@ -117,6 +258,17 @@ async function repositorySearch(action) {
   });
 }
 
+async function repositoryInspection(action) {
+  const repoAlias = validateRepoAlias(action.repo_alias);
+  return sendNative({
+    schema: REQUEST_SCHEMA,
+    request_id: requestId("inspect-bundle"),
+    action: "inspect_bundle",
+    wait_seconds: DEFAULT_WAIT_SECONDS,
+    bdb_action: { ...action, repo_alias: repoAlias }
+  });
+}
+
 function requiresPromotion(action) {
   const promotion = action && action.promotion;
   return Boolean(
@@ -131,7 +283,24 @@ function withPromotion(response, promotion) {
   const result = response && response.result && typeof response.result === "object"
     ? response.result
     : {};
-  return { ...response, result: { ...result, promotion } };
+  const verification = {
+    schema: "bdb-post-action-verification-v1",
+    status: promotion && promotion.status === "promoted" && result.status === "success"
+      ? "verified"
+      : "needs_user",
+    command_id: promotion && promotion.command_id,
+    changed_files: promotion && promotion.changed_files,
+    file_sha256: promotion && promotion.file_sha256,
+    tests: {
+      status: result.status,
+      exit_code: result.exit_code,
+      stdout_sha256: result.stdout_sha256,
+      stderr_sha256: result.stderr_sha256
+    },
+    source_commit: promotion && promotion.source_commit,
+    mirror_sync: promotion && promotion.mirror_sync
+  };
+  return { ...response, result: { ...result, promotion, verification } };
 }
 
 async function waitForRequiredPromotion(action, response) {
@@ -232,14 +401,21 @@ async function submitAction(action, tabId) {
     if (action.operation === SEARCH_TEXT_OPERATION) {
       return await repositorySearch(action);
     }
-    const response = await sendNative({
+    if (action.operation === INSPECT_BUNDLE_OPERATION) {
+      return await repositoryInspection(action);
+    }
+    const preparedAction = typeof action.session_id === "string" && action.session_id.length > 0
+      ? action
+      : { ...action, session_id: bdbRandomUuid(), sequence: action.sequence || 1 };
+    const request = {
       schema: REQUEST_SCHEMA,
       request_id: requestId("submit"),
       action: "submit_action",
       wait_seconds: DEFAULT_WAIT_SECONDS,
-      bdb_action: action
-    });
-    return await waitForRequiredPromotion(action, response);
+      bdb_action: preparedAction
+    };
+    const response = await sendNativeSubmission(request);
+    return await waitForRequiredPromotion(preparedAction, response);
   } finally {
     inFlightTabs.delete(tabId);
   }
@@ -247,12 +423,18 @@ async function submitAction(action, tabId) {
 
 function normalizeAutoSettings(raw) {
   const enabled = raw.autoEnabled === true;
+  const shadowMode = raw.autoShadowMode === true;
   const iterations = Number.isInteger(raw.autoMaxIterations) ? raw.autoMaxIterations : DEFAULT_AUTO_SETTINGS.autoMaxIterations;
   const minutes = Number.isInteger(raw.autoMaxMinutes) ? raw.autoMaxMinutes : DEFAULT_AUTO_SETTINGS.autoMaxMinutes;
   if (iterations < 1 || iterations > 8 || minutes < 1 || minutes > 30) {
     throw new Error("AUTO limits are outside the allowed range");
   }
-  return { autoEnabled: enabled, autoMaxIterations: iterations, autoMaxMinutes: minutes };
+  return {
+    autoEnabled: enabled,
+    autoMaxIterations: iterations,
+    autoMaxMinutes: minutes,
+    autoShadowMode: shadowMode
+  };
 }
 
 async function getAutoSettings() {
@@ -413,8 +595,30 @@ async function considerAuto(action, tabId) {
 
   const key = autoStateKey(tabId, metadata.loopId);
   const stored = await chrome.storage.session.get(key);
+  const storedState = stored[key];
+  if (metadata.iteration === 1 && !storedState) {
+    let native;
+    try {
+      native = await nativeContext(action.repo_alias);
+    } catch (error) {
+      return {
+        executed: false,
+        reason: "native_host_unavailable",
+        expectedIteration: metadata.iteration,
+        detail: String(error && error.message ? error.message : error).slice(0, 240)
+      };
+    }
+    if (!native || !native.arm || native.arm.armed !== true) {
+      return {
+        executed: false,
+        reason: "native_host_disarmed",
+        expectedIteration: metadata.iteration,
+        arm: native && native.arm ? native.arm : { armed: false }
+      };
+    }
+  }
   const now = Date.now();
-  const state = stored[key] || {
+  const state = storedState || {
     startedAt: now,
     lastIteration: 0,
     status: "running"
@@ -459,26 +663,36 @@ async function considerAuto(action, tabId) {
 
   const response = await submitAction(action, tabId);
   const recoverableFailure = isRecoverableProfileFailure(metadata, response);
-  const terminal = recoverableFailure ? null : containsTerminalValue(response.result || response);
+  const recoverableNativeError = Boolean(
+    response &&
+    response.status === "failed" &&
+    response.error &&
+    response.error.code === "internal_error"
+  );
+  const terminal = recoverableFailure || recoverableNativeError
+    ? null
+    : containsTerminalValue(response.result || response);
   const completed = response.status === "completed";
+  const canContinue = completed || recoverableNativeError;
   state.lastIteration = metadata.iteration;
   state.lastCommandId = response.command_id || null;
   state.lastResponse = response;
   state.lastResponseIteration = metadata.iteration;
   state.lastResponseDelivered = false;
   state.updatedAt = Date.now();
-  state.status = terminal || (completed ? "running" : "needs_user");
+  state.status = terminal || (canContinue ? "running" : "needs_user");
   await chrome.storage.session.set({ [key]: state });
 
-  const shouldContinue = completed && !terminal && metadata.iteration < settings.autoMaxIterations;
+  const shouldContinue = canContinue && !terminal && metadata.iteration < settings.autoMaxIterations;
   return {
     executed: true,
     response,
     loopId: metadata.loopId,
     iteration: metadata.iteration,
     recoverableFailure,
+    recoverableNativeError,
     shouldContinue,
-    stopReason: terminal || (completed ? null : "result_not_completed"),
+    stopReason: terminal || (canContinue ? null : "result_not_completed"),
     state
   };
 }
@@ -512,6 +726,44 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "BDB_SET_AUTO_SETTINGS":
         validateJsonObject(message.settings, "AUTO settings");
         return setAutoSettings(message.settings);
+      case "BDB_HEALTH":
+        if (typeof globalThis.bdbHealthSnapshot !== "function") {
+          throw new Error("BDB health controller is unavailable");
+        }
+        return globalThis.bdbHealthSnapshot({
+          probeNative: message.probeNative === true,
+          contentVersion: message.contentVersion
+        });
+      case "BDB_TASKS":
+        if (typeof globalThis.bdbTaskSnapshot !== "function") {
+          throw new Error("BDB task controller is unavailable");
+        }
+        return globalThis.bdbTaskSnapshot();
+      case "BDB_AUTO_DIAGNOSTICS":
+        if (typeof globalThis.bdbDiagnosticsSnapshot !== "function") {
+          throw new Error("BDB diagnostics controller is unavailable");
+        }
+        return globalThis.bdbDiagnosticsSnapshot();
+      case "BDB_CANCEL_TASK":
+        if (typeof globalThis.bdbCancelTask !== "function") {
+          throw new Error("BDB task controller is unavailable");
+        }
+        return globalThis.bdbCancelTask(message.loopId);
+      case "BDB_RESUME_TASK":
+        if (typeof globalThis.bdbResumeTask !== "function") {
+          throw new Error("BDB task controller is unavailable");
+        }
+        return globalThis.bdbResumeTask(message.loopId);
+      case "BDB_CLEAR_READ_CACHE":
+        if (typeof globalThis.bdbClearReadCache !== "function") {
+          throw new Error("BDB read cache is unavailable");
+        }
+        return globalThis.bdbClearReadCache();
+      case "BDB_CONTENT_EVENT":
+        if (typeof globalThis.bdbRecordContentEvent !== "function") {
+          throw new Error("BDB diagnostics controller is unavailable");
+        }
+        return globalThis.bdbRecordContentEvent(message.event, sender.tab && sender.tab.id);
       case "BDB_MARK_AUTO_RESULT_DELIVERED":
         return markAutoResultDelivered(
           message.loopId,

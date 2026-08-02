@@ -215,10 +215,11 @@ def test_content_script_restores_panel_when_chatgpt_removes_panel_but_keeps_code
               "content_rerender.js",
               "content_auto_send.js",
               "content_auto_retry.js",
-              "content_project_launcher.js",
-              "content_project_tab_binding.js",
-              "content_repair_retry.js"
-            ]);
+                  "content_project_launcher.js",
+                  "content_project_tab_binding.js",
+                  "content_repair_retry.js",
+                  "content_health.js"
+                ]);
             for (const scriptName of scripts) {
               const scriptPath = path.join(extensionDir, scriptName);
               vm.runInContext(fs.readFileSync(scriptPath, "utf8"), context, {

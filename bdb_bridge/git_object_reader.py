@@ -5,7 +5,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .protocol import BridgeError, sanitize_diagnostics
+from .protocol import BridgeError, sanitize_diagnostics, validate_repo_relative_path
 from .repository_index_models import GIT_COMMAND_TIMEOUT_SECONDS, FileKind
 
 
@@ -108,6 +108,80 @@ class GitObjectReader:
         object_sha = _validate_object_sha(object_sha, field="object_sha")
         result = self._run(["cat-file", "blob", object_sha])
         return result.stdout
+
+    def read_blobs(self, object_shas: tuple[str, ...]) -> dict[str, bytes]:
+        """Read multiple immutable blobs through one ``git cat-file --batch`` process."""
+        if not object_shas:
+            return {}
+        validated = tuple(
+            _validate_object_sha(value, field="object_sha") for value in object_shas
+        )
+        request = b"".join(value.encode("ascii") + b"\n" for value in validated)
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(self._repo_path), "cat-file", "--batch"],
+                input=request,
+                shell=False,
+                capture_output=True,
+                timeout=self._timeout_seconds,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            raise BridgeError("invalid_config", "git executable is not available") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise BridgeError("invalid_payload", "git cat-file --batch timed out") from exc
+        if completed.returncode != 0:
+            detail = sanitize_diagnostics(completed.stderr) or "git cat-file --batch failed"
+            raise BridgeError("invalid_payload", detail)
+
+        output = completed.stdout
+        offset = 0
+        blobs: dict[str, bytes] = {}
+        for expected_sha in validated:
+            newline = output.find(b"\n", offset)
+            if newline < 0:
+                raise BridgeError("invalid_payload", "Truncated git cat-file batch header")
+            header = output[offset:newline].split()
+            offset = newline + 1
+            if len(header) != 3 or header[1] != b"blob":
+                raise BridgeError("invalid_payload", "Unexpected git cat-file batch object")
+            actual_sha = _validate_object_sha(
+                header[0].decode("ascii", errors="strict"), field="object_sha"
+            )
+            if actual_sha != expected_sha:
+                raise BridgeError("invalid_payload", "Git cat-file batch order changed")
+            try:
+                size = int(header[2])
+            except ValueError as exc:
+                raise BridgeError("invalid_payload", "Invalid git cat-file blob size") from exc
+            end = offset + size
+            if size < 0 or end >= len(output) or output[end : end + 1] != b"\n":
+                raise BridgeError("invalid_payload", "Truncated git cat-file batch blob")
+            blobs[actual_sha] = output[offset:end]
+            offset = end + 1
+        if offset != len(output):
+            raise BridgeError("invalid_payload", "Unexpected trailing git cat-file batch output")
+        return blobs
+
+    def read_path(self, commit_sha: str, relative_path: str) -> tuple[bytes, str]:
+        commit_sha = _validate_object_sha(commit_sha, field="commit_sha")
+        relative_path = validate_repo_relative_path(relative_path)
+        result = self._run(["ls-tree", "-z", commit_sha, "--", relative_path])
+        chunks = [chunk for chunk in result.stdout.split(b"\0") if chunk]
+        if len(chunks) != 1:
+            raise BridgeError("missing_file", f"Git snapshot does not contain file: {relative_path}")
+        try:
+            metadata, path_bytes = chunks[0].split(b"\t", 1)
+            mode, object_type, object_sha_bytes = metadata.split()
+            actual_path = path_bytes.decode("utf-8", errors="strict")
+        except (ValueError, UnicodeError) as exc:
+            raise BridgeError("invalid_payload", "Malformed git ls-tree path result") from exc
+        if actual_path != relative_path or object_type != b"blob" or mode == b"120000":
+            raise BridgeError("unsafe_path", f"Git snapshot path is not a regular file: {relative_path}")
+        object_sha = _validate_object_sha(
+            object_sha_bytes.decode("ascii", errors="strict"), field="object_sha"
+        )
+        return self.read_blob(object_sha), object_sha
 
     def content_sha256(self, data: bytes) -> str:
         return hashlib.sha256(data).hexdigest()

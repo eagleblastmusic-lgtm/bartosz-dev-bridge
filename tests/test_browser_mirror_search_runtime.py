@@ -137,10 +137,18 @@ def test_auto_preserves_bounded_open_read_search_and_mirror_receipt(tmp_path: Pa
                 changed_files: ["assets/theme.css"],
                 mirror_sync: mirror
               },
+              verification: {
+                schema: "bdb-post-action-verification-v1",
+                status: "verified",
+                command_id: "write:1",
+                source_commit: "c".repeat(40),
+                mirror_sync: mirror
+              },
               padding: "z".repeat(9000)
             }, "BDB_AUTO_RESULT:write:1");
             assert.equal(write.promotion.status, "promoted");
             assert.equal(write.promotion.mirror_sync.status, "up_to_date");
+            assert.equal(write.verification.status, "verified");
             '''
         ),
         encoding="utf-8",
@@ -155,11 +163,16 @@ def test_auto_preserves_bounded_open_read_search_and_mirror_receipt(tmp_path: Pa
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
-def test_auto_contract_keeps_four_kib_cap() -> None:
+def test_auto_contract_uses_adaptive_eight_sixteen_and_four_kib_caps() -> None:
     source = (EXTENSION / "content.js").read_text(encoding="utf-8")
     assert "function bdbAutoOpenReadPayload(payload)" in source
     assert "function bdbAutoSearchTextPayload(payload)" in source
     assert 'reason: "open_read_compacted"' in source
     assert 'reason: "search_text_compacted"' in source
     assert "mirror_sync: promotion.mirror_sync" in source
-    assert "const BDB_AUTO_CONTINUATION_MAX_BYTES = 4 * 1024;" in source
+    assert "const BDB_AUTO_CONTINUATION_TARGET_BYTES = 8 * 1024;" in source
+    assert "const BDB_AUTO_CONTINUATION_MAX_BYTES = 16 * 1024;" in source
+    assert "const BDB_AUTO_LEGACY_CONTINUATION_MAX_BYTES = 4 * 1024;" in source
+    assert 'function bdbAutoInspectBundlePayload(payload, profile = "rich")' in source
+    assert 'reason: "inspect_bundle_compacted"' in source
+    assert 'for (const profile of ["compact", "tight", "minimal"])' in source

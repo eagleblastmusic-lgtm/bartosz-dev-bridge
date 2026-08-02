@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Bartosz Dev Bridge",
-  "version": "0.3.0",
-  "description": "Active-chat project handoff, bounded local edits, client preflight, exact diagnostics, explicit repair correlation, recoverable AUTO state, verified tests, and local promotion.",
+  "version": "0.4.3",
+  "description": "Task-aware AUTO, durable recovery, acceptance checks, bounded diagnostics, cached repository inspection, verified tests, and local promotion.",
   "permissions": [
     "nativeMessaging",
     "storage"
@@ -29,7 +29,8 @@
         "content_auto_retry.js",
         "content_project_launcher.js",
         "content_project_tab_binding.js",
-        "content_repair_retry.js"
+        "content_repair_retry.js",
+        "content_health.js"
       ],
       "css": [
         "content.css"

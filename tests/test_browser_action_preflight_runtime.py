@@ -99,6 +99,31 @@ def test_action_preflight_hash_scope_and_success_runtime(tmp_path: Path) -> None
                       });
                       return;
                     }
+                    if (request.action === "search_text") {
+                      const query = request.bdb_action.payload.query;
+                      const matches = query === "repeated old text"
+                        ? [
+                            { kind: "content", path: "src/app.py", line: 3, text: query },
+                            { kind: "content", path: "src/renderer.py", line: 9, text: query }
+                          ]
+                        : [{ kind: "content", path: "src/app.py", line: 3, text: query }];
+                      callback({
+                        schema: "bdb-native-response-v1",
+                        request_id: request.request_id,
+                        status: "completed",
+                        result: {
+                          status: "success",
+                          operation: "search_text",
+                          query,
+                          matches,
+                          total_matches: matches.length,
+                          truncated: false,
+                          base_sha: "a".repeat(40),
+                          changed_files: []
+                        }
+                      });
+                      return;
+                    }
                     throw new Error(`unexpected native request: ${request.action}`);
                   }
                 }
@@ -138,6 +163,36 @@ def test_action_preflight_hash_scope_and_success_runtime(tmp_path: Path) -> None
                     schema: "bdb-multi-file-patch-v1",
                     operations: [operation]
                   }
+                }
+              };
+            }
+
+            function exactAction(oldText) {
+              return {
+                schema: "bdb-action-v1",
+                repo_alias: "synthetic",
+                operation: "replace_exact_and_test",
+                payload: {
+                  path: "src/app.py",
+                  old: oldText,
+                  new: "new text",
+                  profile_id: "poc_pytest"
+                }
+              };
+            }
+
+            function exactBatchAction() {
+              return {
+                schema: "bdb-action-v1",
+                repo_alias: "synthetic",
+                operation: "replace_exact_and_test",
+                payload: {
+                  path: "src/app.py",
+                  replacements: [
+                    { old: "unique heading", new: "new heading" },
+                    { old: "unique setting", new: "new setting" }
+                  ],
+                  profile_id: "poc_pytest"
                 }
               };
             }
@@ -185,6 +240,43 @@ def test_action_preflight_hash_scope_and_success_runtime(tmp_path: Path) -> None
               assert.equal(
                 nativeRequests.filter((item) => item.action === "submit_action").length,
                 1
+              );
+
+              const beforeScopeGuard = nativeRequests.filter(
+                (item) => item.action === "submit_action"
+              ).length;
+              const scoped = await context.__bdbSubmitAction(
+                exactAction("repeated old text"),
+                7
+              );
+              assert.equal(scoped.status, "completed");
+              assert.equal(scoped.result.status, "scope_incomplete");
+              assert.equal(scoped.result.action_executed, false);
+              assert.deepEqual(
+                Array.from(scoped.result.candidate_paths),
+                ["src/app.py", "src/renderer.py"]
+              );
+              assert.equal(
+                nativeRequests.filter((item) => item.action === "submit_action").length,
+                beforeScopeGuard,
+                "ambiguous single-file replacement reached Native Host submission"
+              );
+
+              const unique = await context.__bdbSubmitAction(
+                exactAction("unique old text"),
+                7
+              );
+              assert.equal(unique.status, "accepted");
+              assert.equal(
+                nativeRequests.filter((item) => item.action === "submit_action").length,
+                beforeScopeGuard + 1
+              );
+
+              const batch = await context.__bdbSubmitAction(exactBatchAction(), 7);
+              assert.equal(batch.status, "accepted");
+              assert.equal(
+                nativeRequests.filter((item) => item.action === "submit_action").length,
+                beforeScopeGuard + 2
               );
             }
 

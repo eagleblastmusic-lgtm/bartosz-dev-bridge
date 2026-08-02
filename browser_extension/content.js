@@ -311,7 +311,9 @@ function resultText(response, marker = null) {
   return `${prefix}BDB_RESULT:\n${JSON.stringify(payload, null, 2)}`;
 }
 
-const BDB_AUTO_CONTINUATION_MAX_BYTES = 4 * 1024;
+const BDB_AUTO_CONTINUATION_TARGET_BYTES = 8 * 1024;
+const BDB_AUTO_CONTINUATION_MAX_BYTES = 16 * 1024;
+const BDB_AUTO_LEGACY_CONTINUATION_MAX_BYTES = 4 * 1024;
 const BDB_COMPOSER_INSERT_MAX_BYTES = 64 * 1024;
 const BDB_AUTO_TRACKED_PATH_LIMIT = 20;
 const BDB_AUTO_SYMBOL_LIMIT = 8;
@@ -507,7 +509,11 @@ function bdbAutoFallbackPayload(payload, originalBytes) {
     "message",
     "stopReason",
     "arm",
-    "mirror_sync"
+    "mirror_sync",
+    "verification",
+    "acceptance",
+    "task_guidance",
+    "execution_cache"
   ];
   for (const key of keys) {
     if (payload && Object.prototype.hasOwnProperty.call(payload, key)) {
@@ -538,10 +544,224 @@ function bdbAutoFallbackPayload(payload, originalBytes) {
   return reduced;
 }
 
-function autoResultText(response, marker = null) {
+function bdbAutoMirrorSummary(mirror) {
+  if (!mirror || typeof mirror !== "object" || Array.isArray(mirror)) {
+    return undefined;
+  }
+  return {
+    status: mirror.status,
+    phase: mirror.phase,
+    pushed: mirror.pushed,
+    local_head: mirror.local_head,
+    remote_head_after: mirror.remote_head_after
+  };
+}
+
+function bdbAutoPromotionSummary(promotion) {
+  if (!promotion || typeof promotion !== "object" || Array.isArray(promotion)) {
+    return undefined;
+  }
+  return {
+    status: promotion.status,
+    source_commit: promotion.source_commit,
+    changed_files: promotion.changed_files,
+    mirror_sync: bdbAutoMirrorSummary(promotion.mirror_sync)
+  };
+}
+
+function bdbAutoTaskGuidanceSummary(guidance) {
+  if (!guidance || typeof guidance !== "object" || Array.isArray(guidance)) {
+    return undefined;
+  }
+  return {
+    trace_id: guidance.trace_id,
+    phase: guidance.phase,
+    complexity: guidance.complexity,
+    next_operation: guidance.next_operation,
+    cache: guidance.cache
+  };
+}
+
+function bdbAutoInspectBundlePayload(payload, profile = "rich") {
+  const context = payload && payload.context && typeof payload.context === "object"
+    ? payload.context
+    : {};
+  const searches = Array.isArray(payload && payload.searches) ? payload.searches : [];
+  const reads = Array.isArray(payload && payload.reads) ? payload.reads : [];
+  const profiles = {
+    rich: {
+      searchLimit: 8,
+      matchesPerSearch: 6,
+      totalMatches: 18,
+      matchTextBytes: 420,
+      readLimit: 4,
+      readContentCount: 4,
+      readContentBytes: 1800,
+      treeLimit: 40,
+      symbolLimit: 12
+    },
+    compact: {
+      searchLimit: 8,
+      matchesPerSearch: 3,
+      totalMatches: 12,
+      matchTextBytes: 240,
+      readLimit: 3,
+      readContentCount: 3,
+      readContentBytes: 800,
+      treeLimit: 20,
+      symbolLimit: 6
+    },
+    tight: {
+      searchLimit: 8,
+      matchesPerSearch: 2,
+      totalMatches: 8,
+      matchTextBytes: 120,
+      readLimit: 4,
+      readContentCount: 1,
+      readContentBytes: 320,
+      treeLimit: 0,
+      symbolLimit: 0
+    },
+    minimal: {
+      searchLimit: 8,
+      matchesPerSearch: 1,
+      totalMatches: 8,
+      matchTextBytes: 0,
+      readLimit: 6,
+      readContentCount: 0,
+      readContentBytes: 0,
+      treeLimit: 0,
+      symbolLimit: 0
+    }
+  };
+  const limits = profiles[profile] || profiles.tight;
+  let matchesRemaining = limits.totalMatches;
+  const renderedSearches = searches.slice(0, limits.searchLimit).map((search) => {
+    const available = Array.isArray(search && search.matches) ? search.matches : [];
+    const selected = available.slice(
+      0,
+      Math.max(0, Math.min(limits.matchesPerSearch, matchesRemaining))
+    );
+    matchesRemaining -= selected.length;
+    return {
+      query: search && search.query,
+      total_matches: search && search.total_matches,
+      truncated: Boolean(search && search.truncated),
+      matches: selected.map((match) => ({
+        kind: match && match.kind,
+        path: match && match.path,
+        line: match && match.line,
+        ...(limits.matchTextBytes > 0 && typeof (match && match.text) === "string"
+          ? { text: bdbAutoHeadBytes(match.text, limits.matchTextBytes) }
+          : {})
+      })),
+      matches_omitted_for_auto: Math.max(0, available.length - selected.length)
+    };
+  });
+  const renderedReads = reads.slice(0, limits.readLimit).map((read, index) => ({
+    path: read && read.path,
+    source: read && read.source,
+    start_line: read && read.start_line,
+    end_line: read && read.end_line,
+    total_lines: read && read.total_lines,
+    ...(index < limits.readContentCount && typeof (read && read.content) === "string"
+      ? { content: bdbAutoHeadBytes(read.content, limits.readContentBytes) }
+      : {}),
+    content_sha256: read && read.content_sha256,
+    file_sha256: read && read.file_sha256,
+    truncated: read && read.truncated,
+    error: read && read.error
+  }));
+  const symbols = Array.isArray(context.symbols)
+    ? context.symbols.slice(0, limits.symbolLimit)
+    : [];
+  const tree = Array.isArray(payload && payload.tree)
+    ? payload.tree.slice(0, limits.treeLimit)
+    : [];
+  if (profile === "minimal") {
+    return {
+      status: payload && payload.status,
+      operation: "inspect_bundle",
+      base_sha: payload && payload.base_sha,
+      context: {
+        source_clean: context.source_clean,
+        source_changes_outside_scope: context.source_changes_outside_scope
+      },
+      mirror_sync: bdbAutoMirrorSummary(payload && payload.mirror_sync),
+      searches: renderedSearches,
+      searches_total: searches.length,
+      reads: renderedReads.map((read) => ({
+        path: read.path,
+        start_line: read.start_line,
+        end_line: read.end_line,
+        truncated: read.truncated
+      })),
+      reads_total: reads.length,
+      reads_truncated: Boolean(payload && payload.reads_truncated) || reads.length > renderedReads.length,
+      task_guidance: bdbAutoTaskGuidanceSummary(payload && payload.task_guidance),
+      auto_payload: {
+        bounded: true,
+        reason: "inspect_bundle_compacted",
+        profile: "minimal",
+        note: "AUTO preserved repository identity, query totals and bounded path locations."
+      }
+    };
+  }
+  return {
+    status: payload && payload.status,
+    operation: "inspect_bundle",
+    base_sha: payload && payload.base_sha,
+    response_profile: payload && payload.response_profile,
+    result_bytes: payload && payload.result_bytes,
+    performance: payload && payload.performance,
+    mirror_sync: bdbAutoMirrorSummary(payload && payload.mirror_sync),
+    context: {
+      source_clean: context.source_clean,
+      source_changes: Array.isArray(context.source_changes)
+        ? context.source_changes.slice(0, 12)
+        : context.source_changes,
+      source_changes_truncated: context.source_changes_truncated,
+      source_changes_outside_scope: context.source_changes_outside_scope,
+      symbols,
+      symbols_total: Array.isArray(context.symbols) ? context.symbols.length : 0,
+      latest_promotion: bdbAutoPromotionSummary(context.latest_promotion)
+    },
+    tree,
+    tree_total: Array.isArray(payload && payload.tree) ? payload.tree.length : 0,
+    tree_truncated: Boolean(payload && payload.tree_truncated),
+    tree_summary: payload && payload.tree_summary,
+    searches: renderedSearches,
+    searches_total: searches.length,
+    searches_omitted_for_auto: Math.max(0, searches.length - renderedSearches.length),
+    reads: renderedReads,
+    reads_total: reads.length,
+    reads_truncated: Boolean(payload && payload.reads_truncated) || reads.length > renderedReads.length,
+    task_guidance: bdbAutoTaskGuidanceSummary(payload && payload.task_guidance),
+    auto_payload: {
+      bounded: true,
+      reason: "inspect_bundle_compacted",
+      profile,
+      note: "One bounded reconnaissance result combines repository state, searches and exact file excerpts."
+    }
+  };
+}
+
+function bdbAutoResultCandidate(prefix, projected, pretty = true) {
+  return `${prefix}BDB_RESULT:\n${JSON.stringify(projected, null, pretty ? 2 : 0)}`;
+}
+
+function autoResultText(
+  response,
+  marker = null,
+  requestedMaxBytes = BDB_AUTO_CONTINUATION_MAX_BYTES
+) {
   const payload = response && response.result ? response.result : response;
   const prefix = marker ? `${marker}\n` : "";
   const originalJson = JSON.stringify(payload, null, 2);
+  const hardLimit = Number.isInteger(requestedMaxBytes)
+    ? Math.max(1024, Math.min(requestedMaxBytes, BDB_AUTO_CONTINUATION_MAX_BYTES))
+    : BDB_AUTO_CONTINUATION_MAX_BYTES;
+  const targetLimit = Math.min(BDB_AUTO_CONTINUATION_TARGET_BYTES, hardLimit);
   let projected = payload;
   if (payload && payload.operation === "workspace_context" && payload.context) {
     projected = bdbAutoWorkspaceContextPayload(payload);
@@ -549,16 +769,36 @@ function autoResultText(response, marker = null) {
     projected = bdbAutoOpenReadPayload(payload);
   } else if (payload && payload.operation === "search_text") {
     projected = bdbAutoSearchTextPayload(payload);
+  } else if (payload && payload.operation === "inspect_bundle") {
+    projected = bdbAutoInspectBundlePayload(payload, "rich");
   }
 
-  let text = `${prefix}BDB_RESULT:\n${JSON.stringify(projected, null, 2)}`;
-  if (bdbUtf8ByteLength(text) <= BDB_AUTO_CONTINUATION_MAX_BYTES) {
+  let text = bdbAutoResultCandidate(prefix, projected);
+  if (bdbUtf8ByteLength(text) <= targetLimit) {
     return text;
   }
 
+  if (payload && payload.operation === "inspect_bundle") {
+    for (const profile of ["compact", "tight", "minimal"]) {
+      const candidate = bdbAutoInspectBundlePayload(payload, profile);
+      text = bdbAutoResultCandidate(prefix, candidate);
+      if (bdbUtf8ByteLength(text) <= targetLimit) {
+        return text;
+      }
+      text = bdbAutoResultCandidate(prefix, candidate, false);
+      if (bdbUtf8ByteLength(text) <= hardLimit) {
+        return text;
+      }
+    }
+  }
+
   projected = bdbAutoFallbackPayload(payload, bdbUtf8ByteLength(originalJson));
-  text = `${prefix}BDB_RESULT:\n${JSON.stringify(projected, null, 2)}`;
-  if (bdbUtf8ByteLength(text) <= BDB_AUTO_CONTINUATION_MAX_BYTES) {
+  text = bdbAutoResultCandidate(prefix, projected);
+  if (bdbUtf8ByteLength(text) <= hardLimit) {
+    return text;
+  }
+  text = bdbAutoResultCandidate(prefix, projected, false);
+  if (bdbUtf8ByteLength(text) <= hardLimit) {
     return text;
   }
 
@@ -572,11 +812,20 @@ function autoResultText(response, marker = null) {
       note: "Result exceeded the AUTO composer limit. Request a focused read for details."
     }
   };
-  return `${prefix}BDB_RESULT:\n${JSON.stringify(minimal, null, 2)}`;
+  return bdbAutoResultCandidate(prefix, minimal, false);
 }
 
 function resultSummary(response) {
   const payload = response && response.result ? response.result : response;
+  if (payload && payload.acceptance && payload.acceptance.status === "unmet") {
+    const failed = Array.isArray(payload.acceptance.checks)
+      ? payload.acceptance.checks.filter((check) => check && check.passed !== true).length
+      : 0;
+    return `Operacja wykonana, ale ${failed || "niektóre"} kryteria ukończenia nie zostały spełnione.`;
+  }
+  if (payload && payload.acceptance && payload.acceptance.status === "passed") {
+    return "Operacja i kryteria ukończenia zostały zweryfikowane.";
+  }
   if (payload && payload.operation === "workspace_context" && payload.context) {
     const context = payload.context;
     const files = Array.isArray(context.tracked_paths) ? context.tracked_paths.length : 0;

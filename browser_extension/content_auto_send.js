@@ -30,6 +30,17 @@ function bdbAutoUtf8ByteLength(value) {
   return bytes;
 }
 
+function bdbAutoFastInsertionAvailable(composer) {
+  return Boolean(
+    composer &&
+    composer.isContentEditable &&
+    typeof composer.replaceChildren === "function" &&
+    typeof document !== "undefined" &&
+    document &&
+    typeof document.createElement === "function"
+  );
+}
+
 function bdbPrepareAutoContinuation(text, composer, maxBytes) {
   if (!composer || bdbAutoUtf8ByteLength(text) > maxBytes) {
     return null;
@@ -40,12 +51,7 @@ function bdbPrepareAutoContinuation(text, composer, maxBytes) {
   // forces style/layout.  Replace the editor contents once and emit one input
   // event instead.  Non-contenteditable/fake harnesses keep the proven legacy
   // path so existing fallbacks and runtime contracts remain intact.
-  if (
-    composer.isContentEditable &&
-    typeof composer.replaceChildren === "function" &&
-    document &&
-    typeof document.createElement === "function"
-  ) {
+  if (bdbAutoFastInsertionAvailable(composer)) {
     try {
       composer.focus();
       const paragraph = document.createElement("p");
@@ -61,14 +67,20 @@ function bdbPrepareAutoContinuation(text, composer, maxBytes) {
       return composer;
     } catch (_directInsertError) {
       // Fall through to the existing insertion path.  AUTO is capped at 4 KiB,
-      // so even the compatibility fallback cannot reproduce the former 426 KiB
-      // or 15 KiB renderer stall.
+      // when the legacy path is selected, so even the compatibility fallback
+      // cannot reproduce the former 426 KiB or 15 KiB renderer stall.
     }
   }
 
+  const legacyMaxBytes = typeof BDB_AUTO_LEGACY_CONTINUATION_MAX_BYTES === "number"
+    ? BDB_AUTO_LEGACY_CONTINUATION_MAX_BYTES
+    : 4 * 1024;
+  if (bdbAutoUtf8ByteLength(text) > legacyMaxBytes) {
+    return null;
+  }
   return prepareContinuation(text, {
     requireEmpty: true,
-    maxBytes
+    maxBytes: Math.min(maxBytes, legacyMaxBytes)
   });
 }
 
@@ -215,22 +227,37 @@ async function bdbAttemptSend(marker, strategy) {
 
 autoSend = async function autoSendWithConfirmedFallbacks(response, loopId, iteration) {
   const marker = `BDB_AUTO_RESULT:${loopId}:${iteration}`;
-  const autoContinuationMaxBytes = typeof BDB_AUTO_CONTINUATION_MAX_BYTES === "number"
+  const fastContinuationMaxBytes = typeof BDB_AUTO_CONTINUATION_MAX_BYTES === "number"
     ? BDB_AUTO_CONTINUATION_MAX_BYTES
+    : 16 * 1024;
+  const legacyContinuationMaxBytes = typeof BDB_AUTO_LEGACY_CONTINUATION_MAX_BYTES === "number"
+    ? BDB_AUTO_LEGACY_CONTINUATION_MAX_BYTES
     : 4 * 1024;
-  const text = typeof autoResultText === "function"
-    ? autoResultText(response, marker)
-    : resultText(response, marker);
   const initial = bdbInitialComposerState();
   if (initial.reason) {
     return { sent: false, reason: initial.reason };
   }
+  const fastInsertion = bdbAutoFastInsertionAvailable(initial.composer);
+  const autoContinuationMaxBytes = fastInsertion
+    ? fastContinuationMaxBytes
+    : legacyContinuationMaxBytes;
+  let text = typeof autoResultText === "function"
+    ? autoResultText(response, marker, autoContinuationMaxBytes)
+    : resultText(response, marker);
 
-  const prepared = bdbPrepareAutoContinuation(
+  let prepared = bdbPrepareAutoContinuation(
     text,
     initial.composer,
     autoContinuationMaxBytes
   );
+  if (!prepared && fastInsertion && typeof autoResultText === "function") {
+    text = autoResultText(response, marker, legacyContinuationMaxBytes);
+    prepared = bdbPrepareAutoContinuation(
+      text,
+      initial.composer,
+      legacyContinuationMaxBytes
+    );
+  }
   if (!prepared) {
     return { sent: false, reason: "insertion_failed" };
   }

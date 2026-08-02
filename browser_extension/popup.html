@@ -9,24 +9,39 @@
   <body>
     <main>
       <h1>Bartosz Dev Bridge</h1>
+      <p id="version">Wersja rozszerzenia: …</p>
       <label for="alias">Alias repozytorium</label>
       <input id="alias" type="text" pattern="[a-z][a-z0-9-]{0,31}" value="gicleeart" autocomplete="off">
       <div class="actions">
         <button id="status" type="button">Status hosta</button>
         <button id="context" type="button">Kontekst repo</button>
+        <button id="health" type="button">Pełny test zdrowia</button>
       </div>
       <fieldset>
         <legend>AUTO — jawne opt-in</legend>
         <label class="check"><input id="auto-enabled" type="checkbox"> Włącz AUTO dla akcji z `automation.mode=auto`</label>
+        <label class="check"><input id="auto-shadow" type="checkbox"> Tryb shadow — oceniaj, ale nie wykonuj akcji AUTO</label>
         <label for="auto-iterations">Maks. iteracji (1–8)</label>
         <input id="auto-iterations" type="number" min="1" max="8" value="4">
         <label for="auto-minutes">Maks. minut (1–30)</label>
         <input id="auto-minutes" type="number" min="1" max="30" value="10">
         <button id="save-auto" type="button">Zapisz ustawienia AUTO</button>
+        <button id="test-auto" type="button">Test AUTO — wyślij bezpieczny wynik do czatu</button>
         <pre id="auto-state" aria-live="polite">Brak aktywnej pętli AUTO.</pre>
       </fieldset>
+      <fieldset>
+        <legend>Kontroler zadania</legend>
+        <pre id="task-state" aria-live="polite">Brak trwałych zadań.</pre>
+        <div class="actions">
+          <button id="resume-task" type="button" disabled>Wznów ostatnie</button>
+          <button id="cancel-task" type="button" disabled>Zatrzymaj ostatnie</button>
+          <button id="clear-cache" type="button">Wyczyść cache</button>
+        </div>
+      </fieldset>
+      <button id="export-diagnostics" type="button">Eksportuj bezpieczną diagnostykę ZIP</button>
       <pre id="output" aria-live="polite">Gotowy.</pre>
     </main>
+    <script src="popup_diagnostics.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

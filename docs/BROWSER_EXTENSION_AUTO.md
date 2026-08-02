@@ -32,7 +32,19 @@ The background worker stores per-tab/per-loop state in `chrome.storage.session`:
 
 User-configured limits are bounded to 1–8 iterations and 1–30 minutes. Iterations must arrive exactly in sequence. Duplicate, skipped, expired or already terminal loops do not execute.
 
-A separate durable replay guard is stored in `chrome.storage.local` before Native Host submission. It prevents the same `<loop_id>:<iteration>` from executing again after a page reload, service-worker restart or browser restart. The guard retains at most 512 recent entries. A replay collision, storage failure or uncertain interrupted attempt falls back to ASSISTED; AUTO never retries the effect automatically.
+A separate durable replay guard is stored in `chrome.storage.local` before Native Host submission. It prevents the same `<loop_id>:<iteration>` from executing again after a page reload, service-worker restart or browser restart. The guard retains at most 512 recent entries. A replay collision, storage failure or uncertain interrupted attempt falls back to ASSISTED. The transport may resend the same durably receipted `request_id` once to recover its original result, but AUTO never creates a second independent effect automatically.
+
+Version 0.4.0 also stores a bounded durable task ledger and up to sixteen compact result checkpoints. If Chrome or the service worker stops after Native completion but before ChatGPT consumes the result, the same action panel recovers the exact checkpoint and delivers it without submitting another Native effect. The popup can explicitly stop or resume the latest task. Resume never enables global AUTO.
+
+One user task uses one `loop_id` (up to 128 safe characters) and monotonically increasing iterations. A fresh `loop_id` is reserved for a new user task, not every BDB action. Short identifiers under 48 characters are recommended for readable result markers.
+
+The 0.4.0 action compiler normalizes unsafe model-generated identifiers before the replay/state machinery sees them and returns the effective ID in `decision.compiler`. Missing iterations are filled from the durable task ledger. This prevents formatting mistakes from silently forcing ASSISTED while retaining a traceable original task identity.
+
+## Task sizing
+
+Two or three iterations are a target for a typical bounded repair, not a hard task limit. Larger work is divided into explicit phases such as analysis, implementation and integration verification. One phase remains bounded by the user's 1–8 iteration and 1–30 minute limits; a later phase uses a fresh task loop only after the earlier phase has ended safely.
+
+`inspect_bundle` should consolidate repository state, up to eight searches and relevant reads. A single `multi_file_patch` should then apply one coherent atomic change and its fixed test profile. Independent searches inside one inspection run concurrently against the same immutable Git commit and reuse an in-process cache keyed by `HEAD`.
 
 ## Automatic continuation
 
@@ -58,6 +70,71 @@ Recursive bounded result inspection stops AUTO for:
 - `CANCELLED`;
 - `ABORTED`.
 
-A Native Host response other than `completed`, a time/iteration violation, replay guard rejection, missing composer, non-empty draft, missing exact send button or extension/native error also stops automatic continuation.
+A time/iteration violation, replay guard rejection, missing composer, non-empty draft, missing exact send button or a non-recoverable extension/native error also stops automatic continuation. Before iteration 1, AUTO checks the Native Host arm state. A disarmed host returns `native_host_disarmed` without consuming the iteration or creating a replay claim, so arming and retrying the same action is safe. A bounded `internal_error` remains a running AUTO planning loop: the exact receipted request is retried first, and the returned diagnostic can then drive a focused inspection without requiring a manual click.
+
+Before `replace_exact_and_test`, the browser preflight searches the exact old text across the allowed repository scope. If it exists in more than one location, no mutation is submitted. AUTO returns `scope_incomplete` with candidate paths and continues the same loop so the next action can use one reviewed `multi_file_patch` for all relevant runtime sources.
+
+`replace_exact_and_test` also accepts a bounded `replacements` list with 1–16 `{old,new}` items for related changes in one file. The executor applies them atomically in order, requires exactly one match for each item, treats LF and CRLF as equivalent for multiline matching, and preserves the target file's line endings. This avoids oversized contextual replacements and extra read/edit iterations for paired template and runtime-setting values.
+
+Terminal diagnostics retain the specific sanitized `error_code` and detail (for example `replace_mismatch`) in the diagnostic event and task ledger `last_error`; a replayed result is labelled separately instead of being counted as another executed mutation.
 
 AUTO does not weaken Native Host ARMED TTL, repository aliases, Direct Lane policy, fixed profiles, worktree isolation, checkpoint, rollback or recovery.
+
+## Acceptance criteria
+
+A mutating action may include machine-checkable completion rules:
+
+```json
+{
+  "acceptance": {
+    "schema": "bdb-acceptance-v1",
+    "result_status": "success",
+    "changed_files_include": ["sections/section.liquid"],
+    "promotion_required": true,
+    "tests_required": true,
+    "search_assertions": [
+      {
+        "query": "unwanted placeholder",
+        "path": "sections/section.liquid",
+        "min_matches": 0,
+        "max_matches": 0,
+        "case_sensitive": true
+      }
+    ]
+  }
+}
+```
+
+The result contains `bdb-acceptance-result-v1` with `passed` or `unmet`. An unmet assertion is deliberately nonterminal so ChatGPT can prepare one focused repair in the same bounded AUTO loop. A passed result recommends `complete`.
+
+## Adaptive AUTO result transport
+
+Version 0.4.3 uses one consistent set of composer budgets:
+
+- 8 KiB is the preferred result target;
+- 16 KiB is the hard ceiling when the current contenteditable composer supports one-shot `replaceChildren` insertion;
+- 4 KiB remains the hard ceiling for the legacy insertion fallback.
+
+`inspect_bundle` progressively selects `rich`, `compact`, `tight` or `minimal` output. It removes repeated metadata and shortens excerpts before dropping repository paths, query totals or line locations. The sender passes its actual fast/legacy ceiling into the formatter, so a result accepted by the formatter cannot be rejected solely because another layer uses a smaller byte limit. This avoids the former `execCommand` renderer stall without forcing every reconnaissance result into the 4 KiB fallback.
+
+## Cache, deduplication and risk
+
+- read cache entries live in `chrome.storage.session`, expire after two minutes and are reused only after a fresh Native context proves that `HEAD` is unchanged;
+- an exact mutating action is deduplicated for five minutes only when the current source commit equals the cached promoted commit;
+- cache entries and durable checkpoints are size-bounded;
+- `delete_file`, `move_file` and `rename_file` are classified as high risk and always return `high_risk_requires_assisted` in AUTO;
+- ordinary allowed replacements/creates remain bounded mutations behind the existing preflight, fixed profile, checkpoint and promotion gates.
+
+## Health, shadow mode and diagnostics
+
+The popup provides:
+
+- a version/Native Host handshake;
+- stale ChatGPT content-script detection;
+- shadow mode, which predicts the decision without execution;
+- an explicit end-to-end AUTO test using read-only `workspace_context` and the real ChatGPT composer;
+- the latest durable task with stop/resume controls;
+- cache clearing;
+- a sanitized ZIP containing bounded events, aggregate counters and task metadata.
+
+Diagnostics never include action payloads, source code or credentials. Each event carries the effective loop, iteration, operation, reason, duration, extension version and trace ID when available.

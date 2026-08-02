@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 from bdb_bridge import CommandState, InstanceLock, Journal
 from bdb_bridge.multi_file_patch_runtime import MultiFilePatchRuntimeCoordinator
+from bdb_bridge import runtime_hardening
 from bdb_bridge.runtime_hardening import _terminal_result_from_journal
+from bdb_bridge.terminal_diagnostics import install_terminal_diagnostics
 
 
 SESSION_ID = "018f3f66-6cb3-4f66-9f2e-3d7647d1b701"
@@ -74,3 +77,44 @@ def test_terminal_result_preserves_exact_pre_mutation_error(tmp_path: Path) -> N
         assert payload["detail"].endswith("START-MP4-PLAYER.cmd")
     finally:
         journal.close()
+
+
+def test_terminal_diagnostic_wrapper_accepts_reused_read_connection(tmp_path: Path) -> None:
+    journal_path = tmp_path / "journal.db"
+    journal = Journal.open(journal_path)
+    try:
+        journal.create_session(SESSION_ID, "diagnostic-fixture", BASE_SHA)
+        journal.record_command(
+            SESSION_ID,
+            COMMAND_ID,
+            1,
+            {
+                "schema_version": "1.1",
+                "session_id": SESSION_ID,
+                "command_id": COMMAND_ID,
+                "sequence": 1,
+                "operation": "open_read",
+                "expected_revision": 0,
+                "expected_state_hash": "sha256:" + "b" * 64,
+                "payload": {"path": "src/example.py"},
+            },
+        )
+    finally:
+        journal.close()
+
+    install_terminal_diagnostics()
+    connection = sqlite3.connect(
+        f"file:{journal_path.as_posix()}?mode=ro",
+        uri=True,
+        timeout=1.0,
+    )
+    connection.row_factory = sqlite3.Row
+    try:
+        assert runtime_hardening._terminal_result_from_journal(
+            journal_path,
+            SESSION_ID,
+            1,
+            connection=connection,
+        ) is None
+    finally:
+        connection.close()

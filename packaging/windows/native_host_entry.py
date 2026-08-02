@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
 
+os.environ["BDB_LIGHTWEIGHT_NATIVE_HOST"] = "1"
+
 from bdb_bridge.native_host import default_native_config_path
 from bdb_bridge.native_host_project_launcher import run_project_launcher_host
+from bdb_bridge.native_runtime_bootstrap import install_native_runtime
 from bdb_bridge.windows_stdio import resolve_native_binary_stdio
+
+
+install_native_runtime()
 
 
 _ORIGIN_RE = re.compile(r"^chrome-extension://[a-p]{32}/$")

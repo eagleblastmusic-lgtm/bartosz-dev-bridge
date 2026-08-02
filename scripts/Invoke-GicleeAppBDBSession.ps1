@@ -52,8 +52,10 @@ switch ($Action) {
             schema = "bdb-gicleeapp-session-v1"
             status = "READY"
             alias = $Alias
-            transport = "local_assisted"
-            auto_mode = $false
+            transport = "local_browser"
+            auto_capable = $true
+            auto_controlled_by_browser = $true
+            auto_activation = "user_opt_in_required"
             bridge = $status.bridge
             native_host = $status.native_host
             controlled_clean = $status.controlled_clean

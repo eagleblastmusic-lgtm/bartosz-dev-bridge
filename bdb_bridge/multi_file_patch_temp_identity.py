@@ -76,10 +76,15 @@ def _command_scoped_temp_path(
     mode: str,
 ) -> Path:
     del bundle
-    target = self.workspace.resolve_allowed_path(item.path)
+    self.workspace.resolve_allowed_path(item.path)
     command_digest = hashlib.sha256(item.command_id.encode("utf-8")).hexdigest()[:16]
     path_digest = hashlib.sha256(item.path.encode("utf-8")).hexdigest()[:16]
-    return target.parent / (
+    workspace_digest = hashlib.sha256(str(self.workspace.path).encode("utf-8")).hexdigest()[:16]
+    temp_root = self.workspace.path.parent / ".bdb-batch-temp" / workspace_digest
+    temp_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if temp_root.is_symlink() or not temp_root.is_dir():
+        raise OSError("Unsafe BDB batch temp root")
+    return temp_root / (
         f".bdb_batch_{command_digest}_{path_digest}_{item.ordinal}_{mode}"
     )
 

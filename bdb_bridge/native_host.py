@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import secrets
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,7 +19,10 @@ from .local_spool_transport import LOCAL_ENVELOPE_SCHEMA, LocalSpoolWriter
 from .local_wake import signal_running_bridge
 from .mirror_sync import MirrorSynchronizer
 from .native_actions import ACTION_SCHEMA, NativeActionComposer, NativeSessionStore, RepositoryAlias
+from .native_request_receipts import NativeRequestReceipt, NativeRequestReceiptStore
 from .repository_search import SEARCH_TEXT_OPERATION, search_repository
+from .repository_inspection import INSPECT_BUNDLE_OPERATION, inspect_repository
+from .runtime_version import BDB_RUNTIME_VERSION, require_compatible_service_runtime
 from .native_messaging import DEFAULT_MAX_MESSAGE_BYTES, read_native_message, write_native_message
 from .protocol import (
     BridgeError,
@@ -35,6 +40,7 @@ NATIVE_CONFIG_SCHEMA = "bdb-native-host-config-v1"
 NATIVE_ARM_SCHEMA = "bdb-native-arm-v1"
 NATIVE_REQUEST_SCHEMA = "bdb-native-request-v1"
 NATIVE_RESPONSE_SCHEMA = "bdb-native-response-v1"
+NATIVE_HOST_VERSION = BDB_RUNTIME_VERSION
 _ORIGIN_RE = re.compile(r"^chrome-extension://[a-p]{32}/$")
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.json$")
@@ -50,6 +56,8 @@ _SAFE_CLIENT_ERROR_CODES = frozenset(
         "unsafe_path",
         "result_too_large",
         "mirror_sync_failed",
+        "version_mismatch",
+        "bridge_restart_required",
     }
 )
 
@@ -106,6 +114,7 @@ class NativeHostConfig:
     allowed_origins: tuple[str, ...]
     state_path: Path
     session_store_path: Path
+    request_store_path: Path
     max_wait_seconds: float = 30.0
     max_message_bytes: int = DEFAULT_MAX_MESSAGE_BYTES
 
@@ -155,8 +164,14 @@ class NativeHostConfig:
             config_path.parent,
             "session_store_path",
         )
-        if state_path == session_store_path:
-            raise BridgeError("invalid_config", "Native host state and session store paths must differ")
+        request_store_path = _local_config_path(
+            raw.get("request_store_path"),
+            config_path.parent / "native-host-requests.json",
+            config_path.parent,
+            "request_store_path",
+        )
+        if len({state_path, session_store_path, request_store_path}) != 3:
+            raise BridgeError("invalid_config", "Native host state stores must use distinct paths")
 
         max_wait_seconds = float(raw.get("max_wait_seconds", 30.0))
         if not 0.0 <= max_wait_seconds <= _MAX_WAIT_SECONDS:
@@ -174,6 +189,7 @@ class NativeHostConfig:
             allowed_origins=tuple(origins),
             state_path=state_path,
             session_store_path=session_store_path,
+            request_store_path=request_store_path,
             max_wait_seconds=max_wait_seconds,
             max_message_bytes=max_message_bytes,
         )
@@ -265,6 +281,10 @@ class NativeHostService:
         self.monotonic = monotonic
         self.arm_store = NativeArmStore(native_config.state_path, now_fn=now_fn)
         self.session_store = NativeSessionStore(native_config.session_store_path, writer=_atomic_json_write)
+        self.request_store = NativeRequestReceiptStore(
+            native_config.request_store_path,
+            writer=_atomic_json_write,
+        )
         self.action_composer = NativeActionComposer(
             native_config.repositories,
             self.session_store,
@@ -277,6 +297,9 @@ class NativeHostService:
             raise BridgeError("invalid_payload", "request_id has an unsafe format")
         if request.get("schema") != NATIVE_REQUEST_SCHEMA:
             raise BridgeError("unsupported_schema", "Native request schema is unsupported")
+        client_version = request.get("client_version")
+        if client_version is not None and client_version != NATIVE_HOST_VERSION:
+            raise BridgeError("version_mismatch", "Browser extension and Native Host versions differ")
         action = require_string(request, "action")
 
         if action == "status":
@@ -307,7 +330,7 @@ class NativeHostService:
                 context=context,
                 arm=self._arm_payload(),
             )
-        if action not in {"submit", "submit_action", "search_text", "result"}:
+        if action not in {"submit", "submit_action", "search_text", "inspect_bundle", "result"}:
             raise BridgeError("policy_denied", "Native action is not allowed")
 
         arm = self.arm_store.status()
@@ -338,12 +361,52 @@ class NativeHostService:
                 arm=self._arm_payload(),
             )
 
+        if action == "inspect_bundle":
+            bdb_action = request.get("bdb_action")
+            if not isinstance(bdb_action, dict) or bdb_action.get("schema") != ACTION_SCHEMA:
+                raise BridgeError("unsupported_schema", f"inspect_bundle requires {ACTION_SCHEMA}")
+            alias = require_string(bdb_action, "repo_alias")
+            if bdb_action.get("operation") != INSPECT_BUNDLE_OPERATION:
+                raise BridgeError("invalid_payload", "inspect_bundle request operation mismatch")
+            payload = bdb_action.get("payload")
+            if not isinstance(payload, dict):
+                raise BridgeError("invalid_payload", "inspect_bundle payload must be an object")
+            repository = self._repository(alias)
+            mirror_sync = self._sync_repository(repository, phase="pre_inspect_bundle")
+            presentation = bdb_action.get("presentation")
+            automation = bdb_action.get("automation")
+            compact = bool(
+                isinstance(presentation, dict) and presentation.get("mode") == "compact"
+            ) or bool(isinstance(automation, dict) and automation.get("mode") == "auto")
+            result = inspect_repository(repository.bridge_config, payload, compact=compact)
+            if mirror_sync is not None:
+                result["mirror_sync"] = mirror_sync
+            return self._response(
+                request_id,
+                "completed",
+                repo_alias=repository.alias,
+                result=result,
+                arm=self._arm_payload(),
+            )
+
         if action == "submit_action":
             bdb_action = request.get("bdb_action")
             if not isinstance(bdb_action, dict):
                 raise BridgeError("invalid_payload", "submit_action requires bdb_action")
             alias = require_string(bdb_action, "repo_alias")
             repository = self._repository(alias)
+            action_sha256 = self._request_sha256(bdb_action)
+            recovered = self._recover_request(
+                request_id,
+                action_sha256=action_sha256,
+                repository=repository,
+                wait_seconds=wait_seconds,
+            )
+            if recovered is not None:
+                return recovered
+            operation = bdb_action.get("operation")
+            if operation in {"replace_exact_and_test", "multi_file_patch"}:
+                require_compatible_service_runtime(repository.bridge_config.journal_path)
             mirror_sync = self._sync_repository(repository, phase="pre_action")
             composed_repository, envelope = self.action_composer.compose(bdb_action)
             if composed_repository.alias != repository.alias:
@@ -363,6 +426,15 @@ class NativeHostService:
                 filename=filename,
                 wait_seconds=wait_seconds,
                 mirror_sync=mirror_sync,
+                request_receipt=NativeRequestReceipt(
+                    request_id=request_id,
+                    action_sha256=action_sha256,
+                    repo_alias=repository.alias,
+                    session_id=session_id,
+                    sequence=sequence,
+                    filename=filename,
+                    created_at=_utc_text(self.now_fn()),
+                ),
             )
 
         if action == "submit":
@@ -372,6 +444,12 @@ class NativeHostService:
             envelope = request.get("envelope")
             if not isinstance(envelope, dict) or envelope.get("schema") != LOCAL_ENVELOPE_SCHEMA:
                 raise BridgeError("invalid_payload", "submit requires bdb-local-envelope-v1")
+            command = envelope.get("command")
+            if (
+                isinstance(command, dict)
+                and command.get("operation") in {"replace_exact_and_test", "multi_file_patch"}
+            ):
+                require_compatible_service_runtime(repository.bridge_config.journal_path)
             filename = require_string(request, "filename")
             if _SAFE_FILENAME_RE.fullmatch(filename) is None:
                 raise BridgeError("unsafe_path", "filename must be a safe .json basename")
@@ -417,6 +495,7 @@ class NativeHostService:
         filename: str,
         wait_seconds: float,
         mirror_sync: dict[str, Any] | None = None,
+        request_receipt: NativeRequestReceipt | None = None,
     ) -> dict[str, Any]:
         command = envelope.get("command")
         manifest = envelope.get("manifest")
@@ -437,6 +516,8 @@ class NativeHostService:
             envelope,
             filename=filename,
         )
+        if request_receipt is not None:
+            self.request_store.bind(request_receipt)
         wake_signaled = signal_running_bridge(repository.bridge_config.runtime_dir)
         result = self._wait_for_result(repository, session_id, sequence, wait_seconds)
         if result is None:
@@ -460,6 +541,56 @@ class NativeHostService:
             repo_alias=repository.alias,
             wake_signaled=wake_signaled,
             result=client_result,
+            arm=self._arm_payload(),
+        )
+
+    @staticmethod
+    def _request_sha256(value: dict[str, Any]) -> str:
+        payload = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8", errors="strict")
+        return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+    def _recover_request(
+        self,
+        request_id: str,
+        *,
+        action_sha256: str,
+        repository: RepositoryAlias,
+        wait_seconds: float,
+    ) -> dict[str, Any] | None:
+        receipt = self.request_store.get(request_id)
+        if receipt is None:
+            return None
+        if receipt.action_sha256 != action_sha256 or receipt.repo_alias != repository.alias:
+            raise BridgeError("journal_conflict", "Native request_id replay does not match its receipt")
+        result = self._wait_for_result(
+            repository,
+            receipt.session_id,
+            receipt.sequence,
+            wait_seconds,
+        )
+        if result is None:
+            return self._response(
+                request_id,
+                "accepted",
+                command_id=receipt.command_id,
+                repo_alias=repository.alias,
+                filename=receipt.filename,
+                wake_signaled=False,
+                request_recovered=True,
+                arm=self._arm_payload(),
+            )
+        return self._response(
+            request_id,
+            "completed",
+            command_id=receipt.command_id,
+            repo_alias=repository.alias,
+            request_recovered=True,
+            result=result,
             arm=self._arm_payload(),
         )
 
@@ -531,6 +662,7 @@ class NativeHostService:
     def _response(request_id: str, status: str, **payload: Any) -> dict[str, Any]:
         return {
             "schema": NATIVE_RESPONSE_SCHEMA,
+            "host_version": NATIVE_HOST_VERSION,
             "request_id": request_id,
             "status": status,
             **payload,
@@ -541,15 +673,48 @@ def _error_response(request_id: str, exc: Exception) -> dict[str, Any]:
     code = str(getattr(exc, "code", "internal_error"))
     if code not in _SAFE_CLIENT_ERROR_CODES:
         code = "internal_error"
+    public_messages = {
+        "bridge_restart_required": (
+            "Aktywna usługa BDB jest starsza lub niedostępna. Uruchom ponownie sesję BDB i ponów akcję."
+        ),
+        "version_mismatch": (
+            "Wersje rozszerzenia i Native Host różnią się. Przeładuj rozszerzenie BDB."
+        ),
+    }
     return {
         "schema": NATIVE_RESPONSE_SCHEMA,
+        "host_version": NATIVE_HOST_VERSION,
         "request_id": request_id,
         "status": "failed",
         "error": {
             "code": code,
-            "message": f"Native request failed: {code}",
+            "message": public_messages.get(code, f"Native request failed: {code}"),
         },
     }
+
+
+def _write_error_diagnostic(
+    native_config: NativeHostConfig,
+    request_id: str,
+    exc: Exception,
+) -> None:
+    try:
+        stack = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        _atomic_json_write(
+            native_config.request_store_path.parent / "native-host-last-error.json",
+            {
+                "schema": "bdb-native-host-error-v1",
+                "host_version": NATIVE_HOST_VERSION,
+                "request_id": request_id,
+                "error_type": type(exc).__name__,
+                "error_code": str(getattr(exc, "code", "internal_error")),
+                "message": str(exc)[:1_000],
+                "traceback": stack[-8_000:],
+                "recorded_at": _utc_text(_utc_now()),
+            },
+        )
+    except Exception:
+        pass
 
 
 def run_host(
@@ -573,6 +738,7 @@ def run_host(
         try:
             response = service.handle(request)
         except Exception as exc:
+            _write_error_diagnostic(native_config, safe_request_id, exc)
             response = _error_response(safe_request_id, exc)
         write_native_message(
             output_stream,

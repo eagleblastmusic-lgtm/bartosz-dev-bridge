@@ -43,10 +43,13 @@ def test_keeper_has_cooperative_stop_and_owned_disarm() -> None:
     assert "FileShare]::None" in source
 
 
-def test_session_launcher_stays_local_and_assisted() -> None:
+def test_session_launcher_reports_browser_managed_auto_without_enabling_it() -> None:
     source = SESSION.read_text(encoding="utf-8")
-    assert '"local_assisted"' in source
-    assert "auto_mode = $false" in source
+    assert '"local_browser"' in source
+    assert "auto_capable = $true" in source
+    assert "auto_controlled_by_browser = $true" in source
+    assert 'auto_activation = "user_opt_in_required"' in source
+    assert "autoEnabled" not in source
     assert "github_transport = $false" in source
     assert "github_push = $false" in source
     assert "shopify_operation = $false" in source

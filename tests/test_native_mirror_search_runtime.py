@@ -92,3 +92,24 @@ def test_native_search_text_returns_current_local_match_and_sync_metadata(tmp_pa
     assert response["result"]["operation"] == "search_text"
     assert response["result"]["matches"][0]["path"] == "assets/theme.css"
     assert response["result"]["changed_files"] == []
+
+    inspection = service.handle(
+        {
+            "schema": NATIVE_REQUEST_SCHEMA,
+            "request_id": "inspect-1",
+            "action": "inspect_bundle",
+            "wait_seconds": 0,
+            "bdb_action": {
+                "schema": "bdb-action-v1",
+                "repo_alias": "search",
+                "operation": "inspect_bundle",
+                "payload": {
+                    "searches": [{"query": "clip-path"}],
+                    "read_top_matches": True,
+                },
+            },
+        }
+    )
+    assert inspection["status"] == "completed"
+    assert inspection["result"]["operation"] == "inspect_bundle"
+    assert inspection["result"]["reads"][0]["path"] == "assets/theme.css"

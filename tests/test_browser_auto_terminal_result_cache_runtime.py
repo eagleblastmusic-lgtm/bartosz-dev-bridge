@@ -98,9 +98,19 @@ def test_terminal_auto_result_is_cached_recovered_and_delivery_is_remembered(tmp
                         messageListener = listener;
                       }
                     },
-                    sendNativeMessage(_host, request, callback) {
-                      shared.nativeRequests.push(request);
-                      if (request.action === "submit_action") {
+                        sendNativeMessage(_host, request, callback) {
+                          shared.nativeRequests.push(request);
+                          if (request.action === "context") {
+                            callback({
+                              schema: "bdb-native-response-v1",
+                              request_id: request.request_id,
+                              status: "context",
+                              context: { allowed_paths: ["**"] },
+                              arm: { armed: true }
+                            });
+                            return;
+                          }
+                          if (request.action === "submit_action") {
                         shared.commandCounter += 1;
                         callback({
                           schema: "bdb-native-response-v1",
@@ -208,14 +218,14 @@ def test_terminal_auto_result_is_cached_recovered_and_delivery_is_remembered(tmp
               assert.equal(first.executed, true, JSON.stringify(first));
               assert.equal(first.shouldContinue, false, JSON.stringify(first));
               assert.equal(first.stopReason, "needs_user", JSON.stringify(first));
-              assert.equal(shared.nativeRequests.length, 1);
+                  assert.equal(shared.nativeRequests.length, 2);
 
               worker = createWorker(shared);
               const recoveredUndelivered = await worker.consider(action, 202);
               assert.equal(recoveredUndelivered.executed, true, JSON.stringify(recoveredUndelivered));
               assert.equal(recoveredUndelivered.recoveredResult, true, JSON.stringify(recoveredUndelivered));
               assert.equal(recoveredUndelivered.resultDelivered, false, JSON.stringify(recoveredUndelivered));
-              assert.equal(shared.nativeRequests.length, 1);
+                  assert.equal(shared.nativeRequests.length, 2);
 
               const marked = await worker.mark(loopId, 1, 202);
               assert.equal(marked.marked, true, JSON.stringify(marked));
@@ -225,7 +235,7 @@ def test_terminal_auto_result_is_cached_recovered_and_delivery_is_remembered(tmp
               assert.equal(recoveredDelivered.executed, true, JSON.stringify(recoveredDelivered));
               assert.equal(recoveredDelivered.recoveredResult, true, JSON.stringify(recoveredDelivered));
               assert.equal(recoveredDelivered.resultDelivered, true, JSON.stringify(recoveredDelivered));
-              assert.equal(shared.nativeRequests.length, 1);
+                  assert.equal(shared.nativeRequests.length, 2);
             }
 
             main().catch((error) => {

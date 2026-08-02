@@ -20,6 +20,7 @@ from .protocol import (
     validate_strict_utc_timestamp,
 )
 from .recovery_journal import sha256_bytes
+from .git_object_reader import GitObjectReader
 from .serializers import MAX_RESULT_BYTES, finalize_result
 from .workspace_manager import WorkspaceManager
 
@@ -137,13 +138,15 @@ def _execute_open_read(config: Any, journal: Any, command: Any) -> dict[str, Any
     try:
         path, start_line, requested_end_line = _read_payload(command.command_json)
         wm = WorkspaceManager(config, session.session_id, session.base_sha, manifest_paths)
-        workspace = wm.ensure_workspace(journal)
-        wm.validate_preplan_gate(
-            workspace,
+        workspace = wm.ensure_read_workspace(
+            journal,
             expected_revision=command.expected_revision if command.expected_revision is not None else -1,
             expected_state_hash=command.expected_state_hash,
         )
-        raw = wm.read_exact_bytes(path)
+        if wm.direct_checkout:
+            raw, _object_sha = GitObjectReader(config.fixture_repo_path).read_path(session.base_sha, path)
+        else:
+            raw = wm.read_exact_bytes(path)
         try:
             text = raw.decode("utf-8", errors="strict")
         except UnicodeDecodeError as exc:

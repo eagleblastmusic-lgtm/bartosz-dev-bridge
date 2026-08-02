@@ -154,6 +154,101 @@ async function bdbPreflightReplaceExact(action, allowedPaths) {
   if (!bdbPathMatches(path, allowedPaths)) {
     throw bdbPreflightError("policy_denied", `Path is not allowed by local policy: ${path}`);
   }
+
+  const hasBatch = payload.replacements !== undefined;
+  if (hasBatch && (payload.old !== undefined || payload.new !== undefined)) {
+    throw bdbPreflightError("invalid_payload", "Use either old/new or replacements, not both");
+  }
+  const replacements = hasBatch
+    ? payload.replacements
+    : [{ old: payload.old, new: payload.new }];
+  if (!Array.isArray(replacements) || replacements.length < 1 || replacements.length > 16) {
+    throw bdbPreflightError("invalid_payload", "replacements must contain 1-16 items");
+  }
+  for (let index = 0; index < replacements.length; index += 1) {
+    const replacement = bdbRequireObject(replacements[index], `replacements[${index}]`);
+    if (typeof replacement.old !== "string" || replacement.old.length === 0) {
+      throw bdbPreflightError("invalid_payload", `replacements[${index}].old must be a non-empty string`);
+    }
+    if (typeof replacement.new !== "string") {
+      throw bdbPreflightError("invalid_payload", `replacements[${index}].new must be a string`);
+    }
+  }
+
+  for (let replacementIndex = 0; replacementIndex < replacements.length; replacementIndex += 1) {
+    const oldText = replacements[replacementIndex].old;
+    if (
+      oldText.length > 200 ||
+      oldText.includes("\0") ||
+      oldText.includes("\r") ||
+      oldText.includes("\n")
+    ) {
+      continue;
+    }
+
+    const searchResponse = await repositorySearch({
+      schema: ACTION_SCHEMA,
+      repo_alias: action.repo_alias,
+      operation: SEARCH_TEXT_OPERATION,
+      payload: {
+        query: oldText,
+        case_sensitive: true,
+        max_results: 20
+      },
+      presentation: { mode: "compact" }
+    });
+    const searchResult = searchResponse && searchResponse.result;
+    if (
+      !searchResponse ||
+      searchResponse.status !== "completed" ||
+      !searchResult ||
+      searchResult.status !== "success" ||
+      !Array.isArray(searchResult.matches)
+    ) {
+      throw bdbPreflightError(
+        "preflight_unavailable",
+        "Exact-text scope search did not return a complete result"
+      );
+    }
+
+    const contentMatches = searchResult.matches.filter((match) => (
+      match && match.kind === "content" && typeof match.path === "string"
+    ));
+    const completeSingleTarget = Boolean(
+      searchResult.truncated !== true &&
+      searchResult.total_matches === 1 &&
+      contentMatches.length === 1 &&
+      contentMatches[0].path === path
+    );
+    if (searchResult.total_matches === 0 || completeSingleTarget) {
+      continue;
+    }
+
+    const candidatePaths = [...new Set(contentMatches.map((match) => match.path))];
+    return {
+      schema: searchResponse.schema,
+      host_version: searchResponse.host_version,
+      request_id: searchResponse.request_id,
+      status: "completed",
+      repo_alias: action.repo_alias,
+      result: {
+        status: "scope_incomplete",
+        operation: "replace_exact_scope_preflight",
+        action_executed: false,
+        target_path: path,
+        replacement_index: replacementIndex,
+        exact_occurrences: searchResult.total_matches,
+        candidate_paths: candidatePaths,
+        matches: contentMatches,
+        base_sha: searchResult.base_sha,
+        mirror_sync: searchResult.mirror_sync,
+        changed_files: [],
+        recommended_operation: "multi_file_patch",
+        summary: "Exact old text exists in more than one repository location; inspect the candidates and patch every relevant runtime source in one action."
+      }
+    };
+  }
+  return null;
 }
 
 async function bdbPreflightAction(action) {
@@ -165,11 +260,15 @@ async function bdbPreflightAction(action) {
   if (action.operation === "multi_file_patch") {
     await bdbPreflightMultiFilePatch(action, allowedPaths);
   } else if (action.operation === "replace_exact_and_test") {
-    await bdbPreflightReplaceExact(action, allowedPaths);
+    return bdbPreflightReplaceExact(action, allowedPaths);
   }
+  return null;
 }
 
 submitAction = async function submitActionWithPreflight(action, tabId) {
-  await bdbPreflightAction(action);
+  const preflightResponse = await bdbPreflightAction(action);
+  if (preflightResponse) {
+    return preflightResponse;
+  }
   return submitActionBeforePreflight(action, tabId);
 };

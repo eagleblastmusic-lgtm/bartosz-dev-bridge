@@ -18,7 +18,7 @@ from .models import (
     ProfileRunOutcome,
     RecoveryDecision,
 )
-from .protocol import BridgeError
+from .protocol import BridgeError, sanitize_diagnostics
 from .recovery_journal import compute_operation_effect_sha256, compute_operation_plan_sha256, sha256_bytes
 from .workspace_manager import WorkspaceManager, changed_paths
 
@@ -35,6 +35,108 @@ class RecoveryAssessment:
 
 class SystemCrash(BaseException):
     """Fault-injection crash that deliberately bypasses generic Exception handlers."""
+
+
+_MAX_EXACT_REPLACEMENTS = 16
+_TERMINAL_DIAGNOSTIC_EVENT = "command.terminal_diagnostic"
+
+
+def _replacement_pairs(payload: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return one bounded replacement batch while retaining legacy old/new input."""
+
+    raw_batch = payload.get("replacements")
+    has_legacy = "old" in payload or "new" in payload
+    if raw_batch is not None and has_legacy:
+        raise BridgeError(
+            BridgeErrorCode.INVALID_PAYLOAD,
+            "Use either old/new or replacements, not both",
+        )
+    if raw_batch is None:
+        old_text = payload.get("old")
+        new_text = payload.get("new")
+        if not isinstance(old_text, str) or not isinstance(new_text, str):
+            raise BridgeError(
+                BridgeErrorCode.INVALID_PAYLOAD,
+                "path, old and new must be strings",
+            )
+        raw_batch = [{"old": old_text, "new": new_text}]
+    if (
+        not isinstance(raw_batch, list)
+        or isinstance(raw_batch, (str, bytes))
+        or not 1 <= len(raw_batch) <= _MAX_EXACT_REPLACEMENTS
+    ):
+        raise BridgeError(
+            BridgeErrorCode.INVALID_PAYLOAD,
+            f"replacements must contain 1-{_MAX_EXACT_REPLACEMENTS} items",
+        )
+    pairs: list[tuple[str, str]] = []
+    for index, item in enumerate(raw_batch, start=1):
+        if not isinstance(item, dict):
+            raise BridgeError(
+                BridgeErrorCode.INVALID_PAYLOAD,
+                f"replacement {index} must be an object",
+            )
+        old_text = item.get("old")
+        new_text = item.get("new")
+        if not isinstance(old_text, str) or not isinstance(new_text, str) or not old_text:
+            raise BridgeError(
+                BridgeErrorCode.INVALID_PAYLOAD,
+                f"replacement {index} requires non-empty old and string new",
+            )
+        pairs.append((old_text, new_text))
+    return pairs
+
+
+def _uniform_line_ending(text: str) -> str | None:
+    without_crlf = text.replace("\r\n", "")
+    has_crlf = "\r\n" in text
+    has_lf = "\n" in without_crlf
+    has_cr = "\r" in without_crlf
+    kinds = int(has_crlf) + int(has_lf) + int(has_cr)
+    if kinds != 1:
+        return None
+    if has_crlf:
+        return "\r\n"
+    return "\n" if has_lf else "\r"
+
+
+def _to_lf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _apply_exact_replacements(text: str, pairs: list[tuple[str, str]]) -> str:
+    """Apply a bounded batch, accepting LF/CRLF variants but preserving file EOLs."""
+
+    current = text
+    target_eol = _uniform_line_ending(text)
+    for index, (old_text, new_text) in enumerate(pairs, start=1):
+        count = current.count(old_text)
+        if count == 1:
+            replacement = new_text
+            if target_eol and ("\n" in new_text or "\r" in new_text):
+                replacement = _to_lf(new_text).replace("\n", target_eol)
+            current = current.replace(old_text, replacement, 1)
+            continue
+
+        normalized_old = _to_lf(old_text)
+        can_compare_eol_agnostic = (
+            count == 0
+            and target_eol is not None
+            and ("\n" in old_text or "\r" in old_text)
+        )
+        normalized_current = _to_lf(current) if can_compare_eol_agnostic else current
+        normalized_count = (
+            normalized_current.count(normalized_old) if can_compare_eol_agnostic else count
+        )
+        if normalized_count != 1:
+            raise BridgeError(
+                BridgeErrorCode.REPLACE_MISMATCH,
+                f"Replacement {index}: expected exactly one match, found {normalized_count}",
+            )
+        normalized_new = _to_lf(new_text)
+        current = normalized_current.replace(normalized_old, normalized_new, 1)
+        current = current.replace("\n", target_eol)
+    return current
 
 
 def sanitized_test_environment() -> dict[str, str]:
@@ -220,7 +322,23 @@ class ExecutionCoordinator:
         revision: int,
         state_hash: str,
     ) -> ExecutionOutcome:
-        self.journal.transition_command(command_id, CommandState.CLAIMED, new_state)
+        now = self.journal._now_fn()
+        with self.journal._transaction():
+            row = self.journal._transition_command_in_transaction(
+                command_id,
+                CommandState.CLAIMED,
+                new_state,
+                now,
+            )
+            code_value = str(getattr(code, "value", code))
+            detail = sanitize_diagnostics(summary, limit=500) or code_value
+            self.journal._append_event_in_transaction(
+                session_id=row[1],
+                command_id=command_id,
+                event_type=_TERMINAL_DIAGNOSTIC_EVENT,
+                payload={"error_code": code_value, "detail": detail},
+                created_at=now,
+            )
         return ExecutionOutcome(
             status=status,
             error_code=code,
@@ -338,7 +456,7 @@ class ExecutionCoordinator:
                         command_id,
                         CommandState.POLICY_DENIED,
                         "policy_denied",
-                        BridgeErrorCode.POLICY_DENIED,
+                        exc.code,
                         str(exc),
                         workspace.revision,
                         workspace.state_hash,
@@ -356,7 +474,7 @@ class ExecutionCoordinator:
                 if exc.code == BridgeErrorCode.STATE_MISMATCH:
                     return self._terminal_claimed_outcome(command_id, CommandState.STATE_MISMATCH, "state_mismatch", exc.code, str(exc), workspace.revision, workspace.state_hash)
                 if exc.code in {BridgeErrorCode.POLICY_DENIED, BridgeErrorCode.SCOPE_VIOLATION, BridgeErrorCode.UNSAFE_PATH}:
-                    return self._terminal_claimed_outcome(command_id, CommandState.POLICY_DENIED, "policy_denied", BridgeErrorCode.POLICY_DENIED, str(exc), workspace.revision, workspace.state_hash)
+                    return self._terminal_claimed_outcome(command_id, CommandState.POLICY_DENIED, "policy_denied", exc.code, str(exc), workspace.revision, workspace.state_hash)
                 return self._manual_outcome(
                     session_id=session.session_id,
                     command_id=command_id,
@@ -366,31 +484,34 @@ class ExecutionCoordinator:
                     diagnostic=_diagnostic(wm, reason=str(exc)),
                 )
             relative_path = payload.get("path")
-            old_text = payload.get("old")
-            new_text = payload.get("new")
-            if not isinstance(relative_path, str) or not isinstance(old_text, str) or not isinstance(new_text, str):
-                return self._terminal_claimed_outcome(command_id, CommandState.POLICY_DENIED, "policy_denied", BridgeErrorCode.INVALID_PAYLOAD, "path, old and new must be strings", workspace.revision, workspace.state_hash)
+            if not isinstance(relative_path, str):
+                return self._terminal_claimed_outcome(command_id, CommandState.POLICY_DENIED, "policy_denied", BridgeErrorCode.INVALID_PAYLOAD, "path must be a string", workspace.revision, workspace.state_hash)
+            try:
+                replacements = _replacement_pairs(payload)
+            except BridgeError as exc:
+                return self._terminal_claimed_outcome(command_id, CommandState.POLICY_DENIED, "policy_denied", exc.code, str(exc), workspace.revision, workspace.state_hash)
             try:
                 wm.resolve_allowed_path(relative_path)
             except BridgeError as exc:
-                return self._terminal_claimed_outcome(command_id, CommandState.POLICY_DENIED, "policy_denied", BridgeErrorCode.POLICY_DENIED, str(exc), workspace.revision, workspace.state_hash)
+                return self._terminal_claimed_outcome(command_id, CommandState.POLICY_DENIED, "policy_denied", exc.code, str(exc), workspace.revision, workspace.state_hash)
             before = wm.read_exact_bytes(relative_path)
             try:
                 before_text = before.decode("utf-8", errors="strict")
             except UnicodeDecodeError as exc:
                 raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Target file is not strict UTF-8") from exc
-            count = before_text.count(old_text)
-            if count != 1:
+            try:
+                after_text = _apply_exact_replacements(before_text, replacements)
+            except BridgeError as exc:
                 return self._terminal_claimed_outcome(
                     command_id,
                     CommandState.POLICY_DENIED,
                     "policy_denied",
-                    BridgeErrorCode.REPLACE_MISMATCH,
-                    f"Expected exactly one match, found {count}",
+                    exc.code,
+                    str(exc),
                     workspace.revision,
                     workspace.state_hash,
                 )
-            after = before_text.replace(old_text, new_text, 1).encode("utf-8")
+            after = after_text.encode("utf-8")
             candidate = OperationPlanRecord(
                 command_id=command_id,
                 session_id=session.session_id,

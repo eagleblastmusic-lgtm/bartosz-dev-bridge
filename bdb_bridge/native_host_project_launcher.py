@@ -8,9 +8,11 @@ from typing import Any, BinaryIO
 from .native_host import (
     NATIVE_REQUEST_SCHEMA,
     NATIVE_RESPONSE_SCHEMA,
+    NATIVE_HOST_VERSION,
     NativeHostConfig,
     NativeHostService,
     _error_response,
+    _write_error_diagnostic,
 )
 from .native_messaging import read_native_message, write_native_message
 from .project_launch import ProjectLaunchQueue
@@ -50,6 +52,9 @@ class ProjectLauncherNativeHostService:
         request_id = require_string(request, "request_id")
         if _REQUEST_ID_RE.fullmatch(request_id) is None:
             raise BridgeError("invalid_payload", "request_id has an unsafe format")
+        client_version = request.get("client_version")
+        if client_version is not None and client_version != NATIVE_HOST_VERSION:
+            raise BridgeError("version_mismatch", "Browser extension and Native Host versions differ")
         arm = self._base.arm_store.status()
         if not arm.armed:
             raise BridgeError("policy_denied", "Native host is DISARMED or its TTL expired")
@@ -58,6 +63,7 @@ class ProjectLauncherNativeHostService:
             launch = self._queue.peek()
             return {
                 "schema": NATIVE_RESPONSE_SCHEMA,
+                "host_version": NATIVE_HOST_VERSION,
                 "request_id": request_id,
                 "status": "empty" if launch is None else "project_launch",
                 "launch": None if launch is None else launch.to_dict(),
@@ -74,6 +80,7 @@ class ProjectLauncherNativeHostService:
             )
             return {
                 "schema": NATIVE_RESPONSE_SCHEMA,
+                "host_version": NATIVE_HOST_VERSION,
                 "request_id": request_id,
                 "status": "claimed" if launch is not None else "busy_or_missing",
                 "launch": None if launch is None else launch.to_dict(),
@@ -84,6 +91,7 @@ class ProjectLauncherNativeHostService:
         acknowledged = self._queue.acknowledge(launch_id, claim_id)
         return {
             "schema": NATIVE_RESPONSE_SCHEMA,
+            "host_version": NATIVE_HOST_VERSION,
             "request_id": request_id,
             "status": "acknowledged" if acknowledged else "not_found_or_not_owner",
             "launch_id": launch_id,
@@ -117,6 +125,7 @@ def run_project_launcher_host(
         try:
             response = service.handle(request)
         except Exception as error:
+            _write_error_diagnostic(native_config, safe_request_id, error)
             response = _error_response(safe_request_id, error)
         write_native_message(
             output_stream,

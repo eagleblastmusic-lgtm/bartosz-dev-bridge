@@ -128,6 +128,32 @@ def test_auto_loop_identifier_is_preserved_character_for_character(tmp_path: Pat
 
             const marker = `BDB_AUTO_RESULT:${metadata.loopId}:${metadata.iteration}`;
             assert.equal(marker, "BDB_AUTO_RESULT:calculator2-p01_auto:2026.07.18:3");
+
+            const longSafeLoopId = `g${"x".repeat(99)}`;
+            const longMetadata = vm.runInContext(
+              `automationMetadata(${JSON.stringify({
+                automation: {
+                  mode: "auto",
+                  loop_id: `g${"x".repeat(99)}`,
+                  iteration: 1
+                }
+              })})`,
+              context
+            );
+            assert.equal(longMetadata.loopId, longSafeLoopId);
+            assert.throws(
+              () => vm.runInContext(
+                `automationMetadata(${JSON.stringify({
+                  automation: {
+                    mode: "auto",
+                    loop_id: `g${"x".repeat(128)}`,
+                    iteration: 1
+                  }
+                })})`,
+                context
+              ),
+              /unsafe format/
+            );
             """
         ),
         encoding="utf-8",

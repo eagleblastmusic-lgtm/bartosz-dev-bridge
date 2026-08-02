@@ -2,7 +2,8 @@
 
 // Load the base message router, bounded result recovery, project-launch adapter,
 // client-side preflight, explicit repair correlation, then durable conversation
-// correlation. Wrapper order is intentional: conversation → repair → preflight.
+// correlation. The task controller is last so it observes the final, fully
+// wrapped AUTO and submission paths without weakening their safety gates.
 importScripts(
   "background_entry.js",
   "background_async_result.js",
@@ -10,5 +11,6 @@ importScripts(
   "background_project_launcher.js",
   "background_action_preflight.js",
   "background_repair_correlation.js",
-  "background_conversation_binding.js"
+  "background_conversation_binding.js",
+  "background_task_controller.js"
 );

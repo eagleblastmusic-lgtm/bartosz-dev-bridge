@@ -162,13 +162,23 @@ def get_latest_service_instance(self: Any) -> ServiceInstanceRecord | None:
 
 
 def start_service_instance(
-    self: Any, instance_id: str, pid: int, started_at: str
+    self: Any,
+    instance_id: str,
+    pid: int,
+    started_at: str,
+    runtime_version: str | None = None,
 ) -> ServiceInstanceRecord:
     self._ensure_open()
     validate_instance_id(instance_id)
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "PID must be positive integer")
     validate_strict_utc_timestamp(started_at, field="started_at")
+    if runtime_version is not None and (
+        not isinstance(runtime_version, str)
+        or not runtime_version
+        or len(runtime_version) > 64
+    ):
+        raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "runtime_version is invalid")
 
     now = self._now_fn()
     try:
@@ -199,11 +209,14 @@ def start_service_instance(
                 ),
             )
 
+            event_payload: dict[str, Any] = {"instance_id": instance_id, "pid": pid}
+            if runtime_version is not None:
+                event_payload["runtime_version"] = runtime_version
             self._append_event_in_transaction(
                 session_id=None,
                 command_id=None,
                 event_type="service.started",
-                payload={"instance_id": instance_id, "pid": pid},
+                payload=event_payload,
                 created_at=now,
             )
     except sqlite3.IntegrityError as exc:

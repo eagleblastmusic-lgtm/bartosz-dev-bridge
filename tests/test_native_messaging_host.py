@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from bdb_bridge import BridgeError
+from bdb_bridge import BridgeError, Journal
 from bdb_bridge.local_result_sink import LocalResultSink
 from bdb_bridge.native_actions import ACTION_SCHEMA
 from bdb_bridge.native_host import (
@@ -21,6 +21,7 @@ from bdb_bridge.native_host import (
 )
 from bdb_bridge.native_messaging import encode_native_message, read_native_message
 from bdb_bridge.protocol import result_path_for
+from bdb_bridge.runtime_version import BDB_RUNTIME_VERSION
 
 
 ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"
@@ -153,6 +154,27 @@ def test_native_config_requires_exact_origins_and_local_state(tmp_path: Path) ->
     assert exc.value.code == "invalid_config"
 
 
+def test_service_rejects_stale_browser_extension_version(tmp_path: Path) -> None:
+    _, config_path, _ = write_configs(tmp_path)
+    service = NativeHostService(
+        NativeHostConfig.from_json(config_path),
+        origin=ORIGIN,
+        now_fn=lambda: NOW,
+    )
+
+    with pytest.raises(BridgeError) as mismatch:
+        service.handle(
+            {
+                "schema": NATIVE_REQUEST_SCHEMA,
+                "request_id": "stale-extension-1",
+                "client_version": "0.3.1",
+                "action": "status",
+            }
+        )
+
+    assert mismatch.value.code == "version_mismatch"
+
+
 def test_arm_store_expires_and_disarms_atomically(tmp_path: Path) -> None:
     now = [NOW]
     store = NativeArmStore(tmp_path / "arm.json", now_fn=lambda: now[0])
@@ -264,6 +286,92 @@ def test_submit_action_binds_alias_and_exact_local_git_base(tmp_path: Path) -> N
     )
     assert written["manifest"]["base_sha"] == base_sha
     assert written["manifest"]["repository_id"] == "synthetic-repository"
+    receipt = service.request_store.get("action-1")
+    assert receipt is not None
+    assert receipt.command_id == response["command_id"]
+
+
+def test_submit_action_blocks_mutation_until_bridge_runtime_matches(tmp_path: Path) -> None:
+    _, config_path, _ = write_configs(tmp_path, initialize_git=True)
+    config = NativeHostConfig.from_json(config_path)
+    repository = config.repositories[ALIAS]
+    NativeArmStore(config.state_path, now_fn=lambda: NOW).arm(minutes=5)
+    service = NativeHostService(config, origin=ORIGIN, now_fn=lambda: NOW)
+    journal = Journal.open(repository.bridge_config.journal_path)
+    old_id = "inst-11111111-1111-1111-1111-111111111111"
+    try:
+        journal.start_service_instance(old_id, 100, NOW.isoformat().replace("+00:00", "Z"))
+        request = {
+            "schema": NATIVE_REQUEST_SCHEMA,
+            "request_id": "mutation-runtime-gate",
+            "action": "submit_action",
+            "wait_seconds": 0,
+            "bdb_action": {
+                "schema": ACTION_SCHEMA,
+                "repo_alias": ALIAS,
+                "operation": "replace_exact_and_test",
+                "payload": {
+                    "path": "src/clamp.py",
+                    "old": "return value",
+                    "new": "return max(0, value)",
+                    "profile_id": "poc_pytest",
+                },
+            },
+        }
+
+        with pytest.raises(BridgeError) as error:
+            service.handle(request)
+        assert str(error.value.code) == "bridge_restart_required"
+        assert list(repository.bridge_config.direct_spool_dir.glob("*.json")) == []
+
+        journal.mark_service_instance_stopped(old_id, exit_code=0)
+        journal.start_service_instance(
+            "inst-22222222-2222-2222-2222-222222222222",
+            200,
+            NOW.isoformat().replace("+00:00", "Z"),
+            runtime_version=BDB_RUNTIME_VERSION,
+        )
+        accepted = service.handle(request)
+        assert accepted["status"] == "accepted"
+    finally:
+        journal.close()
+
+
+def test_submit_action_replay_recovers_the_original_durable_result(tmp_path: Path) -> None:
+    _, config_path, _ = write_configs(tmp_path, initialize_git=True)
+    config = NativeHostConfig.from_json(config_path)
+    NativeArmStore(config.state_path, now_fn=lambda: NOW).arm(minutes=5)
+    service = NativeHostService(config, origin=ORIGIN, now_fn=lambda: NOW)
+    request = {
+        "schema": NATIVE_REQUEST_SCHEMA,
+        "request_id": "recoverable-action-1",
+        "action": "submit_action",
+        "wait_seconds": 0,
+        "bdb_action": {
+            "schema": ACTION_SCHEMA,
+            "repo_alias": ALIAS,
+            "operation": "open_read",
+            "expected_revision": 0,
+            "payload": {"path": "src/clamp.py"},
+        },
+    }
+
+    accepted = service.handle(request)
+    assert accepted["status"] == "accepted"
+    session_id, _ = accepted["command_id"].split(":")
+    expected = {"status": "success", "summary": "recovered"}
+    LocalResultSink(config.repositories[ALIAS].bridge_config.direct_result_dir).publish(
+        result_path_for(session_id, 1),
+        json.dumps(expected).encode("utf-8"),
+    )
+
+    recovered = service.handle(request)
+
+    assert recovered["status"] == "completed"
+    assert recovered["request_recovered"] is True
+    assert recovered["command_id"] == accepted["command_id"]
+    assert recovered["result"] == expected
+    assert recovered["host_version"] == "0.4.3"
 
 
 def test_result_poll_is_bounded_and_status_works_while_disarmed(tmp_path: Path) -> None:

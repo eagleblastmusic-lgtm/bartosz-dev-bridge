@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path, PurePosixPath
+import subprocess
+import threading
+from copy import deepcopy
+from collections import OrderedDict
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from .git_object_reader import GitObjectReader, GitTreeEntry
 from .protocol import BridgeError, path_matches, validate_repo_relative_path
-from .workspace_manager import Git
 
 
 SEARCH_TEXT_OPERATION = "search_text"
@@ -17,8 +22,14 @@ _MAX_FILE_BYTES = 1024 * 1024
 _MAX_TRACKED_FILES = 10_000
 _MAX_RESULT_BYTES = 3_000
 _TEXT_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
     ".css",
+    ".go",
     ".graphql",
+    ".h",
+    ".hpp",
     ".htm",
     ".html",
     ".js",
@@ -27,9 +38,14 @@ _TEXT_SUFFIXES = {
     ".liquid",
     ".md",
     ".mjs",
+    ".php",
+    ".py",
+    ".rb",
+    ".rs",
     ".scss",
     ".svg",
     ".toml",
+    ".sh",
     ".ts",
     ".tsx",
     ".txt",
@@ -40,6 +56,41 @@ _TEXT_SUFFIXES = {
 }
 _TEXT_BASENAMES = {"package.json", "package-lock.json", "shopify.theme.toml"}
 _EXTENSION_RE = re.compile(r"^\.[a-z0-9]{1,12}$")
+
+
+@dataclass(frozen=True)
+class RepositorySnapshot:
+    root: Path
+    head: str
+    entries: tuple[GitTreeEntry, ...]
+
+
+_SNAPSHOT_CACHE: "OrderedDict[str, RepositorySnapshot]" = OrderedDict()
+_SNAPSHOT_CACHE_LOCK = threading.RLock()
+_SNAPSHOT_CACHE_LIMIT = 8
+_SEARCH_CACHE: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+_SEARCH_CACHE_LOCK = threading.RLock()
+_SEARCH_CACHE_LIMIT = 128
+
+
+def repository_snapshot(config: Any) -> RepositorySnapshot:
+    root = Path(config.fixture_repo_path).expanduser().resolve(strict=True)
+    reader = GitObjectReader(root)
+    head = reader.resolve_commit("HEAD")
+    key = str(root)
+    with _SNAPSHOT_CACHE_LOCK:
+        cached = _SNAPSHOT_CACHE.get(key)
+        if cached is not None and cached.head == head:
+            _SNAPSHOT_CACHE.move_to_end(key)
+            return cached
+    reader.ensure_repository()
+    snapshot = RepositorySnapshot(root=root, head=head, entries=reader.list_tree(head))
+    with _SNAPSHOT_CACHE_LOCK:
+        _SNAPSHOT_CACHE[key] = snapshot
+        _SNAPSHOT_CACHE.move_to_end(key)
+        while len(_SNAPSHOT_CACHE) > _SNAPSHOT_CACHE_LIMIT:
+            _SNAPSHOT_CACHE.popitem(last=False)
+    return snapshot
 
 
 def _require_bool(payload: dict[str, Any], field: str, default: bool) -> bool:
@@ -85,19 +136,6 @@ def _extensions(payload: dict[str, Any]) -> tuple[str, ...]:
     return tuple(sorted(set(values)))
 
 
-def _safe_path(root: Path, relative: str) -> Path:
-    normalized = validate_repo_relative_path(relative)
-    candidate = root.joinpath(*PurePosixPath(normalized).parts)
-    if candidate.is_symlink():
-        raise BridgeError("unsafe_path", f"search_text path must not be a symlink: {normalized}")
-    resolved = candidate.resolve(strict=False)
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise BridgeError("unsafe_path", f"search_text path escaped the repository: {normalized}") from exc
-    return resolved
-
-
 def _trim_line(value: str, limit: int = 240) -> str:
     collapsed = value.strip().replace("\t", " ")
     return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
@@ -114,7 +152,61 @@ def _bounded_result(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def search_repository(config: Any, payload: dict[str, Any]) -> dict[str, Any]:
+def _search_cache_key(
+    config: Any,
+    snapshot: RepositorySnapshot,
+    *,
+    query: str,
+    case_sensitive: bool,
+    max_results: int,
+    prefixes: tuple[str, ...],
+    extensions: tuple[str, ...],
+) -> str:
+    document = {
+        "root": str(snapshot.root),
+        "head": snapshot.head,
+        "allowed_paths": list(config.allowed_paths),
+        "query": query,
+        "case_sensitive": case_sensitive,
+        "max_results": max_results,
+        "prefixes": list(prefixes),
+        "extensions": list(extensions),
+    }
+    return json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _cached_search(key: str) -> dict[str, Any] | None:
+    with _SEARCH_CACHE_LOCK:
+        cached = _SEARCH_CACHE.get(key)
+        if cached is None:
+            return None
+        _SEARCH_CACHE.move_to_end(key)
+        result = deepcopy(cached)
+    result["cache"] = {
+        "schema": "bdb-repository-search-cache-v1",
+        "status": "hit",
+        "backend": "git_grep",
+        "base_sha": result.get("base_sha"),
+    }
+    return result
+
+
+def _store_search(key: str, result: dict[str, Any]) -> None:
+    stored = deepcopy(result)
+    stored.pop("cache", None)
+    with _SEARCH_CACHE_LOCK:
+        _SEARCH_CACHE[key] = stored
+        _SEARCH_CACHE.move_to_end(key)
+        while len(_SEARCH_CACHE) > _SEARCH_CACHE_LIMIT:
+            _SEARCH_CACHE.popitem(last=False)
+
+
+def search_repository(
+    config: Any,
+    payload: dict[str, Any],
+    *,
+    snapshot: RepositorySnapshot | None = None,
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise BridgeError("invalid_payload", "search_text payload must be an object")
     query = payload.get("query")
@@ -136,13 +228,24 @@ def search_repository(config: Any, payload: dict[str, Any]) -> dict[str, Any]:
     prefixes = _prefixes(payload)
     extensions = _extensions(payload)
 
-    root = Path(config.fixture_repo_path).expanduser().resolve(strict=True)
-    git = Git(root)
-    head = git.run(["rev-parse", "HEAD"]).stdout.strip().lower()
-    tracked_raw = git.run(["ls-files", "-z"]).stdout
-    tracked = [item.replace("\\", "/") for item in tracked_raw.split("\0") if item]
-    if len(tracked) > _MAX_TRACKED_FILES:
-        tracked = tracked[:_MAX_TRACKED_FILES]
+    snapshot = snapshot or repository_snapshot(config)
+    cache_key = _search_cache_key(
+        config,
+        snapshot,
+        query=query,
+        case_sensitive=case_sensitive,
+        max_results=max_results,
+        prefixes=prefixes,
+        extensions=extensions,
+    )
+    cached = _cached_search(cache_key)
+    if cached is not None:
+        return cached
+    root = snapshot.root
+    head = snapshot.head
+    entries = snapshot.entries
+    if len(entries) > _MAX_TRACKED_FILES:
+        entries = entries[:_MAX_TRACKED_FILES]
         tracked_truncated = True
     else:
         tracked_truncated = False
@@ -153,7 +256,9 @@ def search_repository(config: Any, payload: dict[str, Any]) -> dict[str, Any]:
     scanned_files = 0
     skipped_files = 0
 
-    for relative in tracked:
+    eligible: set[str] = set()
+    for entry in entries:
+        relative = entry.path
         try:
             normalized = validate_repo_relative_path(relative)
         except BridgeError:
@@ -170,19 +275,14 @@ def search_repository(config: Any, payload: dict[str, Any]) -> dict[str, Any]:
         elif Path(normalized).name not in _TEXT_BASENAMES and suffix not in _TEXT_SUFFIXES:
             continue
 
-        path = _safe_path(root, normalized)
-        if not path.is_file():
+        if entry.object_type != "blob" or entry.mode == "120000":
             skipped_files += 1
             continue
-        try:
-            if path.stat().st_size > _MAX_FILE_BYTES:
-                skipped_files += 1
-                continue
-            text = path.read_text(encoding="utf-8", errors="strict")
-        except (OSError, UnicodeError):
+        if entry.size_bytes > _MAX_FILE_BYTES:
             skipped_files += 1
             continue
         scanned_files += 1
+        eligible.add(normalized)
 
         path_haystack = normalized if case_sensitive else normalized.casefold()
         if needle in path_haystack:
@@ -190,20 +290,52 @@ def search_repository(config: Any, payload: dict[str, Any]) -> dict[str, Any]:
             if len(matches) < max_results:
                 matches.append({"kind": "path", "path": normalized, "line": 0, "text": normalized})
 
-        for number, line in enumerate(text.splitlines(), start=1):
-            haystack = line if case_sensitive else line.casefold()
-            if needle not in haystack:
-                continue
-            total_matches += 1
-            if len(matches) < max_results:
-                matches.append(
-                    {
-                        "kind": "content",
-                        "path": normalized,
-                        "line": number,
-                        "text": _trim_line(line),
-                    }
-                )
+    args = ["git", "-C", str(root), "grep", "-n", "-I", "-z", "-F"]
+    if not case_sensitive:
+        args.append("-i")
+    args.extend(["--", query, head, "--"])
+    args.extend(prefixes)
+    try:
+        completed = subprocess.run(
+            args,
+            shell=False,
+            capture_output=True,
+            timeout=60.0,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise BridgeError("invalid_config", "git executable is not available") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise BridgeError("invalid_payload", "git grep timed out") from exc
+    if completed.returncode not in {0, 1}:
+        raise BridgeError("invalid_payload", "git grep failed")
+    prefix = f"{head}:".encode("ascii")
+    for raw_line in completed.stdout.splitlines():
+        parts = raw_line.split(b"\0", 2)
+        if len(parts) != 3 or not parts[0].startswith(prefix):
+            skipped_files += 1
+            continue
+        try:
+            normalized = validate_repo_relative_path(
+                parts[0][len(prefix) :].decode("utf-8", errors="strict")
+            )
+            number = int(parts[1])
+            line = parts[2].decode("utf-8", errors="strict")
+        except (BridgeError, UnicodeError, ValueError):
+            skipped_files += 1
+            continue
+        if normalized not in eligible:
+            continue
+        total_matches += 1
+        if len(matches) < max_results:
+            matches.append(
+                {
+                    "kind": "content",
+                    "path": normalized,
+                    "line": number,
+                    "text": _trim_line(line),
+                }
+            )
 
     result = {
         "status": "success",
@@ -218,7 +350,14 @@ def search_repository(config: Any, payload: dict[str, Any]) -> dict[str, Any]:
         "skipped_files": skipped_files,
         "base_sha": head,
         "changed_files": [],
+        "cache": {
+            "schema": "bdb-repository-search-cache-v1",
+            "status": "miss",
+            "backend": "git_grep",
+            "base_sha": head,
+        },
     }
     bounded = _bounded_result(result)
     bounded["returned_matches"] = len(bounded["matches"])
+    _store_search(cache_key, bounded)
     return bounded

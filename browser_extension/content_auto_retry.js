@@ -14,6 +14,23 @@ const BDB_AUTO_TRANSIENT_REASONS = new Set([
 
 const BDB_AUTO_ACTIVE_RUNS = new Map();
 
+function bdbReportAutoDelivery(action, event, reason, status, metric) {
+  if (typeof globalThis.bdbContentRecord !== "function") {
+    return;
+  }
+  const automation = action && action.automation;
+  globalThis.bdbContentRecord({
+    event,
+    loopId: automation && automation.loop_id,
+    iteration: automation && automation.iteration,
+    operation: action && action.operation,
+    reason,
+    status,
+    traceId: action && action.trace_id,
+    metric
+  });
+}
+
 function bdbAutoRunKey(action) {
   const automation = action && action.automation;
   if (
@@ -89,6 +106,16 @@ function bdbAutoDecisionNeedsCatchUp(auto, iteration) {
   );
 }
 
+function bdbAutoStopLabel(reason) {
+  if (reason === "native_host_disarmed") {
+    return "uzbrój sesję BDB i spróbuj ponownie";
+  }
+  if (reason === "native_host_unavailable") {
+    return "Native Host jest niedostępny";
+  }
+  return reason || "ASSISTED";
+}
+
 async function bdbConsiderAutoWithCatchUp(action, button) {
   const iteration = bdbAutoActionIteration(action);
   let latest = null;
@@ -141,8 +168,8 @@ async function bdbRunAutoPanel(action, button, output, compact) {
     }
     if (!auto.executed) {
       const suffix = auto.retryExhausted
-        ? `${auto.reason || "ASSISTED"}, retry exhausted`
-        : (auto.reason || "ASSISTED");
+        ? `${bdbAutoStopLabel(auto.reason)}, retry exhausted`
+        : bdbAutoStopLabel(auto.reason);
       bdbSetAutoButtonText(button, `BDB: Wykonaj (${suffix})`);
       return { retryForReplacement: false };
     }
@@ -161,6 +188,7 @@ async function bdbRunAutoPanel(action, button, output, compact) {
     }
     const sent = await autoSend(auto.response, auto.loopId, auto.iteration);
     if (sent.sent) {
+      bdbReportAutoDelivery(action, "composer_send_confirmed", sent.confirmedVia, "sent", "composer_send_successes");
       try {
         await chrome.runtime.sendMessage({
           type: "BDB_MARK_AUTO_RESULT_DELIVERED",
@@ -183,12 +211,20 @@ async function bdbRunAutoPanel(action, button, output, compact) {
         ? `BDB AUTO → ASSISTED (${sent.reason})`
         : `BDB AUTO: zatrzymano; wynik oczekuje na ponowienie (${sent.reason})`
     );
+    bdbReportAutoDelivery(action, "composer_send_failed", sent.reason, "assisted", "composer_send_failures");
     return { retryForReplacement: false };
   } catch (error) {
     if (!bdbAutoPanelDetached(button)) {
       output.textContent = `BDB AUTO error: ${String(error && error.message ? error.message : error)}`;
       bdbSetAutoButtonText(button, "BDB AUTO → ASSISTED");
     }
+    bdbReportAutoDelivery(
+      action,
+      "auto_panel_error",
+      String(error && error.message ? error.message : error),
+      "error",
+      "auto_panel_errors"
+    );
     return { retryForReplacement: false };
   } finally {
     button.disabled = false;

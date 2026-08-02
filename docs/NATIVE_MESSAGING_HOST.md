@@ -1,6 +1,6 @@
 # Windows Native Messaging Host
 
-The Native Messaging Host is a thin local transport adapter between the browser extension and Direct Lane. It does not analyze code, execute arbitrary processes, or bypass Bridge policy.
+The Native Messaging Host is a bounded local adapter between the browser extension and Direct Lane. Read-only search and inspection use immutable Git objects; mutations still pass through the durable Bridge queue, fixed profiles and local policy.
 
 ## Host identity and framing
 
@@ -11,6 +11,10 @@ com.bartosz.dev_bridge
 The browser host manifest uses `type: stdio`, exact `allowed_origins`, the installed `bdb-native-host.exe` entrypoint, and per-user HKCU registration for Chrome and Microsoft Edge.
 
 Messages are strict UTF-8 JSON objects prefixed by one unsigned 32-bit native-order byte length. BDB limits both directions to at most 1 MiB.
+
+The browser extension keeps one `connectNative` port and correlates concurrent responses by `request_id`. If a browser runtime does not expose ports, it falls back to one-shot Native Messaging. A submitted command is durably bound to its request ID, so one bounded reconnect with the same request recovers the original command result instead of creating another effect.
+
+Extension `0.4.3` sends its version with every Native request and validates the `host_version` response. A mismatch stops the action with an explicit reload diagnostic. Before a mutating command is queued, Native Host also verifies that the active Bridge worker recorded the same runtime version. A missing or stale worker returns `bridge_restart_required` without writing a command.
 
 ## Trusted aliases
 
@@ -73,6 +77,37 @@ Every request uses `bdb-native-request-v1` and a bounded `request_id`.
 
 The response contains only safe repository context: alias, `repository_id`, exact local `HEAD` SHA, relative allowlist patterns and sequence limit. No absolute local path is returned.
 
+### Consolidated repository inspection
+
+`inspect_bundle` combines up to eight searches, twenty explicit or top-match reads, a bounded tree, symbols, Git state and one mirror receipt under one exact `base_sha`:
+
+```json
+{
+  "schema": "bdb-native-request-v1",
+  "request_id": "inspect-1",
+  "action": "inspect_bundle",
+  "bdb_action": {
+    "schema": "bdb-action-v1",
+    "repo_alias": "gicleeart",
+    "operation": "inspect_bundle",
+    "payload": {
+      "searches": [
+        {"query": "ShopifyManager", "path_prefixes": ["cursor-api/Komponenty"]},
+        {"query": "upload_image", "path_prefixes": ["cursor-api/Komponenty"]}
+      ],
+      "reads": [
+        {"path": "cursor-api/Komponenty/example.py", "start_line": 1, "end_line": 400}
+      ],
+      "read_top_matches": 4
+    }
+  }
+}
+```
+
+The operation performs mirror synchronization once, searches the pinned Git commit, batch-reads blobs with `git cat-file --batch`, applies the configured allowlist and returns explicit truncation and SHA-256 metadata. Independent searches run concurrently with at most four workers against that immutable commit. Search results use a bounded in-process LRU keyed by repository, exact `HEAD`, allowlist and normalized query. It is the preferred first action when a model would otherwise need several `workspace_context`, `search_text` and `open_read` turns.
+
+For `automation.mode: auto` or `presentation.mode: compact`, the Native Host now returns a focused result capped at 20 KiB before mirror metadata. Full repository tree output is omitted by default, search matches are ranked and bounded, and up to six relevant excerpts share a 10 KiB content budget. Use `include_tree: true` only when a focused tree is genuinely needed; `include_symbols` can be disabled explicitly.
+
 ### Submit a model action
 
 Preferred browser request:
@@ -97,6 +132,7 @@ Preferred browser request:
 
 Supported operations are the existing Bridge gates only:
 
+- direct bounded reads: `search_text`, `inspect_bundle`;
 - `open_read`;
 - `replace_exact_and_test`;
 - `multi_file_patch`.
@@ -152,10 +188,10 @@ The installer writes UTF-8-without-BOM config and host-manifest files under `%LO
 
 Enterprise browser policy may disable user-level native hosts or require a host allowlist. That is a deployment condition, not a reason to weaken host checks.
 
-## Non-goals
+## Native Host non-goals
 
-- no browser DOM automation in this stage;
-- no AUTO conversation loop;
+- no browser DOM access inside the Native Host process;
+- no Native Host control over the user's AUTO opt-in;
 - no arbitrary shell or process launch;
 - no remote network listener;
 - no browser mutation of repository aliases or Bridge policy;

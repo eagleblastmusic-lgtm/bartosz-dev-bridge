@@ -16,6 +16,7 @@ from .protocol import (
     validate_session_id,
 )
 from .recovery_journal import sha256_bytes
+from .workspace_state import clean_workspace_state_hash
 
 
 def changed_paths(status: str) -> list[str]:
@@ -353,6 +354,82 @@ class WorkspaceManager:
             revision=0,
             state_hash=state_hash,
         )
+
+    def ensure_read_workspace(
+        self,
+        journal: Any,
+        *,
+        expected_revision: int,
+        expected_state_hash: str | None,
+    ) -> WorkspaceRecord:
+        """Attach a clean direct checkout for an immutable read with one Git preflight."""
+        if not self.direct_checkout:
+            workspace = self.ensure_workspace(journal)
+            self.validate_preplan_gate(
+                workspace,
+                expected_revision=expected_revision,
+                expected_state_hash=expected_state_hash,
+            )
+            return workspace
+        self._assert_expected_path()
+        if not self.path.joinpath(".git").exists():
+            raise BridgeError(BridgeErrorCode.INVALID_FIXTURE_REPO, "Fixture repository is not initialized")
+        expected = self.source_path.resolve(strict=True)
+        actual_path = self.path.resolve(strict=True)
+        if actual_path != expected or self.path.is_symlink() or not self.path.is_dir():
+            raise BridgeError(
+                BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
+                "Direct checkout identity differs from the configured source repository",
+            )
+        branch = self.git.run(["symbolic-ref", "-q", "--short", "HEAD"], check=False)
+        head = self.git.run(["rev-parse", "HEAD"]).stdout.strip().lower()
+        status = self.git.run(["status", "--porcelain=v1"]).stdout
+        if branch.returncode != 0 or not branch.stdout.strip():
+            raise BridgeError(
+                BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
+                "Direct checkout HEAD must be attached to a local branch",
+            )
+        if head != self.base_sha:
+            raise BridgeError(
+                BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
+                "Direct checkout HEAD does not match exact base SHA",
+            )
+        controlled = [path for path in changed_paths(status) if self.is_allowed_path(path)]
+        if controlled:
+            raise BridgeError(
+                BridgeErrorCode.DIRTY_SOURCE_CHECKOUT,
+                f"Direct checkout already has changes in controlled paths: {controlled[:20]}",
+            )
+        actual_state = clean_workspace_state_hash(head)
+        workspace = journal.get_workspace(self.session_id)
+        if workspace is None:
+            workspace = journal.register_workspace(
+                session_id=self.session_id,
+                workspace_path=str(self.path),
+                base_sha=self.base_sha,
+                revision=0,
+                state_hash=actual_state,
+            )
+        elif (
+            Path(workspace.workspace_path) != self.path
+            or workspace.base_sha.lower() != self.base_sha
+            or workspace.state_hash != actual_state
+        ):
+            raise BridgeError(
+                BridgeErrorCode.MANUAL_RECONCILIATION_REQUIRED,
+                "Direct checkout read state differs from the Journal",
+            )
+        if expected_revision != workspace.revision:
+            raise BridgeError(
+                BridgeErrorCode.STALE_REVISION,
+                f"Expected revision {expected_revision}, current revision is {workspace.revision}",
+            )
+        if expected_state_hash is not None and expected_state_hash != actual_state:
+            raise BridgeError(
+                BridgeErrorCode.STATE_MISMATCH,
+                "expected_state_hash does not match direct checkout read state",
+            )
+        return workspace
 
     def validate_preplan_gate(
         self,

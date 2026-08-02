@@ -30,4 +30,6 @@ def test_action_preflight_checks_hashes_and_local_allowed_paths() -> None:
     assert 'crypto.subtle.digest("SHA-256", bytes)' in preflight
     assert "content_sha256 mismatch" in preflight
     assert "Path is not allowed by local policy" in preflight
+    assert "replace_exact_scope_preflight" in preflight
+    assert "recommended_operation: \"multi_file_patch\"" in preflight
     assert "await bdbPreflightAction(action)" in preflight

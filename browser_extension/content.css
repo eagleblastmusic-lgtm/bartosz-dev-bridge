@@ -18,6 +18,22 @@
   display: none !important;
 }
 
+#bdb-version-warning {
+  position: fixed;
+  z-index: 2147483647;
+  top: 12px;
+  left: 50%;
+  max-width: min(720px, calc(100vw - 32px));
+  transform: translateX(-50%);
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+  background: #451a03;
+  color: #fef3c7;
+  padding: 10px 14px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 25%);
+  font: 600 13px/1.4 system-ui, sans-serif;
+}
+
 .bdb-compact {
   background: color-mix(in srgb, currentColor 5%, transparent);
 }
