@@ -311,7 +311,7 @@ function resultText(response, marker = null) {
   return `${prefix}BDB_RESULT:\n${JSON.stringify(payload, null, 2)}`;
 }
 
-const BDB_AUTO_CONTINUATION_TARGET_BYTES = 8 * 1024;
+const BDB_AUTO_CONTINUATION_TARGET_BYTES = 12 * 1024;
 const BDB_AUTO_CONTINUATION_MAX_BYTES = 16 * 1024;
 const BDB_AUTO_LEGACY_CONTINUATION_MAX_BYTES = 4 * 1024;
 const BDB_COMPOSER_INSERT_MAX_BYTES = 64 * 1024;
@@ -419,6 +419,7 @@ function bdbAutoWorkspaceContextPayload(payload) {
     "base_sha",
     "session_clean",
     "source_clean",
+    "controlled_clean",
     "source_changes",
     "source_changes_outside_scope",
     "source_changes_truncated",
@@ -591,25 +592,25 @@ function bdbAutoInspectBundlePayload(payload, profile = "rich") {
   const profiles = {
     rich: {
       searchLimit: 8,
-      matchesPerSearch: 6,
-      totalMatches: 18,
-      matchTextBytes: 420,
-      readLimit: 4,
-      readContentCount: 4,
-      readContentBytes: 1800,
-      treeLimit: 40,
-      symbolLimit: 12
+      matchesPerSearch: 3,
+      totalMatches: 12,
+      matchTextBytes: 220,
+      readLimit: 6,
+      readContentCount: 6,
+      readContentBytes: 1200,
+      treeLimit: 10,
+      symbolLimit: 6
     },
     compact: {
       searchLimit: 8,
-      matchesPerSearch: 3,
-      totalMatches: 12,
-      matchTextBytes: 240,
-      readLimit: 3,
-      readContentCount: 3,
+      matchesPerSearch: 2,
+      totalMatches: 8,
+      matchTextBytes: 120,
+      readLimit: 6,
+      readContentCount: 4,
       readContentBytes: 800,
-      treeLimit: 20,
-      symbolLimit: 6
+      treeLimit: 0,
+      symbolLimit: 4
     },
     tight: {
       searchLimit: 8,
@@ -669,6 +670,10 @@ function bdbAutoInspectBundlePayload(payload, profile = "rich") {
       : {}),
     content_sha256: read && read.content_sha256,
     file_sha256: read && read.file_sha256,
+    returned_bytes: read && read.returned_bytes,
+    requested_end_line: read && read.requested_end_line,
+    range_complete: read && read.range_complete,
+    file_has_more: read && read.file_has_more,
     truncated: read && read.truncated,
     error: read && read.error
   }));
@@ -685,6 +690,7 @@ function bdbAutoInspectBundlePayload(payload, profile = "rich") {
       base_sha: payload && payload.base_sha,
       context: {
         source_clean: context.source_clean,
+        controlled_clean: context.controlled_clean,
         source_changes_outside_scope: context.source_changes_outside_scope
       },
       mirror_sync: bdbAutoMirrorSummary(payload && payload.mirror_sync),
@@ -717,6 +723,7 @@ function bdbAutoInspectBundlePayload(payload, profile = "rich") {
     mirror_sync: bdbAutoMirrorSummary(payload && payload.mirror_sync),
     context: {
       source_clean: context.source_clean,
+      controlled_clean: context.controlled_clean,
       source_changes: Array.isArray(context.source_changes)
         ? context.source_changes.slice(0, 12)
         : context.source_changes,
@@ -779,6 +786,10 @@ function autoResultText(
   }
 
   if (payload && payload.operation === "inspect_bundle") {
+    text = bdbAutoResultCandidate(prefix, projected, false);
+    if (bdbUtf8ByteLength(text) <= hardLimit) {
+      return text;
+    }
     for (const profile of ["compact", "tight", "minimal"]) {
       const candidate = bdbAutoInspectBundlePayload(payload, profile);
       text = bdbAutoResultCandidate(prefix, candidate);
@@ -825,6 +836,9 @@ function resultSummary(response) {
   }
   if (payload && payload.acceptance && payload.acceptance.status === "passed") {
     return "Operacja i kryteria ukończenia zostały zweryfikowane.";
+  }
+  if (payload && payload.acceptance && payload.acceptance.status === "needs_confirmation") {
+    return "Testy automatyczne przeszły. Sprawdź zmianę wizualnie w uruchomionej aplikacji.";
   }
   if (payload && payload.operation === "workspace_context" && payload.context) {
     const context = payload.context;
@@ -973,12 +987,19 @@ function renderResult(container, response, { compact = false } = {}) {
   const controls = document.createElement("div");
   controls.className = "bdb-controls";
 
-  const continuation = resultText(response);
+  const continuation = typeof autoResultText === "function"
+    ? autoResultText(response, null, BDB_AUTO_CONTINUATION_MAX_BYTES)
+    : resultText(response);
   const continueButton = document.createElement("button");
   continueButton.type = "button";
   continueButton.textContent = "Przygotuj kontynuację";
   continueButton.addEventListener("click", async () => {
-    if (prepareContinuation(continuation)) {
+    const prepared = typeof bdbPrepareManualContinuation === "function"
+      ? await bdbPrepareManualContinuation(continuation)
+      : Boolean(prepareContinuation(continuation, {
+        maxBytes: BDB_AUTO_CONTINUATION_MAX_BYTES
+      }));
+    if (prepared) {
       continueButton.textContent = "Wstawiono — wyślij ręcznie";
       return;
     }

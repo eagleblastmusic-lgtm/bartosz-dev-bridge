@@ -122,6 +122,7 @@ class WorkspaceContextBuilder:
 
         return {
             "source_clean": not status_text.strip(),
+            "controlled_clean": not allowed_changes,
             "source_changes": source_changes,
             "source_changes_truncated": status_truncated,
             "source_changes_outside_scope": outside_scope_count,
@@ -159,6 +160,7 @@ class WorkspaceContextBuilder:
         ]
         return {
             "source_clean": not status_text.strip(),
+            "controlled_clean": not allowed_changes,
             "source_changes": allowed_changes[:_MAX_STATUS_PATHS],
             "source_changes_truncated": len(allowed_changes) > _MAX_STATUS_PATHS,
             "source_changes_outside_scope": len(all_changes) - len(allowed_changes),

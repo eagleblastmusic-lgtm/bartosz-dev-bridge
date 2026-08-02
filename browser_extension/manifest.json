@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bartosz Dev Bridge",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Task-aware AUTO, durable recovery, acceptance checks, bounded diagnostics, cached repository inspection, verified tests, and local promotion.",
   "permissions": [
     "nativeMessaging",

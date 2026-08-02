@@ -202,3 +202,57 @@ def test_compact_inspection_prioritizes_exact_search_cluster_over_broad_early_ma
     assert read["end_line"] >= 528
     assert read["start_line"] > 250
     assert read["content"].count("shared phrase exact suffix") == 2
+
+
+def test_compact_inspection_keeps_distant_explicit_ranges_separate(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+    runtime.mkdir()
+    git(repo, "init", "-b", "master")
+    git(repo, "config", "user.name", "Inspection Test")
+    git(repo, "config", "user.email", "inspection@example.invalid")
+    (repo / "src").mkdir()
+    (repo / "src" / "large.py").write_text(
+        "".join(f"line_{index} = {index}\n" for index in range(1, 701)),
+        encoding="utf-8",
+    )
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "fixture")
+    config = SimpleNamespace(
+        fixture_repo_path=repo,
+        allowed_paths=("src/**",),
+        runtime_dir=runtime,
+        mirror_sync_enabled=False,
+    )
+
+    result = inspect_repository(
+        config,
+        {
+            "reads": [
+                {"path": "src/large.py", "start_line": 10, "end_line": 20},
+                {"path": "src/large.py", "start_line": 610, "end_line": 620},
+            ],
+            "read_top_matches": 0,
+            "include_tree": False,
+            "include_symbols": False,
+        },
+        compact=True,
+    )
+
+    assert len(result["reads"]) == 2
+    assert [(item["start_line"], item["end_line"]) for item in result["reads"]] == [
+        (10, 20),
+        (610, 620),
+    ]
+    assert all(item["truncated"] is False for item in result["reads"])
+    assert all(item["range_complete"] is True for item in result["reads"])
+    assert all(item["file_has_more"] is True for item in result["reads"])
+    assert result["limits"] == {
+        "searches": 8,
+        "reads": 10,
+        "read_lines": 1000,
+        "read_bytes": 3 * 1024,
+        "total_content_bytes": 12 * 1024,
+        "result_bytes": 20 * 1024,
+    }

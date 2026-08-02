@@ -64,6 +64,7 @@ def test_snapshot_returns_only_allowed_text_files_and_symbols(tmp_path: Path) ->
     snapshot = WorkspaceContextBuilder(config).build()
 
     assert snapshot["source_clean"] is True
+    assert snapshot["controlled_clean"] is True
     assert snapshot["tracked_paths"] == ["src/app.py", "tests/test_app.py"]
     assert [item["path"] for item in snapshot["snapshot_files"]] == [
         "src/app.py",
@@ -88,12 +89,30 @@ def test_snapshot_reports_only_allowed_dirty_path_names(tmp_path: Path) -> None:
     snapshot = WorkspaceContextBuilder(config).build()
 
     assert snapshot["source_clean"] is False
+    assert snapshot["controlled_clean"] is False
     assert snapshot["source_changes"] == ["src/app.py"]
     assert snapshot["source_changes_outside_scope"] == 1
     assert snapshot["tracked_paths"] == ["src/app.py"]
     serialized = json.dumps(snapshot, ensure_ascii=False)
     assert "new private value" not in serialized
     assert "private/secret.txt" not in serialized
+
+
+def test_snapshot_distinguishes_unrelated_dirty_paths_from_controlled_scope(
+    tmp_path: Path,
+) -> None:
+    root = repository(tmp_path)
+    (root / "private" / "secret.txt").write_text(
+        "unrelated local value\n", encoding="utf-8"
+    )
+    config = context_config(tmp_path, root, ("src/*.py",))
+
+    snapshot = WorkspaceContextBuilder(config).build_summary()
+
+    assert snapshot["source_clean"] is False
+    assert snapshot["controlled_clean"] is True
+    assert snapshot["source_changes"] == []
+    assert snapshot["source_changes_outside_scope"] == 1
 
 
 def test_snapshot_exposes_only_valid_allowed_promotion_receipt(tmp_path: Path) -> None:

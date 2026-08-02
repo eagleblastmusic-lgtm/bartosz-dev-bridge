@@ -6,7 +6,7 @@ const ACTION_SCHEMA = "bdb-action-v1";
 const WORKSPACE_CONTEXT_OPERATION = "workspace_context";
 const SEARCH_TEXT_OPERATION = "search_text";
 const INSPECT_BUNDLE_OPERATION = "inspect_bundle";
-const BDB_EXTENSION_VERSION = "0.4.3";
+const BDB_EXTENSION_VERSION = "0.4.4";
 const MAX_SERIALIZED_BYTES = 1024 * 1024;
 const DEFAULT_WAIT_SECONDS = 30;
 const PROMOTION_WAIT_ATTEMPTS = 300;
@@ -561,6 +561,22 @@ function containsTerminalValue(value, depth = 0) {
   return null;
 }
 
+function structuredTerminalValue(response) {
+  const result = response && response.result;
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    if (result.acceptance && result.acceptance.status === "passed") {
+      return "done";
+    }
+    if (result.acceptance && result.acceptance.status === "needs_confirmation") {
+      return "needs_user";
+    }
+    if (result.task_guidance && result.task_guidance.next_operation === "complete") {
+      return "done";
+    }
+  }
+  return containsTerminalValue(result || response);
+}
+
 function isRecoverableProfileFailure(metadata, response) {
   const result = response && response.result;
   const data = result && result.data;
@@ -589,10 +605,6 @@ async function considerAuto(action, tabId) {
   if (!Number.isInteger(tabId) || tabId < 0) {
     throw new Error("AUTO requires a concrete sender tab");
   }
-  if (metadata.iteration > settings.autoMaxIterations) {
-    return { executed: false, reason: "iteration_limit" };
-  }
-
   const key = autoStateKey(tabId, metadata.loopId);
   const stored = await chrome.storage.session.get(key);
   const storedState = stored[key];
@@ -621,8 +633,12 @@ async function considerAuto(action, tabId) {
   const state = storedState || {
     startedAt: now,
     lastIteration: 0,
-    status: "running"
+    status: "running",
+    iterationCeiling: settings.autoMaxIterations
   };
+  if (!Number.isInteger(state.iterationCeiling) || state.iterationCeiling < state.lastIteration) {
+    state.iterationCeiling = Math.max(state.lastIteration, settings.autoMaxIterations);
+  }
   if (
     state.lastResponse &&
     typeof state.lastResponse === "object" &&
@@ -649,6 +665,15 @@ async function considerAuto(action, tabId) {
   if (state.status !== "running") {
     return { executed: false, reason: "loop_not_running", state };
   }
+  if (metadata.iteration > state.iterationCeiling) {
+    return {
+      executed: false,
+      reason: "iteration_limit",
+      expectedIteration: state.lastIteration + 1,
+      allowedThrough: state.iterationCeiling,
+      state
+    };
+  }
   if (now - state.startedAt > settings.autoMaxMinutes * 60 * 1000) {
     state.status = "time_limit";
     await chrome.storage.session.set({ [key]: state });
@@ -671,7 +696,7 @@ async function considerAuto(action, tabId) {
   );
   const terminal = recoverableFailure || recoverableNativeError
     ? null
-    : containsTerminalValue(response.result || response);
+    : structuredTerminalValue(response);
   const completed = response.status === "completed";
   const canContinue = completed || recoverableNativeError;
   state.lastIteration = metadata.iteration;
@@ -683,7 +708,7 @@ async function considerAuto(action, tabId) {
   state.status = terminal || (canContinue ? "running" : "needs_user");
   await chrome.storage.session.set({ [key]: state });
 
-  const shouldContinue = canContinue && !terminal && metadata.iteration < settings.autoMaxIterations;
+  const shouldContinue = canContinue && !terminal && metadata.iteration < state.iterationCeiling;
   return {
     executed: true,
     response,
@@ -748,12 +773,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (typeof globalThis.bdbCancelTask !== "function") {
           throw new Error("BDB task controller is unavailable");
         }
-        return globalThis.bdbCancelTask(message.loopId);
+        return globalThis.bdbCancelTask(message.loopId, message.tabId);
       case "BDB_RESUME_TASK":
         if (typeof globalThis.bdbResumeTask !== "function") {
           throw new Error("BDB task controller is unavailable");
         }
-        return globalThis.bdbResumeTask(message.loopId);
+        return globalThis.bdbResumeTask(message.loopId, message.tabId);
       case "BDB_CLEAR_READ_CACHE":
         if (typeof globalThis.bdbClearReadCache !== "function") {
           throw new Error("BDB read cache is unavailable");

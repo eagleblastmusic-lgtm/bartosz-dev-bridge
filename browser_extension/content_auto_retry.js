@@ -113,6 +113,18 @@ function bdbAutoStopLabel(reason) {
   if (reason === "native_host_unavailable") {
     return "Native Host jest niedostępny";
   }
+  if (reason === "iteration_already_processed") {
+    return "już wykonano";
+  }
+  if (reason === "loop_not_running") {
+    return "zadanie zakończone";
+  }
+  if (reason === "iteration_limit") {
+    return "limit AUTO — wznów zadanie albo uruchom ręcznie";
+  }
+  if (reason === "time_limit") {
+    return "minął czas AUTO — wznów zadanie albo uruchom ręcznie";
+  }
   return reason || "ASSISTED";
 }
 
@@ -156,6 +168,7 @@ async function bdbConsiderAutoWithCatchUp(action, button) {
 }
 
 async function bdbRunAutoPanel(action, button, output, compact) {
+  let keepDisabled = false;
   button.disabled = true;
   bdbSetAutoButtonText(button, "BDB AUTO: sprawdzanie…");
   try {
@@ -171,6 +184,7 @@ async function bdbRunAutoPanel(action, button, output, compact) {
         ? `${bdbAutoStopLabel(auto.reason)}, retry exhausted`
         : bdbAutoStopLabel(auto.reason);
       bdbSetAutoButtonText(button, `BDB: Wykonaj (${suffix})`);
+      keepDisabled = ["iteration_already_processed", "loop_not_running"].includes(auto.reason);
       return { retryForReplacement: false };
     }
 
@@ -227,8 +241,56 @@ async function bdbRunAutoPanel(action, button, output, compact) {
     );
     return { retryForReplacement: false };
   } finally {
-    button.disabled = false;
+    button.disabled = keepDisabled;
   }
+}
+
+async function bdbRetryResumedTask(loopId, expectedIteration) {
+  if (typeof loopId !== "string" || !Number.isInteger(expectedIteration)) {
+    return { retried: false, reason: "invalid_resume_message" };
+  }
+  const blocks = document.querySelectorAll("pre code, code");
+  for (const block of blocks) {
+    if (!(block instanceof HTMLElement)) continue;
+    const action = parseAction(block);
+    const automation = action && action.automation;
+    if (
+      !automation ||
+      automation.loop_id !== loopId ||
+      automation.iteration !== expectedIteration
+    ) {
+      continue;
+    }
+    const host = block.closest("pre") || block.parentElement;
+    const panel = host && host.querySelector(":scope > .bdb-assisted");
+    const button = panel && panel.querySelector(".bdb-execute");
+    const output = panel && panel.querySelector(".bdb-output");
+    if (!(button instanceof HTMLButtonElement) || !(output instanceof HTMLElement)) {
+      continue;
+    }
+    button.disabled = false;
+    await maybeAuto(action, button, output, compactAction(action));
+    return { retried: true, iteration: expectedIteration };
+  }
+  return { retried: false, reason: "expected_action_not_visible" };
+}
+
+if (
+  chrome.runtime.onMessage &&
+  typeof chrome.runtime.onMessage.addListener === "function"
+) {
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (!message || message.type !== "BDB_CONTENT_RESUME_TASK") {
+      return undefined;
+    }
+    bdbRetryResumedTask(message.loopId, message.expectedIteration)
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        retried: false,
+        reason: String(error && error.message ? error.message : error)
+      }));
+    return true;
+  });
 }
 
 maybeAuto = async function maybeAutoWithDecisionCatchUp(action, button, output, compact) {

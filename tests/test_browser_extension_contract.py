@@ -15,7 +15,7 @@ def read(name: str) -> str:
 def test_manifest_has_minimal_mv3_permissions() -> None:
     manifest = json.loads(read("manifest.json"))
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "0.4.3"
+    assert manifest["version"] == "0.4.4"
     assert manifest["permissions"] == ["nativeMessaging", "storage"]
     assert manifest["host_permissions"] == ["https://chatgpt.com/*"]
     assert manifest["background"] == {"service_worker": "background_full_entry.js"}
@@ -68,7 +68,7 @@ def test_background_accepts_only_versioned_actions_and_native_host() -> None:
     assert 'const HOST_NAME = "com.bartosz.dev_bridge"' in background
     assert 'const ACTION_SCHEMA = "bdb-action-v1"' in background
     assert 'action: "submit_action"' in background
-    assert 'const BDB_EXTENSION_VERSION = "0.4.3"' in background
+    assert 'const BDB_EXTENSION_VERSION = "0.4.4"' in background
     assert "validateNativeVersion" in background
     assert "sendNativeSubmission" in background
     assert "chrome.runtime.sendNativeMessage" in background
@@ -124,7 +124,8 @@ def test_auto_remains_bounded_and_explicitly_opt_in() -> None:
     assert "autoEnabled: false" in background
     assert "autoMaxIterations: 4" in background
     assert "autoMaxMinutes: 10" in background
-    assert "metadata.iteration > settings.autoMaxIterations" in background
+    assert "metadata.iteration > state.iterationCeiling" in background
+    assert "state.iterationCeiling" in background
     assert "now - state.startedAt > settings.autoMaxMinutes" in background
     assert 'automation.mode !== "auto"' in content
     assert "BDB_CONSIDER_AUTO" in content

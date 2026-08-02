@@ -29,7 +29,8 @@ def test_task_controller_has_bounded_local_contracts() -> None:
     assert "bdbTaskNormalizeLoopId" in controller
     assert 'reason: "high_risk_requires_assisted"' in controller
     assert 'schema: "bdb-acceptance-result-v1"' in controller
-    assert 'status: passed ? "passed" : "unmet"' in controller
+    assert 'status: needsVisualConfirmation ? "needs_confirmation"' in controller
+    assert '"manual_visual_confirmation"' in controller
     assert "bdbTaskCheckpointRestore" in controller
     assert 'source_code_included: false' in controller
     assert 'credentials_included: false' in controller

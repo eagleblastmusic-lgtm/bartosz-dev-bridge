@@ -152,6 +152,14 @@ def test_auto_contenteditable_uses_single_dom_replacement_without_legacy_inserti
               assert.equal(replacementCount, 2);
               assert.deepEqual(requestedLimits, [16 * 1024, 16 * 1024]);
 
+              const manualText = `BDB_RESULT:\n${"m".repeat(12 * 1024)}`;
+              const manualPrepared = await context.bdbPrepareManualContinuation(manualText);
+              assert.equal(manualPrepared, true);
+              assert.equal(composer.textContent, manualText);
+              assert.equal(replacementCount, 3);
+              assert.equal(legacyCalls, 0);
+              composer.textContent = "";
+
               failDirectInsertion = true;
               context.autoResultText = (_response, marker, maxBytes) => {
                 requestedLimits.push(maxBytes);
@@ -192,7 +200,7 @@ def test_auto_payload_cap_and_composer_read_avoid_live_layout_triggers() -> None
     content = (EXTENSION / "content.js").read_text(encoding="utf-8")
     auto_send = (EXTENSION / "content_auto_send.js").read_text(encoding="utf-8")
 
-    assert "const BDB_AUTO_CONTINUATION_TARGET_BYTES = 8 * 1024;" in content
+    assert "const BDB_AUTO_CONTINUATION_TARGET_BYTES = 12 * 1024;" in content
     assert "const BDB_AUTO_CONTINUATION_MAX_BYTES = 16 * 1024;" in content
     assert "const BDB_AUTO_LEGACY_CONTINUATION_MAX_BYTES = 4 * 1024;" in content
     assert "const BDB_AUTO_TRACKED_PATH_LIMIT = 20;" in content

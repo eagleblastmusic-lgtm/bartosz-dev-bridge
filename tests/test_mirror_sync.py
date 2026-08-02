@@ -92,6 +92,34 @@ def test_initial_push_then_up_to_date(tmp_path: Path) -> None:
     assert cached["local_head"] == head
 
 
+def test_read_sync_reuses_recent_verified_head_but_pre_action_rechecks_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _source, _remote, config, _head = setup(tmp_path)
+    sync: MirrorSynchronizer = config._test_sync
+    first = sync.sync(phase="pre_inspect_bundle")
+    assert first is not None
+
+    calls = 0
+    original = sync._remote_head
+
+    def counted_remote_head() -> str | None:
+        nonlocal calls
+        calls += 1
+        return original()
+
+    monkeypatch.setattr(sync, "_remote_head", counted_remote_head)
+    cached = sync.sync(phase="pre_search_text")
+    assert cached is not None
+    assert cached["cached"] is True
+    assert calls == 0
+
+    action = sync.sync(phase="pre_action")
+    assert action is not None
+    assert action["cached"] is False
+    assert calls == 1
+
+
 def test_unrelated_dirty_path_is_preserved_but_controlled_dirty_is_blocked(tmp_path: Path) -> None:
     source, _remote, config, _head = setup(tmp_path)
     sync: MirrorSynchronizer = config._test_sync

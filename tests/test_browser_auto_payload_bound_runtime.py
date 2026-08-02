@@ -239,7 +239,7 @@ def test_auto_inspect_bundle_adapts_to_fast_and_legacy_composer_limits(tmp_path:
             assert.equal(fastPayload.base_sha, "a".repeat(40));
             assert.equal(fastPayload.searches.length, 8);
             assert.equal(fastPayload.searches[0].matches[0].path, "cursor-api/Komponenty/module-0/file-0.py");
-            assert.ok(["compact", "tight", "minimal"].includes(fastPayload.auto_payload.profile));
+            assert.ok(["rich", "compact", "tight", "minimal"].includes(fastPayload.auto_payload.profile));
             assert.equal(legacyPayload.operation, "inspect_bundle");
             assert.equal(legacyPayload.base_sha, "a".repeat(40));
             assert.equal(legacyPayload.searches.length, 8);
@@ -263,7 +263,7 @@ def test_auto_send_uses_bounded_payload_and_composer_guard() -> None:
     content = (EXTENSION / "content.js").read_text(encoding="utf-8")
     auto_send = (EXTENSION / "content_auto_send.js").read_text(encoding="utf-8")
 
-    assert "const BDB_AUTO_CONTINUATION_TARGET_BYTES = 8 * 1024;" in content
+    assert "const BDB_AUTO_CONTINUATION_TARGET_BYTES = 12 * 1024;" in content
     assert "const BDB_AUTO_CONTINUATION_MAX_BYTES = 16 * 1024;" in content
     assert "const BDB_AUTO_LEGACY_CONTINUATION_MAX_BYTES = 4 * 1024;" in content
     assert "const BDB_COMPOSER_INSERT_MAX_BYTES = 64 * 1024;" in content
@@ -282,3 +282,5 @@ def test_auto_send_uses_bounded_payload_and_composer_guard() -> None:
     assert 'typeof BDB_AUTO_LEGACY_CONTINUATION_MAX_BYTES === "number"' in auto_send
     assert "let prepared = bdbPrepareAutoContinuation(" in auto_send
     assert "autoContinuationMaxBytes" in auto_send
+    assert "async function bdbPrepareManualContinuation(text)" in auto_send
+    assert "composerText(current).includes(text)" in auto_send

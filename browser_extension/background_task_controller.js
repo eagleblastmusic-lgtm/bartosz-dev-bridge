@@ -38,6 +38,21 @@ const BDB_TASK_HIGH_RISK_KINDS = new Set([
   "move_file",
   "rename_file"
 ]);
+const BDB_TASK_TERMINAL_STATUSES = new Set([
+  "done",
+  "needs_user",
+  "policy_denied",
+  "manual_reconciliation_required",
+  "failed",
+  "cancelled",
+  "aborted"
+]);
+const BDB_TASK_BENIGN_REPEAT_STOPS = new Set([
+  "iteration_already_processed",
+  "iteration_in_progress",
+  "replay_guard",
+  "loop_not_running"
+]);
 
 const bdbSubmitActionBeforeTaskController = submitAction;
 const bdbConsiderAutoBeforeTaskController = considerAuto;
@@ -148,9 +163,21 @@ function bdbTaskComplexity(action) {
   const assertions = acceptance && Array.isArray(acceptance.search_assertions)
     ? acceptance.search_assertions.length
     : 0;
+  const searches = action && action.payload && Array.isArray(action.payload.searches)
+    ? action.payload.searches.length
+    : 0;
+  const reads = action && action.payload && Array.isArray(action.payload.reads)
+    ? action.payload.reads.length
+    : 0;
+  const iteration = action && action.automation && Number.isInteger(action.automation.iteration)
+    ? action.automation.iteration
+    : 1;
   let score = BDB_TASK_READ_OPERATIONS.has(operation) ? 1 : 3;
   score += Math.min(5, Math.ceil(operations / 3));
   score += Math.min(2, Math.ceil(assertions / 3));
+  score += Math.min(2, Math.floor(searches / 4));
+  score += Math.min(2, Math.floor(reads / 3));
+  score += Math.min(6, Math.max(0, iteration - 2));
   return {
     score,
     class: score <= 2 ? "small" : (score <= 5 ? "medium" : "large"),
@@ -194,14 +221,33 @@ async function bdbTaskUpsert(loopId, patch) {
       status: "running",
       operations: []
     };
-    const next = { ...current, ...bdbTaskClone(patch), updated_at: now };
-    if (patch.operation) {
+    const requested = bdbTaskClone(patch);
+    const forceStatus = requested.force_status === true;
+    delete requested.force_status;
+    if (Number.isInteger(requested.last_iteration)) {
+      requested.last_iteration = Math.max(current.last_iteration || 0, requested.last_iteration);
+    }
+    if (Number.isInteger(requested.expected_iteration)) {
+      requested.expected_iteration = Math.max(
+        current.expected_iteration || 0,
+        requested.expected_iteration
+      );
+    }
+    const next = { ...current, ...requested, updated_at: now };
+    if (
+      !forceStatus &&
+      BDB_TASK_TERMINAL_STATUSES.has(current.status) &&
+      !BDB_TASK_TERMINAL_STATUSES.has(requested.status)
+    ) {
+      next.status = current.status;
+    }
+    if (requested.operation) {
       next.operations = [
         ...(Array.isArray(current.operations) ? current.operations : []),
         {
-          iteration: patch.last_iteration || current.last_iteration || 0,
-          operation: patch.operation,
-          status: patch.last_operation_status || patch.status || "unknown",
+          iteration: requested.last_iteration || current.last_iteration || 0,
+          operation: requested.operation,
+          status: requested.last_operation_status || requested.status || "unknown",
           at: now
         }
       ].slice(-20);
@@ -499,12 +545,22 @@ async function bdbTaskEvaluateAcceptance(action, response) {
     }
   }
   const passed = checks.length > 0 && checks.every((check) => check.passed);
+  const needsVisualConfirmation = acceptance.manual_visual_confirmation_required === true && passed;
   return {
     schema: "bdb-acceptance-result-v1",
-    status: passed ? "passed" : "unmet",
+    status: needsVisualConfirmation ? "needs_confirmation" : (passed ? "passed" : "unmet"),
     checked_at: Date.now(),
     checks,
-    recommended_operation: passed ? "complete" : "inspect_bundle_or_multi_file_patch"
+    recommended_operation: needsVisualConfirmation
+      ? "manual_visual_confirmation"
+      : (passed ? "complete" : "inspect_bundle_or_multi_file_patch"),
+    ...(needsVisualConfirmation ? {
+      confirmation: {
+        kind: "visual",
+        status: "required",
+        instruction: "Sprawdź wynik w uruchomionej aplikacji. AUTO nie uzna zadania wizualnego za zakończone bez oceny człowieka."
+      }
+    } : {})
   };
 }
 
@@ -713,24 +769,42 @@ considerAuto = async function considerAutoWithTaskController(action, tabId) {
   }
 
   try {
+    const ledgerBefore = loopId ? await bdbTaskLedger() : null;
+    const taskBefore = ledgerBefore && ledgerBefore.tasks
+      ? ledgerBefore.tasks[loopId]
+      : null;
     const decision = await bdbConsiderAutoBeforeTaskController(effective, tabId);
     const replayed = Boolean(decision && decision.executed && decision.recoveredResult);
     const lastError = bdbTaskResponseError(decision && decision.response);
+    const stopReason = decision && decision.reason;
+    const repeatedBenignStop = Boolean(
+      decision &&
+      decision.executed !== true &&
+      taskBefore &&
+      (
+        (
+          BDB_TASK_BENIGN_REPEAT_STOPS.has(stopReason) &&
+          Number.isInteger(iteration) &&
+          iteration <= (taskBefore.last_iteration || 0)
+        ) ||
+        taskBefore.status === stopReason ||
+        BDB_TASK_TERMINAL_STATUSES.has(taskBefore.status)
+      )
+    );
     if (decision && decision.executed === true) {
       await bdbTaskCheckpointStore(decision, effective);
       await bdbTaskMetric(replayed ? "auto_results_replayed" : "auto_executed");
-    } else {
+    } else if (!repeatedBenignStop) {
       await bdbTaskMetric(`auto_stop_${(decision && decision.reason) || "unknown"}`);
     }
-    if (loopId) {
-      await bdbTaskUpsert(loopId, {
+    if (loopId && !repeatedBenignStop) {
+      const taskPatch = {
         title: bdbTaskSafeText(effective.task && effective.task.title, 120),
         phase: bdbTaskSafeText(effective.task && effective.task.phase, 64) || (BDB_TASK_READ_OPERATIONS.has(operation) ? "analysis" : "implementation"),
         repo_alias: effective.repo_alias,
         status: decision && decision.executed
           ? ((decision.state && decision.state.status) || (decision.shouldContinue ? "running" : "stopped"))
           : ((decision && decision.reason) || "stopped"),
-        last_iteration: Number.isInteger(iteration) ? iteration : 0,
         expected_iteration: decision && Number.isInteger(decision.expectedIteration)
           ? decision.expectedIteration
           : ((Number.isInteger(iteration) ? iteration : 0) + 1),
@@ -738,25 +812,29 @@ considerAuto = async function considerAutoWithTaskController(action, tabId) {
         complexity: bdbTaskComplexity(effective),
         risk: bdbTaskRisk(effective),
         last_error: lastError,
-        ...(replayed ? {} : {
+        ...((decision && decision.executed === true && !replayed) ? {
+          last_iteration: Number.isInteger(iteration) ? iteration : 0,
           operation,
-          last_operation_status: decision && decision.executed ? "executed" : ((decision && decision.reason) || "stopped")
-        })
+          last_operation_status: "executed"
+        } : {})
+      };
+      await bdbTaskUpsert(loopId, taskPatch);
+    }
+    if (!repeatedBenignStop) {
+      await bdbTaskRecordDiagnostic({
+        event: replayed ? "auto_result_replayed" : (decision && decision.executed ? "auto_executed" : "auto_stopped"),
+        loopId,
+        iteration,
+        operation,
+        reason: decision && decision.reason,
+        status: decision && decision.executed ? "executed" : "assisted",
+        errorCode: lastError && lastError.error_code,
+        detail: lastError && lastError.detail,
+        durationMs: Date.now() - started,
+        tabId,
+        traceId
       });
     }
-    await bdbTaskRecordDiagnostic({
-      event: replayed ? "auto_result_replayed" : (decision && decision.executed ? "auto_executed" : "auto_stopped"),
-      loopId,
-      iteration,
-      operation,
-      reason: decision && decision.reason,
-      status: decision && decision.executed ? "executed" : "assisted",
-      errorCode: lastError && lastError.error_code,
-      detail: lastError && lastError.detail,
-      durationMs: Date.now() - started,
-      tabId,
-      traceId
-    });
     return { ...decision, compiler: compiled.compiler };
   } catch (error) {
     await bdbTaskMetric("auto_errors");
@@ -877,23 +955,31 @@ async function bdbHealthSnapshot({ probeNative = false, contentVersion = null } 
   };
 }
 
-async function bdbCancelTask(loopId) {
+async function bdbCancelTask(loopId, tabId = null) {
   if (!BDB_TASK_LOOP_ID_RE.test(loopId || "")) {
     throw new Error("Task loop_id has an unsafe format");
   }
-  const key = autoStateKey(null, loopId);
-  const stored = await chrome.storage.session.get(key);
-  if (stored[key] && typeof stored[key] === "object") {
-    await chrome.storage.session.set({
-      [key]: { ...stored[key], status: "cancelled", updatedAt: Date.now() }
-    });
+  const stored = await chrome.storage.session.get(null);
+  const matching = Object.entries(stored).filter(([key, value]) => (
+    key.startsWith("bdbAuto:") &&
+    key.endsWith(`:${loopId}`) &&
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (!Number.isInteger(tabId) || key === autoStateKey(tabId, loopId))
+  ));
+  if (matching.length > 0) {
+    await chrome.storage.session.set(Object.fromEntries(matching.map(([key, value]) => [
+      key,
+      { ...value, status: "cancelled", updatedAt: Date.now() }
+    ])));
   }
-  await bdbTaskUpsert(loopId, { status: "cancelled" });
+  await bdbTaskUpsert(loopId, { status: "cancelled", force_status: true });
   await bdbTaskRecordDiagnostic({ event: "task_cancelled", loopId, status: "cancelled" });
   return { schema: "bdb-task-control-v1", loop_id: loopId, status: "cancelled" };
 }
 
-async function bdbResumeTask(loopId) {
+async function bdbResumeTask(loopId, tabId) {
   if (!BDB_TASK_LOOP_ID_RE.test(loopId || "")) {
     throw new Error("Task loop_id has an unsafe format");
   }
@@ -902,20 +988,48 @@ async function bdbResumeTask(loopId) {
   if (!task) {
     throw new Error("Task is not present in the durable ledger");
   }
-  const key = autoStateKey(null, loopId);
-  const lastIteration = Number.isInteger(task.last_iteration) ? task.last_iteration : 0;
+  if (!Number.isInteger(tabId) || tabId < 0) {
+    throw new Error("Task resume requires the active ChatGPT tab");
+  }
+  const allSession = await chrome.storage.session.get(null);
+  const matchingStates = Object.entries(allSession)
+    .filter(([key, value]) => (
+      key.startsWith("bdbAuto:") &&
+      key.endsWith(`:${loopId}`) &&
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value)
+    ))
+    .map(([, value]) => value);
+  const key = autoStateKey(tabId, loopId);
+  const current = allSession[key] && typeof allSession[key] === "object"
+    ? allSession[key]
+    : {};
+  const observedIterations = matchingStates
+    .map((value) => value.lastIteration)
+    .filter((value) => Number.isInteger(value));
+  const lastIteration = Math.max(
+    Number.isInteger(task.last_iteration) ? task.last_iteration : 0,
+    ...observedIterations,
+    0
+  );
+  const settings = await getAutoSettings();
+  const iterationCeiling = lastIteration + settings.autoMaxIterations;
   await chrome.storage.session.set({
     [key]: {
+      ...current,
       startedAt: Date.now(),
       lastIteration,
       status: "running",
+      iterationCeiling,
       restoredFromTaskLedger: true,
       updatedAt: Date.now()
     }
   });
   await bdbTaskUpsert(loopId, {
     status: "running",
-    expected_iteration: lastIteration + 1
+    expected_iteration: lastIteration + 1,
+    force_status: true
   });
   await bdbTaskRecordDiagnostic({ event: "task_resumed", loopId, status: "running" });
   return {
@@ -923,6 +1037,7 @@ async function bdbResumeTask(loopId) {
     loop_id: loopId,
     status: "running",
     expected_iteration: lastIteration + 1,
+    allowed_through_iteration: iterationCeiling,
     instruction: "Reload the ChatGPT tab if its action panel is not visible."
   };
 }

@@ -78,7 +78,7 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
             function response(request, body) {
               return {
                 schema: "bdb-native-response-v1",
-                host_version: "0.4.3",
+                host_version: "0.4.4",
                 request_id: request.request_id,
                 ...body
               };
@@ -105,7 +105,7 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
                 },
                 runtime: {
                   lastError: null,
-                  getManifest() { return { version: "0.4.3" }; },
+                  getManifest() { return { version: "0.4.4" }; },
                   onMessage: { addListener() {} },
                   sendNativeMessage(_host, request, callback) {
                     nativeCounts[request.action] = (nativeCounts[request.action] || 0) + 1;
@@ -242,6 +242,55 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               assert.equal(accepted.result.acceptance.status, "passed", JSON.stringify(accepted));
               assert.equal(accepted.result.task_guidance.next_operation, "complete");
 
+              const acceptedAuto = {
+                ...mutating,
+                automation: { mode: "auto", loop_id: "accepted-auto-loop", iteration: 1 }
+              };
+              const acceptedDecision = await context.__consider(acceptedAuto, 7);
+              assert.equal(acceptedDecision.executed, true, JSON.stringify(acceptedDecision));
+              assert.equal(acceptedDecision.state.status, "done");
+              assert.equal(acceptedDecision.shouldContinue, false);
+
+              const resumed = await context.bdbResumeTask("accepted-auto-loop", 7);
+              assert.equal(resumed.status, "running");
+              assert.equal(resumed.expected_iteration, 2);
+              assert.equal(resumed.allowed_through_iteration, 9);
+              assert.equal(sessionStore["bdbAuto:7:accepted-auto-loop"].lastIteration, 1);
+              assert.equal(sessionStore["bdbAuto:7:accepted-auto-loop"].iterationCeiling, 9);
+
+              await context.bdbTaskUpsert("monotonic-loop", {
+                status: "running",
+                last_iteration: 12,
+                expected_iteration: 13
+              });
+              await context.bdbTaskUpsert("monotonic-loop", {
+                status: "running",
+                last_iteration: 4,
+                expected_iteration: 5
+              });
+              const monotonicLedger = await context.bdbTaskLedger();
+              assert.equal(monotonicLedger.tasks["monotonic-loop"].last_iteration, 12);
+              assert.equal(monotonicLedger.tasks["monotonic-loop"].expected_iteration, 13);
+
+              const visual = {
+                ...mutating,
+                payload: { ...mutating.payload, old: "visual-old", new: "visual-new" },
+                acceptance: {
+                  ...mutating.acceptance,
+                  manual_visual_confirmation_required: true
+                },
+                automation: { mode: "auto", loop_id: "visual-loop", iteration: 1 }
+              };
+              const visualDecision = await context.__consider(visual, 7);
+              assert.equal(visualDecision.executed, true, JSON.stringify(visualDecision));
+              assert.equal(visualDecision.response.result.acceptance.status, "needs_confirmation");
+              assert.equal(
+                visualDecision.response.result.task_guidance.next_operation,
+                "manual_visual_confirmation"
+              );
+              assert.equal(visualDecision.state.status, "needs_user");
+              assert.equal(visualDecision.shouldContinue, false);
+
               const risky = {
                 schema: "bdb-action-v1",
                 repo_alias: "synthetic",
@@ -275,7 +324,7 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               const armedRetry = await context.__consider(armAction, 7);
               assert.equal(armedRetry.executed, true, JSON.stringify(armedRetry));
 
-              const health = await context.bdbHealthSnapshot({ probeNative: true, contentVersion: "0.4.3" });
+              const health = await context.bdbHealthSnapshot({ probeNative: true, contentVersion: "0.4.4" });
               assert.equal(health.status, "ready");
               assert.equal(health.content_version_match, true);
               assert.equal(health.capabilities.durable_resume, true);

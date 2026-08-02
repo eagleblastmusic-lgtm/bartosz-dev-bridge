@@ -108,8 +108,10 @@ async function run(message) {
   try {
     const result = await chrome.runtime.sendMessage(message);
     output.textContent = JSON.stringify(result, null, 2);
+    return result;
   } catch (error) {
     output.textContent = String(error && error.message ? error.message : error);
+    return null;
   }
 }
 
@@ -164,14 +166,28 @@ document.getElementById("test-auto").addEventListener("click", async () => {
 
 resumeTaskButton.addEventListener("click", async () => {
   if (latestTaskLoopId) {
-    await run({ type: "BDB_RESUME_TASK", loopId: latestTaskLoopId });
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tabId = tab && Number.isInteger(tab.id) ? tab.id : null;
+    const result = await run({ type: "BDB_RESUME_TASK", loopId: latestTaskLoopId, tabId });
+    if (result && result.ok === true && Number.isInteger(tabId)) {
+      try {
+        await chrome.tabs.sendMessage(tabId, {
+          type: "BDB_CONTENT_RESUME_TASK",
+          loopId: latestTaskLoopId,
+          expectedIteration: result.response && result.response.expected_iteration
+        });
+      } catch (_error) {
+      }
+    }
     await loadTasks();
   }
 });
 
 cancelTaskButton.addEventListener("click", async () => {
   if (latestTaskLoopId) {
-    await run({ type: "BDB_CANCEL_TASK", loopId: latestTaskLoopId });
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tabId = tab && Number.isInteger(tab.id) ? tab.id : null;
+    await run({ type: "BDB_CANCEL_TASK", loopId: latestTaskLoopId, tabId });
     await loadTasks();
   }
 });

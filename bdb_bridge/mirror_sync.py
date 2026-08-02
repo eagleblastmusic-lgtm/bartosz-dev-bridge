@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +21,10 @@ _HTTPS_GITHUB_RE = re.compile(
     r"^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$"
 )
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_READ_SYNC_CACHE_SECONDS = 20.0
+_CACHEABLE_READ_PHASES = frozenset(
+    {"pre_workspace_context", "pre_search_text", "pre_inspect_bundle", "pre_envelope"}
+)
 
 
 def _utc_now() -> str:
@@ -99,6 +105,9 @@ class MirrorSyncSettings:
 class MirrorSynchronizer:
     """Fast-forward-only local checkout to GitHub mirror synchronization."""
 
+    _verified_cache: dict[tuple[str, str, str], tuple[str, float]] = {}
+    _verified_cache_lock = threading.Lock()
+
     def __init__(self, config: Any) -> None:
         self.config = config
         self.settings = MirrorSyncSettings.from_config(config)
@@ -173,8 +182,23 @@ class MirrorSynchronizer:
                     "Configured Git remote is missing or points to an unexpected URL",
                 )
 
+            if phase in _CACHEABLE_READ_PHASES and self._cache_is_fresh(local_head):
+                outcome = self._outcome(
+                    status="up_to_date",
+                    phase=phase,
+                    local_head=local_head,
+                    remote_head_before=local_head,
+                    remote_head_after=local_head,
+                    pushed=False,
+                    started_at=started_at,
+                    cached=True,
+                )
+                self._record(outcome)
+                return outcome
+
             remote_head_before = self._remote_head()
             if remote_head_before == local_head:
+                self._cache_verified(local_head)
                 outcome = self._outcome(
                     status="up_to_date",
                     phase=phase,
@@ -210,6 +234,7 @@ class MirrorSynchronizer:
                     "mirror_sync_failed",
                     "Mirror verification did not observe the exact local HEAD",
                 )
+            self._cache_verified(local_head)
 
             outcome = self._outcome(
                 status="synced",
@@ -300,6 +325,28 @@ class MirrorSynchronizer:
             raise BridgeError("mirror_sync_failed", "Mirror remote returned an invalid commit SHA")
         return sha
 
+    def _cache_key(self) -> tuple[str, str, str]:
+        settings = self.settings
+        assert settings.remote_url is not None
+        assert settings.remote_branch is not None
+        return (str(self.source), settings.remote_url, settings.remote_branch)
+
+    def _cache_is_fresh(self, local_head: str) -> bool:
+        key = self._cache_key()
+        with self._verified_cache_lock:
+            cached = self._verified_cache.get(key)
+            if cached is None:
+                return False
+            cached_head, verified_at = cached
+            if cached_head != local_head or time.monotonic() - verified_at > _READ_SYNC_CACHE_SECONDS:
+                self._verified_cache.pop(key, None)
+                return False
+            return True
+
+    def _cache_verified(self, local_head: str) -> None:
+        with self._verified_cache_lock:
+            self._verified_cache[self._cache_key()] = (local_head, time.monotonic())
+
     @staticmethod
     def _network_env() -> dict[str, str]:
         env = dict(os.environ)
@@ -317,6 +364,7 @@ class MirrorSynchronizer:
         remote_head_after: str | None,
         pushed: bool,
         started_at: str,
+        cached: bool = False,
     ) -> dict[str, Any]:
         settings = self.settings
         return {
@@ -330,6 +378,7 @@ class MirrorSynchronizer:
             "local_branch": settings.local_branch,
             "remote_branch": settings.remote_branch,
             "pushed": pushed,
+            "cached": cached,
             "started_at": started_at,
             "completed_at": _utc_now(),
         }

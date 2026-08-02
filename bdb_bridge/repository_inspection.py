@@ -20,13 +20,14 @@ _MAX_READ_BYTES = 64 * 1024
 _MAX_TOTAL_CONTENT_BYTES = 512 * 1024
 _MAX_TREE_PATHS = 3_000
 _MAX_RESULT_BYTES = 850 * 1024
-_COMPACT_MAX_READS = 6
-_COMPACT_MAX_READ_BYTES = 4 * 1024
-_COMPACT_MAX_TOTAL_CONTENT_BYTES = 10 * 1024
+_COMPACT_MAX_READS = 10
+_COMPACT_MAX_READ_BYTES = 3 * 1024
+_COMPACT_MAX_TOTAL_CONTENT_BYTES = 12 * 1024
 _COMPACT_MAX_TREE_PATHS = 80
 _COMPACT_MAX_SYMBOLS = 20
 _COMPACT_SEARCH_MATCHES = 3
 _COMPACT_RESULT_BYTES = 20 * 1024
+_READ_MERGE_GAP_LINES = 12
 
 
 def _read_specs(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -173,7 +174,6 @@ def _render_reads(
         and path_matches(entry.path, config.allowed_paths)
     }
     selected: list[tuple[dict[str, Any], Any]] = []
-    selected_index: dict[str, int] = {}
     selection_truncated = False
     for spec in specs:
         path = spec["path"]
@@ -182,30 +182,40 @@ def _render_reads(
         entry = entries.get(path)
         if entry is None:
             raise BridgeError("missing_file", f"Git snapshot does not contain a regular file: {path}")
-        if path in selected_index:
-            index = selected_index[path]
-            existing, existing_entry = selected[index]
-            start = min(existing["start_line"], spec["start_line"])
-            desired_end = max(existing["end_line"], spec["end_line"])
-            end = min(desired_end, start + _MAX_READ_LINES - 1)
-            selection_truncated = selection_truncated or end < desired_end
-            sources = existing["source"].split("+")
-            if spec["source"] not in sources:
-                sources.append(spec["source"])
-            selected[index] = (
+        merge_indexes = [
+            index
+            for index, (existing, _existing_entry) in enumerate(selected)
+            if existing["path"] == path
+            and spec["start_line"] <= existing["end_line"] + _READ_MERGE_GAP_LINES
+            and existing["start_line"] <= spec["end_line"] + _READ_MERGE_GAP_LINES
+            and max(existing["end_line"], spec["end_line"])
+            - min(existing["start_line"], spec["start_line"])
+            + 1
+            <= _MAX_READ_LINES
+        ]
+        if merge_indexes:
+            first = merge_indexes[0]
+            merged_specs = [selected[index][0] for index in merge_indexes] + [spec]
+            sources: list[str] = []
+            for merged in merged_specs:
+                for source in merged["source"].split("+"):
+                    if source not in sources:
+                        sources.append(source)
+            selected[first] = (
                 {
-                    **existing,
-                    "start_line": start,
-                    "end_line": end,
+                    **selected[first][0],
+                    "start_line": min(item["start_line"] for item in merged_specs),
+                    "end_line": max(item["end_line"] for item in merged_specs),
                     "source": "+".join(sources),
                 },
-                existing_entry,
+                entry,
             )
+            for index in reversed(merge_indexes[1:]):
+                selected.pop(index)
             continue
         if len(selected) >= max_reads:
             selection_truncated = True
             continue
-        selected_index[path] = len(selected)
         selected.append((dict(spec), entry))
 
     reader = GitObjectReader(snapshot.root)
@@ -229,30 +239,39 @@ def _render_reads(
                 {"path": entry.path, "error": "range_outside_file", "source": spec["source"]}
             )
             continue
-        end = min(spec["end_line"], total_lines)
+        requested_end = spec["end_line"]
+        end = min(requested_end, total_lines)
         content = "" if total_lines == 0 else "".join(lines[start - 1 : end])
         encoded = content.encode("utf-8")
         remaining = max(0, max_total_content_bytes - total_bytes)
         allowed = min(max_read_bytes, remaining)
-        truncated = len(encoded) > allowed
-        if truncated:
+        if allowed <= 0:
+            total_truncated = True
+            break
+        content_truncated = len(encoded) > allowed
+        if content_truncated:
             content = encoded[:allowed].decode("utf-8", errors="ignore")
             encoded = content.encode("utf-8")
             total_truncated = True
+        returned_line_count = len(content.splitlines())
+        returned_end = start + returned_line_count - 1 if returned_line_count else start - 1
         total_bytes += len(encoded)
         rendered.append(
             {
                 "path": entry.path,
                 "source": spec["source"],
                 "start_line": start,
-                "end_line": end,
+                "end_line": returned_end,
+                "requested_end_line": requested_end,
                 "total_lines": total_lines,
                 "content": content,
                 "content_sha256": "sha256:" + hashlib.sha256(encoded).hexdigest(),
                 "file_sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
                 "file_bytes": len(raw),
                 "returned_bytes": len(encoded),
-                "truncated": truncated or end < total_lines,
+                "truncated": content_truncated,
+                "range_complete": not content_truncated,
+                "file_has_more": end < total_lines,
             }
         )
         if total_bytes >= max_total_content_bytes:
@@ -451,6 +470,7 @@ def inspect_repository(config: Any, payload: dict[str, Any], *, compact: bool = 
         "changed_files": [],
         "context": {
             "source_clean": context["source_clean"],
+            "controlled_clean": context["controlled_clean"],
             "source_changes": context["source_changes"],
             "source_changes_truncated": context["source_changes_truncated"],
             "source_changes_outside_scope": context["source_changes_outside_scope"],
@@ -473,10 +493,13 @@ def inspect_repository(config: Any, payload: dict[str, Any], *, compact: bool = 
         "reads_truncated": reads_truncated,
         "limits": {
             "searches": _MAX_SEARCHES,
-            "reads": _MAX_READS,
+            "reads": _COMPACT_MAX_READS if compact else _MAX_READS,
             "read_lines": _MAX_READ_LINES,
-            "total_content_bytes": _MAX_TOTAL_CONTENT_BYTES,
-            "result_bytes": _MAX_RESULT_BYTES,
+            "read_bytes": _COMPACT_MAX_READ_BYTES if compact else _MAX_READ_BYTES,
+            "total_content_bytes": (
+                _COMPACT_MAX_TOTAL_CONTENT_BYTES if compact else _MAX_TOTAL_CONTENT_BYTES
+            ),
+            "result_bytes": _COMPACT_RESULT_BYTES if compact else _MAX_RESULT_BYTES,
         },
         "response_profile": "compact" if compact else "full",
         "performance": {

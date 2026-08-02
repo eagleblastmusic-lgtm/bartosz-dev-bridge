@@ -34,7 +34,9 @@ User-configured limits are bounded to 1–8 iterations and 1–30 minutes. Itera
 
 A separate durable replay guard is stored in `chrome.storage.local` before Native Host submission. It prevents the same `<loop_id>:<iteration>` from executing again after a page reload, service-worker restart or browser restart. The guard retains at most 512 recent entries. A replay collision, storage failure or uncertain interrupted attempt falls back to ASSISTED. The transport may resend the same durably receipted `request_id` once to recover its original result, but AUTO never creates a second independent effect automatically.
 
-Version 0.4.0 also stores a bounded durable task ledger and up to sixteen compact result checkpoints. If Chrome or the service worker stops after Native completion but before ChatGPT consumes the result, the same action panel recovers the exact checkpoint and delivers it without submitting another Native effect. The popup can explicitly stop or resume the latest task. Resume never enables global AUTO.
+Version 0.4.0 also stores a bounded durable task ledger and up to sixteen compact result checkpoints. If Chrome or the service worker stops after Native completion but before ChatGPT consumes the result, the same action panel recovers the exact checkpoint and delivers it without submitting another Native effect. The popup can explicitly stop or resume the latest task. Since 0.4.4, resume targets the active ChatGPT tab, preserves the monotonic last iteration, grants a fresh configured iteration budget and retries an already visible expected action. Resume never enables global AUTO.
+
+For visual changes, `bdb-acceptance-v1` may set `manual_visual_confirmation_required: true`. After all automated checks pass, the controller returns `needs_confirmation` and stops AUTO with `needs_user`; it does not infer that the rendered UI is correct from compilation or source searches alone.
 
 One user task uses one `loop_id` (up to 128 safe characters) and monotonically increasing iterations. A fresh `loop_id` is reserved for a new user task, not every BDB action. Short identifiers under 48 characters are recommended for readable result markers.
 
@@ -109,9 +111,9 @@ The result contains `bdb-acceptance-result-v1` with `passed` or `unmet`. An unme
 
 ## Adaptive AUTO result transport
 
-Version 0.4.3 uses one consistent set of composer budgets:
+Version 0.4.4 uses one consistent set of composer budgets:
 
-- 8 KiB is the preferred result target;
+- 12 KiB is the preferred result target;
 - 16 KiB is the hard ceiling when the current contenteditable composer supports one-shot `replaceChildren` insertion;
 - 4 KiB remains the hard ceiling for the legacy insertion fallback.
 

@@ -89,6 +89,33 @@ function bdbComposerContains(marker) {
   return Boolean(current && composerText(current).includes(marker));
 }
 
+async function bdbPrepareManualContinuation(text) {
+  const maxBytes = typeof BDB_AUTO_CONTINUATION_MAX_BYTES === "number"
+    ? BDB_AUTO_CONTINUATION_MAX_BYTES
+    : 16 * 1024;
+  if (bdbAutoUtf8ByteLength(text) > maxBytes) {
+    return false;
+  }
+  const initial = findComposer();
+  if (!initial) {
+    return false;
+  }
+  const prepared = bdbAutoFastInsertionAvailable(initial)
+    ? bdbPrepareAutoContinuation(text, initial, maxBytes)
+    : prepareContinuation(text, { requireEmpty: false, maxBytes });
+  if (!prepared) {
+    return false;
+  }
+  for (let poll = 0; poll < BDB_AUTO_INSERTION_OBSERVE_POLLS; poll += 1) {
+    const current = findComposer();
+    if (current && composerText(current).includes(text)) {
+      return true;
+    }
+    await bdbAutoSendSleep(BDB_AUTO_SEND_POLL_MS);
+  }
+  return false;
+}
+
 function bdbUserMessageContains(marker) {
   if (!document || typeof document.querySelectorAll !== "function") {
     return false;

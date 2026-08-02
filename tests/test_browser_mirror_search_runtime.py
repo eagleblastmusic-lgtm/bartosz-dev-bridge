@@ -71,7 +71,7 @@ def test_auto_preserves_bounded_open_read_search_and_mirror_receipt(tmp_path: Pa
                 `autoResultText(${JSON.stringify(payload)}, ${JSON.stringify(marker)})`,
                 context
               );
-              assert.ok(Buffer.byteLength(text, "utf8") <= 4096, Buffer.byteLength(text, "utf8"));
+              assert.ok(Buffer.byteLength(text, "utf8") <= 16 * 1024, Buffer.byteLength(text, "utf8"));
               return JSON.parse(text.split("BDB_RESULT:\n", 2)[1]);
             }
 
@@ -170,7 +170,7 @@ def test_auto_contract_uses_adaptive_eight_sixteen_and_four_kib_caps() -> None:
     assert 'reason: "open_read_compacted"' in source
     assert 'reason: "search_text_compacted"' in source
     assert "mirror_sync: promotion.mirror_sync" in source
-    assert "const BDB_AUTO_CONTINUATION_TARGET_BYTES = 8 * 1024;" in source
+    assert "const BDB_AUTO_CONTINUATION_TARGET_BYTES = 12 * 1024;" in source
     assert "const BDB_AUTO_CONTINUATION_MAX_BYTES = 16 * 1024;" in source
     assert "const BDB_AUTO_LEGACY_CONTINUATION_MAX_BYTES = 4 * 1024;" in source
     assert 'function bdbAutoInspectBundlePayload(payload, profile = "rich")' in source
