@@ -32,6 +32,9 @@ def test_task_controller_has_bounded_local_contracts() -> None:
     assert 'status: needsVisualConfirmation ? "needs_confirmation"' in controller
     assert '"manual_visual_confirmation"' in controller
     assert "bdbTaskCheckpointRestore" in controller
+    assert "bdbTaskLatestPendingCheckpoint" in controller
+    assert 'status: "recovering_result"' in controller
+    assert 'event: "task_result_recovery_requested"' in controller
     assert 'source_code_included: false' in controller
     assert 'credentials_included: false' in controller
 

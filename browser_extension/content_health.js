@@ -4,7 +4,7 @@
 // lookup. A content script survives an extension reload until the ChatGPT tab is
 // refreshed, so comparing both values detects the otherwise invisible stale-tab
 // state that previously forced AUTO into ASSISTED.
-const BDB_CONTENT_BUILD_VERSION = "0.4.4";
+const BDB_CONTENT_BUILD_VERSION = "0.4.5";
 const BDB_CONTENT_VERSION_WARNING_ID = "bdb-version-warning";
 
 function bdbContentHealthWarning(message) {

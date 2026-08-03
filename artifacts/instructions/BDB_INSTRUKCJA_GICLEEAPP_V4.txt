@@ -1,5 +1,5 @@
 PRACUJEMY Z BARTOSZ DEV BRIDGE — INSTRUKCJA GŁÓWNA DLA PROJEKTU GICLEEAPP
-Wersja 4 dla BDB 0.4.4 — zaktualizowana 2 sierpnia 2026 r.
+Wersja 4 dla BDB 0.4.5 — zaktualizowana 2 sierpnia 2026 r.
 
 Bartosz Dev Bridge, dalej „BDB”, łączy ChatGPT z lokalnym repozytorium projektu Shopify i lokalną aplikacją GicleeApp.
 
@@ -71,9 +71,9 @@ Nie wolno:
 - zmieniać ustawień AUTO bez działania użytkownika,
 - kontynuować po twardym statusie bezpieczeństwa takim jak `policy_denied` lub `manual_reconciliation_required`.
 
-Każde nowe zadanie użytkownika musi mieć nowy, niepowtarzalny `loop_id`. Wszystkie akcje należące do tego samego zadania używają tego samego `loop_id` i kolejnych wartości `iteration`. BDB 0.4.4 potrafi bezpiecznie znormalizować błędny technicznie identyfikator i uzupełnić brakującą iterację z trwałego rejestru zadania, ale model nadal powinien wysyłać krótki, prawidłowy identyfikator i jawną iterację.
+Każde nowe zadanie użytkownika musi mieć nowy, niepowtarzalny `loop_id`. Wszystkie akcje należące do tego samego zadania używają tego samego `loop_id` i kolejnych wartości `iteration`. BDB 0.4.5 potrafi bezpiecznie znormalizować błędny technicznie identyfikator i uzupełnić brakującą iterację z trwałego rejestru zadania, ale model nadal powinien wysyłać krótki, prawidłowy identyfikator i jawną iterację.
 
-Limit iteracji jest budżetem jednego przebiegu, nie maksymalnym rozmiarem całego zadania. Po jego osiągnięciu użytkownik może jawnie wybrać „Wznów”. BDB zachowuje prawdziwy numer ostatniej iteracji, wiąże wznowienie z aktywną kartą i przyznaje świeży budżet równy bieżącemu ustawieniu limitu. Jeżeli oczekiwana akcja jest nadal widoczna w rozmowie, rozszerzenie próbuje ją uruchomić od razu. Wznowienie nie włącza globalnego AUTO.
+Limit iteracji jest budżetem jednego przebiegu, nie maksymalnym rozmiarem całego zadania. Po jego osiągnięciu użytkownik może jawnie wybrać „Wznów”. Jeżeli istnieje wykonana, lecz jeszcze niedostarczona odpowiedź, BDB najpierw odzyskuje jej trwały checkpoint bez ponownego uruchamiania mutacji i bez przyznawania nowego budżetu. Dopiero gdy nie ma oczekującego wyniku, BDB zachowuje prawdziwy numer ostatniej iteracji, wiąże wznowienie z aktywną kartą i przyznaje świeży budżet równy bieżącemu ustawieniu limitu. Jeżeli oczekiwana akcja jest nadal widoczna w rozmowie, rozszerzenie próbuje ją obsłużyć od razu. Wznowienie nie włącza globalnego AUTO.
 
 Nie wolno używać `loop_id` zakończonego zadania w nowym zadaniu. Po `iteration_in_progress`, `retry exhausted`, `failed`, `timeout`, braku wyniku albo ręcznym przerwaniu najpierw sprawdź stan poprzedniej akcji. Nie twórz nowego `loop_id`, dopóki nadal realizujesz to samo zadanie użytkownika.
 
@@ -774,7 +774,7 @@ Jeżeli dokładne pliki nie są jeszcze znane, tablica `reads` może być pusta.
 
 Jedna akcja może zawierać maksymalnie 8 wyszukiwań, 20 odczytów, 1000 linii na odczyt i `read_top_matches` od 0 do 12. Profil kompaktowy zwraca do 10 najbardziej użytecznych okien odczytu, do 3 KiB na okno i 12 KiB treści łącznie. Odległe zakresy tego samego pliku pozostają osobnymi oknami zamiast jednego wielkiego fragmentu od początku pliku. Wszystkie dane pochodzą z tego samego `base_sha`, więc nie trzeba osobno potwierdzać ich spójności.
 
-BDB 0.4.4 wykonuje niezależne wyszukiwania `inspect_bundle` równolegle. Odczyty i dokładne mutacje są buforowane lub deduplikowane wyłącznie przez ograniczony czas i tylko gdy lokalny Git HEAD nadal jest taki sam. Po potwierdzeniu mirrora odczyty mogą przez 20 sekund używać pamięci świeżo zweryfikowanego HEAD; mutacja zawsze ponownie sprawdza zdalny mirror. Trafienie cache jest opisane w `execution_cache`, `task_guidance.cache` lub `mirror_sync.cached`. Nie traktuj cache jako dowodu aktualności poza tym ograniczonym oknem.
+BDB 0.4.5 wykonuje niezależne wyszukiwania `inspect_bundle` równolegle. Odczyty i dokładne mutacje są buforowane lub deduplikowane wyłącznie przez ograniczony czas i tylko gdy lokalny Git HEAD nadal jest taki sam. Po potwierdzeniu mirrora odczyty mogą przez 20 sekund używać pamięci świeżo zweryfikowanego HEAD; mutacja zawsze ponownie sprawdza zdalny mirror. Trafienie cache jest opisane w `execution_cache`, `task_guidance.cache` lub `mirror_sync.cached`. Nie traktuj cache jako dowodu aktualności poza tym ograniczonym oknem.
 
 Automatyczny wynik dąży do 12 KiB. Szybka ścieżka `replaceChildren` dopuszcza maksymalnie 16 KiB, natomiast starszy mechanizm awaryjny pozostaje ograniczony do 4 KiB. `inspect_bundle` wybiera kolejno profil `rich`, `compact`, `tight` albo `minimal`, zachowując przede wszystkim `base_sha`, zapytania, liczby trafień, ścieżki, pozycje linii i kilka krótkich fragmentów kodu. Ręczne „Przygotuj kontynuację” również jest ograniczone do 16 KiB i sprawdza, czy cała treść znalazła się w aktualnym polu wiadomości. Nie należy utożsamiać profilu `minimal` z błędem wykonania.
 
@@ -870,7 +870,8 @@ Potwierdzone funkcje:
 - ocena złożoności i `task_guidance`,
 - tryb Shadow bez wykonywania akcji,
 - Health Check, test end-to-end AUTO i eksport zanonimizowanej diagnostyki,
-- stop/resume zadania z nowym ograniczonym budżetem, właściwą kartą i bez automatycznego włączania globalnego AUTO,
+- automatyczne przejęcie wyniku przez panel zastępczy po zmianie renderu strony oraz trwałe odzyskanie checkpointu bez ponownego wykonania mutacji,
+- stop/resume zadania z odzyskaniem oczekującego wyniku przed ewentualnym przyznaniem nowego ograniczonego budżetu, właściwą kartą i bez automatycznego włączania globalnego AUTO,
 - wymuszenie ASSISTED dla usuwania, przenoszenia i zmiany nazw.
 
 Potwierdzony przepływ:
@@ -886,7 +887,7 @@ ChatGPT przygotowuje akcję
 → lokalny master jest synchronizowany z prywatnym main
 → użytkownik ręcznie weryfikuje GUI, gdy nie ma automatycznego testu interfejsu
 
-Po aktualizacji plików rozszerzenia należy przeładować rozszerzenie na `chrome://extensions` i odświeżyć kartę ChatGPT. Panel powinien pokazywać wersję 0.4.4. Globalne AUTO pozostaje ustawieniem użytkownika i nie jest włączane przez launcher ani przez wznowienie zadania.
+Po aktualizacji plików rozszerzenia należy przeładować rozszerzenie na `chrome://extensions` i odświeżyć kartę ChatGPT. Panel powinien pokazywać wersję 0.4.5. Globalne AUTO pozostaje ustawieniem użytkownika i nie jest włączane przez launcher ani przez wznowienie zadania.
 
 ============================================================
 22. PIERWSZA ODPOWIEDŹ W NOWYM CZACIE
@@ -897,7 +898,7 @@ Po przeczytaniu tej instrukcji nie uruchamiaj żadnej akcji.
 Potwierdź krótko:
 
 - że rozumiesz przepływ BDB,
-- że pracujesz z BDB 0.4.4 i preferujesz jedno zbiorcze `inspect_bundle`,
+- że pracujesz z BDB 0.4.5 i preferujesz jedno zbiorcze `inspect_bundle`,
 - że będziesz tworzyć akcje `bdb-action-v1`,
 - że dla przebiegu bez klikania użytkownik jawnie włącza globalne AUTO, a akcje używają `automation.mode: "auto"`,
 - że całe zadanie otrzyma jeden krótki `loop_id`, a kolejne akcje zwiększą `iteration`,

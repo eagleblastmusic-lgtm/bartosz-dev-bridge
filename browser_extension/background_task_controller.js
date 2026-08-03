@@ -622,6 +622,9 @@ async function bdbTaskCheckpointStore(decision, action) {
       delivered: decision.resultDelivered === true,
       should_continue: decision.shouldContinue === true,
       stop_reason: decision.stopReason || null,
+      state_status: decision.state && typeof decision.state.status === "string"
+        ? decision.state.status
+        : null,
       response: bdbTaskClone(decision.response)
     };
     const retained = Object.entries(checkpoints)
@@ -652,8 +655,80 @@ async function bdbTaskCheckpointRestore(loopId, iteration) {
     durableCheckpoint: true,
     resultDelivered: false,
     shouldContinue: checkpoint.should_continue === true,
-    stopReason: checkpoint.stop_reason
+    stopReason: checkpoint.stop_reason,
+    state_status: checkpoint.state_status
   };
+}
+
+function bdbTaskCheckpointRuntimeStatus(checkpoint) {
+  if (
+    checkpoint &&
+    typeof checkpoint.state_status === "string" &&
+    checkpoint.state_status
+  ) {
+    return checkpoint.state_status;
+  }
+  const stopReason = checkpoint && typeof checkpoint.stop_reason === "string"
+    ? checkpoint.stop_reason
+    : (checkpoint && typeof checkpoint.stopReason === "string" ? checkpoint.stopReason : null);
+  if (BDB_TASK_TERMINAL_STATUSES.has(stopReason)) {
+    return stopReason;
+  }
+  if (stopReason === "result_not_completed") {
+    return "needs_user";
+  }
+  return "running";
+}
+
+async function bdbTaskRestoreCheckpointState(loopId, iteration, tabId, checkpoint) {
+  const status = bdbTaskCheckpointRuntimeStatus(checkpoint);
+  if (Number.isInteger(tabId) && tabId >= 0) {
+    const key = autoStateKey(tabId, loopId);
+    const stored = await chrome.storage.session.get(key);
+    const current = stored[key] && typeof stored[key] === "object"
+      ? stored[key]
+      : {};
+    await chrome.storage.session.set({
+      [key]: {
+        ...current,
+        lastIteration: Math.max(current.lastIteration || 0, iteration),
+        lastResponse: bdbTaskClone(checkpoint.response),
+        lastResponseIteration: iteration,
+        lastResponseDelivered: false,
+        status,
+        updatedAt: Date.now()
+      }
+    });
+  }
+  await bdbTaskUpsert(loopId, {
+    status,
+    last_iteration: iteration,
+    expected_iteration: iteration + 1,
+    force_status: true
+  });
+  return status;
+}
+
+async function bdbTaskLatestPendingCheckpoint(loopId) {
+  const stored = await chrome.storage.local.get(BDB_TASK_CHECKPOINTS_KEY);
+  const checkpoints = stored[BDB_TASK_CHECKPOINTS_KEY];
+  if (!checkpoints || typeof checkpoints !== "object" || Array.isArray(checkpoints)) {
+    return null;
+  }
+  const pending = Object.values(checkpoints)
+    .filter((checkpoint) => (
+      checkpoint &&
+      checkpoint.loop_id === loopId &&
+      checkpoint.delivered !== true &&
+      checkpoint.response &&
+      Number.isInteger(checkpoint.iteration) &&
+      Number.isFinite(checkpoint.created_at) &&
+      Date.now() - checkpoint.created_at <= BDB_TASK_CHECKPOINT_MS
+    ))
+    .sort((left, right) => (
+      (right.iteration - left.iteration) || (right.created_at - left.created_at)
+    ));
+  return pending.length > 0 ? bdbTaskClone(pending[0]) : null;
 }
 
 submitAction = async function submitActionWithTaskController(action, tabId) {
@@ -707,13 +782,19 @@ considerAuto = async function considerAutoWithTaskController(action, tabId) {
   if (metadata && metadata.mode === "auto") {
     const checkpoint = await bdbTaskCheckpointRestore(loopId, iteration);
     if (checkpoint) {
+      const restoredStatus = await bdbTaskRestoreCheckpointState(
+        loopId,
+        iteration,
+        tabId,
+        checkpoint
+      );
       await bdbTaskMetric("checkpoints_restored");
       await bdbTaskRecordDiagnostic({
         event: "checkpoint_restored",
         loopId,
         iteration,
         operation,
-        status: "recovered",
+        status: restoredStatus,
         tabId,
         traceId
       });
@@ -990,6 +1071,32 @@ async function bdbResumeTask(loopId, tabId) {
   }
   if (!Number.isInteger(tabId) || tabId < 0) {
     throw new Error("Task resume requires the active ChatGPT tab");
+  }
+  const pendingCheckpoint = await bdbTaskLatestPendingCheckpoint(loopId);
+  if (pendingCheckpoint) {
+    const restoredStatus = await bdbTaskRestoreCheckpointState(
+      loopId,
+      pendingCheckpoint.iteration,
+      tabId,
+      pendingCheckpoint
+    );
+    await bdbTaskMetric("checkpoint_recovery_requests");
+    await bdbTaskRecordDiagnostic({
+      event: "task_result_recovery_requested",
+      loopId,
+      iteration: pendingCheckpoint.iteration,
+      status: restoredStatus,
+      tabId
+    });
+    return {
+      schema: "bdb-task-control-v1",
+      loop_id: loopId,
+      status: "recovering_result",
+      task_status: restoredStatus,
+      expected_iteration: pendingCheckpoint.iteration,
+      recovery_only: true,
+      instruction: "BDB odzyska zapisany wynik bez ponownego wykonania operacji."
+    };
   }
   const allSession = await chrome.storage.session.get(null);
   const matchingStates = Object.entries(allSession)

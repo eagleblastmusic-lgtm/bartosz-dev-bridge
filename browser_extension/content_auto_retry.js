@@ -7,6 +7,8 @@
 // remain owned by the background worker.
 const BDB_AUTO_DECISION_RETRY_ATTEMPTS = 24;
 const BDB_AUTO_DECISION_RETRY_MS = 250;
+const BDB_AUTO_IN_PROGRESS_RETRY_ATTEMPTS = 280;
+const BDB_AUTO_IN_PROGRESS_RETRY_MS = 500;
 const BDB_AUTO_TRANSIENT_REASONS = new Set([
   "non_sequential_iteration",
   "iteration_in_progress"
@@ -106,6 +108,27 @@ function bdbAutoDecisionNeedsCatchUp(auto, iteration) {
   );
 }
 
+function bdbRecoverDetachedAutoPanel(action, phase) {
+  bdbReportAutoDelivery(
+    action,
+    "auto_panel_detached",
+    phase,
+    "recovering",
+    "auto_panel_detachments"
+  );
+  if (typeof scheduleBdbDocumentReconciliation === "function") {
+    scheduleBdbDocumentReconciliation();
+  } else if (typeof scan === "function" && typeof document !== "undefined") {
+    setTimeout(() => scan(document), 600);
+  }
+  return {
+    executed: false,
+    reason: "panel_detached",
+    retryCancelled: true,
+    retryForReplacement: true
+  };
+}
+
 function bdbAutoStopLabel(reason) {
   if (reason === "native_host_disarmed") {
     return "uzbrój sesję BDB i spróbuj ponownie";
@@ -132,13 +155,9 @@ async function bdbConsiderAutoWithCatchUp(action, button) {
   const iteration = bdbAutoActionIteration(action);
   let latest = null;
 
-  for (let attempt = 0; attempt < BDB_AUTO_DECISION_RETRY_ATTEMPTS; attempt += 1) {
+  for (let attempt = 0; attempt < BDB_AUTO_IN_PROGRESS_RETRY_ATTEMPTS; attempt += 1) {
     if (bdbAutoPanelDetached(button)) {
-      return {
-        executed: false,
-        reason: "panel_detached",
-        retryCancelled: true
-      };
+      return bdbRecoverDetachedAutoPanel(action, "while_waiting_for_decision");
     }
 
     const decision = await chrome.runtime.sendMessage({ type: "BDB_CONSIDER_AUTO", action });
@@ -151,7 +170,10 @@ async function bdbConsiderAutoWithCatchUp(action, button) {
       return latest;
     }
 
-    if (attempt + 1 >= BDB_AUTO_DECISION_RETRY_ATTEMPTS) {
+    const retryAttempts = latest.reason === "iteration_in_progress"
+      ? BDB_AUTO_IN_PROGRESS_RETRY_ATTEMPTS
+      : BDB_AUTO_DECISION_RETRY_ATTEMPTS;
+    if (attempt + 1 >= retryAttempts) {
       return { ...latest, retryExhausted: true };
     }
 
@@ -161,7 +183,11 @@ async function bdbConsiderAutoWithCatchUp(action, button) {
         `BDB AUTO: synchronizacja ${latest.expectedIteration}→${iteration}…`
       );
     }
-    await bdbAutoDecisionSleep(BDB_AUTO_DECISION_RETRY_MS);
+    await bdbAutoDecisionSleep(
+      latest.reason === "iteration_in_progress"
+        ? BDB_AUTO_IN_PROGRESS_RETRY_MS
+        : BDB_AUTO_DECISION_RETRY_MS
+    );
   }
 
   return latest;
@@ -177,6 +203,7 @@ async function bdbRunAutoPanel(action, button, output, compact) {
       return { retryForReplacement: true };
     }
     if (bdbAutoPanelDetached(button)) {
+      bdbRecoverDetachedAutoPanel(action, "after_decision");
       return { retryForReplacement: true };
     }
     if (!auto.executed) {
@@ -198,6 +225,7 @@ async function bdbRunAutoPanel(action, button, output, compact) {
     }
 
     if (bdbAutoPanelDetached(button)) {
+      bdbRecoverDetachedAutoPanel(action, "before_result_delivery");
       return { retryForReplacement: true };
     }
     const sent = await autoSend(auto.response, auto.loopId, auto.iteration);

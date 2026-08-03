@@ -25,6 +25,16 @@ def test_auto_ui_work_is_deduplicated_bounded_and_detachment_aware() -> None:
     )
     assert match is not None
     assert 4 <= int(match.group(1)) <= 40
+    in_progress_match = re.search(
+        r"const BDB_AUTO_IN_PROGRESS_RETRY_ATTEMPTS = ([0-9]+);",
+        retry,
+    )
+    assert in_progress_match is not None
+    assert 240 <= int(in_progress_match.group(1)) <= 360
+    assert "function bdbRecoverDetachedAutoPanel(action, phase)" in retry
+    assert '"auto_panel_detached"' in retry
+    assert '"auto_panel_detachments"' in retry
+    assert "scheduleBdbDocumentReconciliation()" in retry
     assert "const BDB_AUTO_ACTIVE_RUNS = new Map();" in retry
     assert "function bdbAutoRunKey(action)" in retry
     assert "function bdbAutoPanelDetached(button)" in retry

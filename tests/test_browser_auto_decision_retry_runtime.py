@@ -109,6 +109,31 @@ def test_auto_decision_retries_only_transient_sequence_gaps(tmp_path: Path) -> N
               );
               assert.equal(recovered.rendered.length, 1);
 
+              const delayedCompletion = await runScenario([
+                ...Array.from({ length: 30 }, () => ({
+                  executed: false,
+                  reason: "iteration_in_progress",
+                  expectedIteration: 3
+                })),
+                {
+                  executed: true,
+                  response: { status: "completed", recovered: true },
+                  loopId: "loop",
+                  iteration: 3,
+                  recoveredResult: true,
+                  durableCheckpoint: true,
+                  shouldContinue: false,
+                  stopReason: "needs_user"
+                }
+              ]);
+              assert.equal(delayedCompletion.calls, 31, JSON.stringify(delayedCompletion));
+              assert.equal(delayedCompletion.deliveryCalls, 1, JSON.stringify(delayedCompletion));
+              assert.equal(delayedCompletion.rendered.length, 1);
+              assert.equal(
+                delayedCompletion.button.textContent,
+                "BDB AUTO: wynik wysłany; zatrzymano (needs_user)"
+              );
+
               const stale = await runScenario([
                 {
                   executed: false,

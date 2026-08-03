@@ -8,7 +8,7 @@ from typing import Any
 from .protocol import BridgeError
 
 
-BDB_RUNTIME_VERSION = "0.4.4"
+BDB_RUNTIME_VERSION = "0.4.5"
 SERVICE_STARTED_EVENT = "service.started"
 
 

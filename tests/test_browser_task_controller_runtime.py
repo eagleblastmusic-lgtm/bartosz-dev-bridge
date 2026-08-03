@@ -78,7 +78,7 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
             function response(request, body) {
               return {
                 schema: "bdb-native-response-v1",
-                host_version: "0.4.4",
+                host_version: "0.4.5",
                 request_id: request.request_id,
                 ...body
               };
@@ -105,7 +105,7 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
                 },
                 runtime: {
                   lastError: null,
-                  getManifest() { return { version: "0.4.4" }; },
+                  getManifest() { return { version: "0.4.5" }; },
                   onMessage: { addListener() {} },
                   sendNativeMessage(_host, request, callback) {
                     nativeCounts[request.action] = (nativeCounts[request.action] || 0) + 1;
@@ -251,6 +251,13 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               assert.equal(acceptedDecision.state.status, "done");
               assert.equal(acceptedDecision.shouldContinue, false);
 
+              const acceptedDelivered = await context.markAutoResultDelivered(
+                "accepted-auto-loop",
+                1,
+                7
+              );
+              assert.equal(acceptedDelivered.marked, true);
+
               const resumed = await context.bdbResumeTask("accepted-auto-loop", 7);
               assert.equal(resumed.status, "running");
               assert.equal(resumed.expected_iteration, 2);
@@ -291,6 +298,20 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               assert.equal(visualDecision.state.status, "needs_user");
               assert.equal(visualDecision.shouldContinue, false);
 
+              const visualRecovery = await context.bdbResumeTask("visual-loop", 7);
+              assert.equal(visualRecovery.status, "recovering_result");
+              assert.equal(visualRecovery.task_status, "needs_user");
+              assert.equal(visualRecovery.expected_iteration, 1);
+              assert.equal(visualRecovery.recovery_only, true);
+              assert.equal(sessionStore["bdbAuto:7:visual-loop"].status, "needs_user");
+
+              const restoredVisual = await context.__consider(visual, 7);
+              assert.equal(restoredVisual.executed, true);
+              assert.equal(restoredVisual.recoveredResult, true);
+              assert.equal(restoredVisual.durableCheckpoint, true);
+              const visualLedger = await context.bdbTaskLedger();
+              assert.equal(visualLedger.tasks["visual-loop"].status, "needs_user");
+
               const risky = {
                 schema: "bdb-action-v1",
                 repo_alias: "synthetic",
@@ -324,7 +345,7 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               const armedRetry = await context.__consider(armAction, 7);
               assert.equal(armedRetry.executed, true, JSON.stringify(armedRetry));
 
-              const health = await context.bdbHealthSnapshot({ probeNative: true, contentVersion: "0.4.4" });
+              const health = await context.bdbHealthSnapshot({ probeNative: true, contentVersion: "0.4.5" });
               assert.equal(health.status, "ready");
               assert.equal(health.content_version_match, true);
               assert.equal(health.capabilities.durable_resume, true);
