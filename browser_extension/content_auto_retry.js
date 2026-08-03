@@ -142,6 +142,15 @@ function bdbAutoStopLabel(reason) {
   if (reason === "loop_not_running") {
     return "zadanie zakończone";
   }
+  if (reason === "visual_feedback_not_expected") {
+    return "brak oczekującej oceny wizualnej";
+  }
+  if (reason === "visual_feedback_result_not_delivered") {
+    return "najpierw dostarcz poprzedni wynik";
+  }
+  if (reason === "invalid_visual_feedback_resume") {
+    return "nieprawidłowe wznowienie po ocenie";
+  }
   if (reason === "iteration_limit") {
     return "limit AUTO — wznów zadanie albo uruchom ręcznie";
   }

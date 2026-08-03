@@ -30,7 +30,11 @@ def test_task_controller_has_bounded_local_contracts() -> None:
     assert 'reason: "high_risk_requires_assisted"' in controller
     assert 'schema: "bdb-acceptance-result-v1"' in controller
     assert 'status: needsVisualConfirmation ? "needs_confirmation"' in controller
-    assert '"manual_visual_confirmation"' in controller
+    assert '"await_user_visual_feedback"' in controller
+    assert "bdbTaskResumeAfterVisualFeedback" in controller
+    assert 'event: "visual_feedback_resumed"' in controller
+    assert 'metadata.continue_after_user_feedback !== true' in controller
+    assert "feedbackContinuation" in controller
     assert "bdbTaskCheckpointRestore" in controller
     assert "bdbTaskLatestPendingCheckpoint" in controller
     assert 'status: "recovering_result"' in controller

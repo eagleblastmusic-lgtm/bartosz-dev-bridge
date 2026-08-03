@@ -1,4 +1,4 @@
-# Bartosz Dev Bridge browser extension 0.4.5
+# Bartosz Dev Bridge browser extension 0.4.6
 
 This Manifest V3 extension implements bounded ASSISTED and explicit opt-in AUTO Direct Lane modes.
 
@@ -15,7 +15,7 @@ This Manifest V3 extension implements bounded ASSISTED and explicit opt-in AUTO 
 - Unsafe model-generated `loop_id` values are deterministically normalized before the AUTO state machine sees them; the effective identity is returned in the decision receipt.
 - Exact read actions are cached only while the trusted local Git `HEAD` still matches. Exact mutating actions are deduplicated for five minutes against the same post-promotion commit.
 - Optional `bdb-acceptance-v1` assertions verify result status, changed paths, promotion, tests and bounded post-action searches before recommending completion.
-- Visual tasks may set `manual_visual_confirmation_required`; AUTO then stops with `needs_confirmation` after automated checks instead of claiming completion without a human review.
+- Visual tasks may set `manual_visual_confirmation_required`; AUTO then stops with `needs_confirmation` and asks for feedback in ordinary chat text. A negative user assessment can resume only the same verified visual task with explicit `continue_after_user_feedback: true`; other `needs_user` states stay blocked.
 - Explicit resume grants the same task a fresh bounded iteration window in the active ChatGPT tab and immediately retries the already visible expected action.
 - A replacement ChatGPT panel waits through a full bounded Native operation and automatically claims its durable checkpoint. Explicit resume recovers any pending result before granting a new iteration budget.
 - File delete/move/rename operations never run in AUTO; they fall back to the explicit ASSISTED button.

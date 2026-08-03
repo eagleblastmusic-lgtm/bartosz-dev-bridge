@@ -78,7 +78,7 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
             function response(request, body) {
               return {
                 schema: "bdb-native-response-v1",
-                host_version: "0.4.5",
+                host_version: "0.4.6",
                 request_id: request.request_id,
                 ...body
               };
@@ -105,7 +105,7 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
                 },
                 runtime: {
                   lastError: null,
-                  getManifest() { return { version: "0.4.5" }; },
+                  getManifest() { return { version: "0.4.6" }; },
                   onMessage: { addListener() {} },
                   sendNativeMessage(_host, request, callback) {
                     nativeCounts[request.action] = (nativeCounts[request.action] || 0) + 1;
@@ -293,7 +293,7 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               assert.equal(visualDecision.response.result.acceptance.status, "needs_confirmation");
               assert.equal(
                 visualDecision.response.result.task_guidance.next_operation,
-                "manual_visual_confirmation"
+                "await_user_visual_feedback"
               );
               assert.equal(visualDecision.state.status, "needs_user");
               assert.equal(visualDecision.shouldContinue, false);
@@ -311,6 +311,48 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               assert.equal(restoredVisual.durableCheckpoint, true);
               const visualLedger = await context.bdbTaskLedger();
               assert.equal(visualLedger.tasks["visual-loop"].status, "needs_user");
+              assert.equal(visualLedger.tasks["visual-loop"].awaiting_visual_feedback, true);
+
+              const blockedWithoutFeedback = await context.__consider({
+                ...readAction("visual-follow-up-blocked"),
+                automation: { mode: "auto", loop_id: "visual-loop", iteration: 2 }
+              }, 7);
+              assert.equal(blockedWithoutFeedback.executed, false);
+              assert.equal(blockedWithoutFeedback.reason, "loop_not_running");
+
+              const blockedBeforeDelivery = await context.__consider({
+                ...readAction("visual-follow-up-too-early"),
+                automation: {
+                  mode: "auto",
+                  loop_id: "visual-loop",
+                  iteration: 99,
+                  continue_after_user_feedback: true
+                }
+              }, 7);
+              assert.equal(blockedBeforeDelivery.executed, false);
+              assert.equal(blockedBeforeDelivery.reason, "visual_feedback_result_not_delivered");
+              assert.equal(blockedBeforeDelivery.compiler.iteration, 2);
+
+              const visualDelivered = await context.markAutoResultDelivered("visual-loop", 1, 7);
+              assert.equal(visualDelivered.marked, true);
+              const feedbackDecision = await context.__consider({
+                ...readAction("visual-follow-up-after-user-feedback"),
+                automation: {
+                  mode: "auto",
+                  loop_id: "visual-loop",
+                  iteration: 99,
+                  continue_after_user_feedback: true
+                }
+              }, 7);
+              assert.equal(feedbackDecision.executed, true, JSON.stringify(feedbackDecision));
+              assert.equal(feedbackDecision.iteration, 2);
+              assert.equal(feedbackDecision.compiler.iteration, 2);
+              assert.equal(feedbackDecision.state.status, "running");
+              assert.equal(sessionStore["bdbAuto:7:visual-loop"].resumedAfterVisualFeedback, true);
+              assert.equal(sessionStore["bdbAuto:7:visual-loop"].iterationCeiling, 9);
+              const feedbackLedger = await context.bdbTaskLedger();
+              assert.equal(feedbackLedger.tasks["visual-loop"].awaiting_visual_feedback, false);
+              assert.equal(feedbackLedger.tasks["visual-loop"].status, "running");
 
               const risky = {
                 schema: "bdb-action-v1",
@@ -345,10 +387,11 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               const armedRetry = await context.__consider(armAction, 7);
               assert.equal(armedRetry.executed, true, JSON.stringify(armedRetry));
 
-              const health = await context.bdbHealthSnapshot({ probeNative: true, contentVersion: "0.4.5" });
+              const health = await context.bdbHealthSnapshot({ probeNative: true, contentVersion: "0.4.6" });
               assert.equal(health.status, "ready");
               assert.equal(health.content_version_match, true);
               assert.equal(health.capabilities.durable_resume, true);
+              assert.equal(health.capabilities.visual_feedback_resume, true);
 
               const diagnostics = await context.bdbDiagnosticsSnapshot();
               assert.equal(diagnostics.privacy.source_code_included, false);

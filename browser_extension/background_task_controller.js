@@ -314,6 +314,15 @@ function bdbTaskResponseError(response) {
   };
 }
 
+function bdbTaskNeedsVisualFeedback(response) {
+  return Boolean(
+    response &&
+    response.result &&
+    response.result.acceptance &&
+    response.result.acceptance.status === "needs_confirmation"
+  );
+}
+
 async function bdbTaskMetric(name, amount = 1) {
   await bdbTaskWithStorageLock(async () => {
     const stored = await chrome.storage.local.get(BDB_TASK_METRICS_KEY);
@@ -341,9 +350,17 @@ async function bdbTaskCompileAction(action) {
   const normalized = bdbTaskNormalizeLoopId(automation.loop_id, action);
   const ledger = await bdbTaskLedger();
   const task = ledger.tasks[normalized.loopId];
-  const iteration = Number.isInteger(automation.iteration) && automation.iteration > 0
-    ? automation.iteration
-    : ((task && Number.isInteger(task.last_iteration) ? task.last_iteration : 0) + 1);
+  const feedbackContinuation = Boolean(
+    automation.continue_after_user_feedback === true &&
+    task &&
+    task.status === "needs_user" &&
+    Number.isInteger(task.last_iteration)
+  );
+  const iteration = feedbackContinuation
+    ? task.last_iteration + 1
+    : (Number.isInteger(automation.iteration) && automation.iteration > 0
+      ? automation.iteration
+      : ((task && Number.isInteger(task.last_iteration) ? task.last_iteration : 0) + 1));
   compiled.automation = {
     ...compiled.automation,
     loop_id: normalized.loopId,
@@ -552,13 +569,13 @@ async function bdbTaskEvaluateAcceptance(action, response) {
     checked_at: Date.now(),
     checks,
     recommended_operation: needsVisualConfirmation
-      ? "manual_visual_confirmation"
+      ? "await_user_visual_feedback"
       : (passed ? "complete" : "inspect_bundle_or_multi_file_patch"),
     ...(needsVisualConfirmation ? {
       confirmation: {
         kind: "visual",
         status: "required",
-        instruction: "Sprawdź wynik w uruchomionej aplikacji. AUTO nie uzna zadania wizualnego za zakończone bez oceny człowieka."
+        instruction: "Poproś użytkownika zwykłą wiadomością o sprawdzenie aplikacji. Nie twórz operacji BDB. Po negatywnej ocenie następna akcja może ustawić automation.continue_after_user_feedback=true."
       }
     } : {})
   };
@@ -731,6 +748,115 @@ async function bdbTaskLatestPendingCheckpoint(loopId) {
   return pending.length > 0 ? bdbTaskClone(pending[0]) : null;
 }
 
+async function bdbTaskResumeAfterVisualFeedback(action, tabId) {
+  const metadata = action && action.automation;
+  if (
+    !metadata ||
+    metadata.mode !== "auto" ||
+    metadata.continue_after_user_feedback !== true
+  ) {
+    return { requested: false, resumed: false, reason: null };
+  }
+  const loopId = metadata.loop_id;
+  const iteration = metadata.iteration;
+  if (
+    !BDB_TASK_LOOP_ID_RE.test(loopId || "") ||
+    !Number.isInteger(iteration) ||
+    iteration < 2 ||
+    !Number.isInteger(tabId) ||
+    tabId < 0
+  ) {
+    return { requested: true, resumed: false, reason: "invalid_visual_feedback_resume" };
+  }
+
+  const ledger = await bdbTaskLedger();
+  const task = ledger.tasks[loopId];
+  const previousIteration = task && Number.isInteger(task.visual_confirmation_iteration)
+    ? task.visual_confirmation_iteration
+    : (task && Number.isInteger(task.last_iteration) ? task.last_iteration : null);
+  if (
+    !task ||
+    task.status !== "needs_user" ||
+    !Number.isInteger(previousIteration) ||
+    iteration !== previousIteration + 1
+  ) {
+    return { requested: true, resumed: false, reason: "visual_feedback_not_expected" };
+  }
+  const key = autoStateKey(tabId, loopId);
+  const session = await chrome.storage.session.get(key);
+  const current = session[key] && typeof session[key] === "object"
+    ? session[key]
+    : {};
+  const sessionProof = Boolean(
+    current.status === "needs_user" &&
+    current.lastIteration === previousIteration &&
+    current.lastResponseDelivered === true &&
+    bdbTaskNeedsVisualFeedback(current.lastResponse)
+  );
+
+  const stored = await chrome.storage.local.get(BDB_TASK_CHECKPOINTS_KEY);
+  const checkpoints = stored[BDB_TASK_CHECKPOINTS_KEY];
+  const durable = checkpoints && typeof checkpoints === "object"
+    ? checkpoints[`${loopId}:${previousIteration}`]
+    : null;
+  const durableProof = Boolean(
+    durable &&
+    durable.delivered === true &&
+    Number.isFinite(durable.created_at) &&
+    Date.now() - durable.created_at <= BDB_TASK_CHECKPOINT_MS &&
+    bdbTaskNeedsVisualFeedback(durable.response)
+  );
+  if (!sessionProof && !durableProof) {
+    return { requested: true, resumed: false, reason: "visual_feedback_result_not_delivered" };
+  }
+
+  const settings = await getAutoSettings();
+  if (!settings.autoEnabled) {
+    return { requested: true, resumed: false, reason: "auto_disabled" };
+  }
+  const now = Date.now();
+  const previousResponse = sessionProof ? current.lastResponse : durable.response;
+  const iterationCeiling = previousIteration + settings.autoMaxIterations;
+  await chrome.storage.session.set({
+    [key]: {
+      ...current,
+      startedAt: now,
+      lastIteration: previousIteration,
+      lastResponse: bdbTaskClone(previousResponse),
+      lastResponseIteration: previousIteration,
+      lastResponseDelivered: true,
+      status: "running",
+      iterationCeiling,
+      resumedAfterVisualFeedback: true,
+      updatedAt: now
+    }
+  });
+  await bdbTaskUpsert(loopId, {
+    status: "running",
+    expected_iteration: iteration,
+    awaiting_visual_feedback: false,
+    visual_feedback_received_at: now,
+    force_status: true
+  });
+  await bdbTaskMetric("visual_feedback_resumes");
+  await bdbTaskRecordDiagnostic({
+    event: "visual_feedback_resumed",
+    loopId,
+    iteration,
+    operation: action.operation,
+    status: "running",
+    tabId,
+    traceId: action.trace_id
+  });
+  return {
+    requested: true,
+    resumed: true,
+    reason: null,
+    previousIteration,
+    iterationCeiling
+  };
+}
+
 submitAction = async function submitActionWithTaskController(action, tabId) {
   const started = Date.now();
   const fingerprint = await bdbTaskFingerprint(bdbTaskActionIdentity(action));
@@ -778,6 +904,26 @@ considerAuto = async function considerAutoWithTaskController(action, tabId) {
   const iteration = metadata && metadata.iteration;
   const operation = effective && effective.operation;
   const traceId = effective && effective.trace_id;
+
+  const feedbackResume = await bdbTaskResumeAfterVisualFeedback(effective, tabId);
+  if (feedbackResume.requested && !feedbackResume.resumed) {
+    await bdbTaskRecordDiagnostic({
+      event: "visual_feedback_resume_rejected",
+      loopId,
+      iteration,
+      operation,
+      reason: feedbackResume.reason,
+      status: "assisted",
+      tabId,
+      traceId
+    });
+    return {
+      executed: false,
+      reason: feedbackResume.reason,
+      expectedIteration: iteration,
+      compiler: compiled.compiler
+    };
+  }
 
   if (metadata && metadata.mode === "auto") {
     const checkpoint = await bdbTaskCheckpointRestore(loopId, iteration);
@@ -879,6 +1025,11 @@ considerAuto = async function considerAutoWithTaskController(action, tabId) {
       await bdbTaskMetric(`auto_stop_${(decision && decision.reason) || "unknown"}`);
     }
     if (loopId && !repeatedBenignStop) {
+      const awaitingVisualFeedback = Boolean(
+        decision &&
+        decision.executed === true &&
+        bdbTaskNeedsVisualFeedback(decision.response)
+      );
       const taskPatch = {
         title: bdbTaskSafeText(effective.task && effective.task.title, 120),
         phase: bdbTaskSafeText(effective.task && effective.task.phase, 64) || (BDB_TASK_READ_OPERATIONS.has(operation) ? "analysis" : "implementation"),
@@ -893,6 +1044,12 @@ considerAuto = async function considerAutoWithTaskController(action, tabId) {
         complexity: bdbTaskComplexity(effective),
         risk: bdbTaskRisk(effective),
         last_error: lastError,
+        ...(awaitingVisualFeedback ? {
+          awaiting_visual_feedback: true,
+          visual_confirmation_iteration: iteration
+        } : ((feedbackResume && feedbackResume.resumed) ? {
+          awaiting_visual_feedback: false
+        } : {})),
         ...((decision && decision.executed === true && !replayed) ? {
           last_iteration: Number.isInteger(iteration) ? iteration : 0,
           operation,
@@ -1031,6 +1188,7 @@ async function bdbHealthSnapshot({ probeNative = false, contentVersion = null } 
       read_cache: true,
       risk_tiers: true,
       shadow_mode: true,
+      visual_feedback_resume: true,
       sanitized_diagnostics: true
     }
   };
