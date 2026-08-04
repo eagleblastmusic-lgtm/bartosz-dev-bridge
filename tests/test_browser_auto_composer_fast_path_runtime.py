@@ -1,23 +1,30 @@
 from __future__ import annotations
 
+import runpy
 import shutil
 import subprocess
+import tempfile
 import textwrap
+import unittest
 from pathlib import Path
-
-import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 EXTENSION = ROOT / "browser_extension"
+_LEGACY = runpy.run_path(
+    str(Path(__file__).with_name("_browser_auto_composer_fast_path_runtime_legacy.py"))
+)
+test_auto_payload_cap_and_composer_read_avoid_live_layout_triggers = _LEGACY[
+    "test_auto_payload_cap_and_composer_read_avoid_live_layout_triggers"
+]
 
 
-def test_auto_contenteditable_uses_single_dom_replacement_without_legacy_insertion(tmp_path: Path) -> None:
+def _run_confirmed_fast_path(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:
-        pytest.skip("Node.js is required for the browser content-script runtime contract")
+        raise unittest.SkipTest("Node.js is required for the browser runtime contract")
 
-    harness = tmp_path / "auto-composer-fast-path-runtime.cjs"
+    harness = tmp_path / "confirmed-fast-path.cjs"
     harness.write_text(
         textwrap.dedent(
             r'''
@@ -28,60 +35,62 @@ def test_auto_contenteditable_uses_single_dom_replacement_without_legacy_inserti
             const script = fs.readFileSync(process.argv[2], "utf8");
 
             const actions = [];
-            const inputEvents = [];
-            const requestedLimits = [];
-            let replacementCount = 0;
+            const inputs = [];
+            const limits = [];
+            const messages = [];
+            let replacements = 0;
             let legacyCalls = 0;
-            let failDirectInsertion = false;
+            let failDirect = false;
 
-            class FakeInputEvent {
+            function submit(strategy) {
+              actions.push(strategy);
+              messages.push({ textContent: composer.textContent });
+              composer.textContent = "";
+            }
+
+            class Input {
               constructor(type, init) {
                 this.type = type;
                 this.init = init;
               }
             }
-            class FakeKeyboardEvent {
+            class Keyboard {
               constructor(type, init) {
                 this.type = type;
                 this.key = init.key;
               }
             }
-            class FakeButton {
+            class Button {
               constructor() {
                 this.disabled = false;
               }
               click() {
-                actions.push("button_click");
-                composer.textContent = "";
+                submit("button_click");
               }
             }
 
-            const button = new FakeButton();
+            const button = new Button();
             const form = {
-              querySelector(selector) {
-                return selector === "button[data-testid='send-button']" ? button : null;
-              },
-              requestSubmit() {
-                actions.push("request_submit");
-                composer.textContent = "";
-              }
+              querySelector: (selector) => (
+                selector === "button[data-testid='send-button']" ? button : null
+              ),
+              requestSubmit: () => submit("request_submit")
             };
             const composer = {
               isContentEditable: true,
               textContent: "",
               focus() {},
-              closest(selector) {
-                return selector === "form" ? form : null;
-              },
+              closest: (selector) => selector === "form" ? form : null,
               replaceChildren(node) {
-                if (failDirectInsertion) {
-                  throw new Error("synthetic direct insertion failure");
-                }
-                replacementCount += 1;
+                if (failDirect) throw new Error("direct insertion failure");
+                replacements += 1;
                 this.textContent = node.textContent || "";
               },
               dispatchEvent(event) {
-                inputEvents.push(event);
+                inputs.push(event);
+                if (event.type === "keydown" && event.key === "Enter") {
+                  submit("enter_key");
+                }
                 return true;
               }
             };
@@ -90,86 +99,84 @@ def test_auto_contenteditable_uses_single_dom_replacement_without_legacy_inserti
                 assert.equal(tag, "p");
                 return { textContent: "" };
               },
-              querySelector(selector) {
-                return selector === "button[data-testid='send-button']" ? button : null;
-              },
-              querySelectorAll(selector) {
-                return selector === "[data-message-author-role='user']" ? [] : [];
-              }
+              querySelector: (selector) => (
+                selector === "button[data-testid='send-button']" ? button : null
+              ),
+              querySelectorAll: (selector) => (
+                selector === "[data-message-author-role='user']" ? messages : []
+              )
             };
             const context = {
               console,
               document,
-              InputEvent: FakeInputEvent,
-              KeyboardEvent: FakeKeyboardEvent,
-              HTMLButtonElement: FakeButton,
+              InputEvent: Input,
+              KeyboardEvent: Keyboard,
+              HTMLButtonElement: Button,
               setTimeout(callback) {
                 callback();
                 return 1;
               },
               autoSend: async () => ({ sent: false }),
-              findComposer() {
-                return composer;
-              },
-              composerText(value) {
-                return value.textContent || "";
-              },
+              findComposer: () => composer,
+              composerText: (value) => value.textContent || "",
               prepareContinuation(text) {
                 legacyCalls += 1;
                 composer.textContent = text;
                 return composer;
               },
               autoResultText(_response, marker, maxBytes) {
-                requestedLimits.push(maxBytes);
-                return `${marker}\nBDB_RESULT:\n${JSON.stringify({ status: "success", operation: "workspace_context" })}`;
+                limits.push(maxBytes);
+                return `${marker}\nBDB_RESULT:\n${JSON.stringify({ status: "success" })}`;
               },
-              resultText(_response, marker) {
-                return `${marker}\nBDB_RESULT:\n{}`;
-              }
+              resultText: (_response, marker) => `${marker}\nBDB_RESULT:\n{}`
             };
             context.globalThis = context;
             vm.createContext(context);
             vm.runInContext(script, context, { filename: process.argv[2] });
 
             async function main() {
-              const result = await context.autoSend({}, "fast-loop", 1);
-              assert.equal(result.sent, true, JSON.stringify(result));
-              assert.equal(result.strategy, "button_click");
+              const first = await context.autoSend({}, "fast-loop", 1);
+              assert.equal(first.sent, true, JSON.stringify(first));
+              assert.equal(first.confirmed, true, JSON.stringify(first));
+              assert.equal(first.confirmedVia, "user_message");
+              assert.equal(first.strategy, "button_click");
               assert.deepEqual(actions, ["button_click"]);
-              assert.equal(replacementCount, 1);
+              assert.equal(replacements, 1);
               assert.equal(legacyCalls, 0);
-              assert.equal(inputEvents.length, 1);
-              assert.equal(inputEvents[0].type, "input");
-              assert.equal(inputEvents[0].init.inputType, "insertText");
-              assert.deepEqual(requestedLimits, [16 * 1024]);
+              assert.equal(inputs.length, 1);
+              assert.equal(inputs[0].type, "input");
+              assert.equal(inputs[0].init.inputType, "insertText");
+              assert.deepEqual(limits, [16 * 1024]);
 
               context.autoResultText = (_response, marker, maxBytes) => {
-                requestedLimits.push(maxBytes);
+                limits.push(maxBytes);
                 return `${marker}\nBDB_RESULT:\n${"x".repeat(12 * 1024)}`;
               };
               const large = await context.autoSend({}, "fast-loop", 2);
               assert.equal(large.sent, true, JSON.stringify(large));
-              assert.equal(replacementCount, 2);
-              assert.deepEqual(requestedLimits, [16 * 1024, 16 * 1024]);
+              assert.equal(large.confirmedVia, "user_message");
+              assert.equal(replacements, 2);
 
-              const manualText = `BDB_RESULT:\n${"m".repeat(12 * 1024)}`;
-              const manualPrepared = await context.bdbPrepareManualContinuation(manualText);
-              assert.equal(manualPrepared, true);
-              assert.equal(composer.textContent, manualText);
-              assert.equal(replacementCount, 3);
+              const manual = `BDB_RESULT:\n${"m".repeat(12 * 1024)}`;
+              assert.equal(await context.bdbPrepareManualContinuation(manual), true);
+              assert.equal(composer.textContent, manual);
+              assert.equal(replacements, 3);
               assert.equal(legacyCalls, 0);
               composer.textContent = "";
 
-              failDirectInsertion = true;
+              failDirect = true;
               context.autoResultText = (_response, marker, maxBytes) => {
-                requestedLimits.push(maxBytes);
-                const body = maxBytes <= 4 * 1024 ? "safe-fallback" : "z".repeat(12 * 1024);
+                limits.push(maxBytes);
+                const body = maxBytes <= 4 * 1024
+                  ? "safe-fallback"
+                  : "z".repeat(12 * 1024);
                 return `${marker}\nBDB_RESULT:\n${body}`;
               };
               const fallback = await context.autoSend({}, "fast-loop", 3);
               assert.equal(fallback.sent, true, JSON.stringify(fallback));
+              assert.equal(fallback.confirmedVia, "user_message");
               assert.equal(legacyCalls, 1);
-              assert.deepEqual(requestedLimits, [
+              assert.deepEqual(limits, [
                 16 * 1024,
                 16 * 1024,
                 16 * 1024,
@@ -196,26 +203,20 @@ def test_auto_contenteditable_uses_single_dom_replacement_without_legacy_inserti
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
-def test_auto_payload_cap_and_composer_read_avoid_live_layout_triggers() -> None:
-    content = (EXTENSION / "content.js").read_text(encoding="utf-8")
-    auto_send = (EXTENSION / "content_auto_send.js").read_text(encoding="utf-8")
+def test_auto_contenteditable_uses_single_dom_replacement_without_legacy_insertion(
+    tmp_path: Path,
+) -> None:
+    _run_confirmed_fast_path(tmp_path)
 
-    assert "const BDB_AUTO_CONTINUATION_TARGET_BYTES = 12 * 1024;" in content
-    assert "const BDB_AUTO_CONTINUATION_MAX_BYTES = 16 * 1024;" in content
-    assert "const BDB_AUTO_LEGACY_CONTINUATION_MAX_BYTES = 4 * 1024;" in content
-    assert "const BDB_AUTO_TRACKED_PATH_LIMIT = 20;" in content
-    assert "const BDB_AUTO_SYMBOL_LIMIT = 8;" in content
-    assert "snapshot_paths_omitted_for_auto" in content
 
-    composer_start = content.index("function composerText(composer)")
-    composer_end = content.index("function prepareContinuation", composer_start)
-    composer_body = content[composer_start:composer_end]
-    assert "innerText" not in composer_body
-    assert "textContent" in composer_body
+class AutoComposerConfirmedFastPathTests(unittest.TestCase):
+    def test_confirmed_fast_path_and_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            _run_confirmed_fast_path(Path(tempdir))
 
-    assert "function bdbPrepareAutoContinuation" in auto_send
-    assert "composer.replaceChildren(paragraph)" in auto_send
-    assert "let prepared = bdbPrepareAutoContinuation(" in auto_send
-    assert "initial.composer" in auto_send
-    assert ": 16 * 1024;" in auto_send
-    assert "legacyContinuationMaxBytes" in auto_send
+    def test_payload_cap_and_composer_read_contract(self) -> None:
+        test_auto_payload_cap_and_composer_read_avoid_live_layout_triggers()
+
+
+if __name__ == "__main__":
+    unittest.main()
