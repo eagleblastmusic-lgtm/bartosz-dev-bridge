@@ -238,7 +238,7 @@ async function bdbRunAutoPanel(action, button, output, compact) {
       return { retryForReplacement: true };
     }
     const sent = await autoSend(auto.response, auto.loopId, auto.iteration);
-    if (sent.sent) {
+    if (sent.sent && sent.confirmed === true && sent.confirmedVia === "user_message") {
       bdbReportAutoDelivery(action, "composer_send_confirmed", sent.confirmedVia, "sent", "composer_send_successes");
       try {
         await chrome.runtime.sendMessage({
