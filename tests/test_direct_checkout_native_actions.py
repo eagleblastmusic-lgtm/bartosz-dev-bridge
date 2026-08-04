@@ -109,6 +109,20 @@ def open_read_action() -> dict:
     }
 
 
+def mutating_action() -> dict:
+    return {
+        "schema": ACTION_SCHEMA,
+        "repo_alias": "synthetic",
+        "operation": "replace_exact_and_test",
+        "payload": {
+            "path": "src/clamp.py",
+            "old": "value = 1",
+            "new": "value = 2",
+            "profile_id": "poc_pytest",
+        },
+    }
+
+
 def test_direct_checkout_native_session_allows_unrelated_dirty_paths(
     tmp_path: Path,
 ) -> None:
@@ -133,10 +147,10 @@ def test_direct_checkout_native_session_allows_unrelated_dirty_paths(
     assert envelope["command"]["operation"] == "open_read"
 
 
-def test_direct_checkout_native_session_rejects_controlled_dirty_path(
+def test_direct_checkout_controlled_dirty_path_allows_read_but_rejects_mutation(
     tmp_path: Path,
 ) -> None:
-    fixture, composer, _ = setup_composer(
+    fixture, composer, base_sha = setup_composer(
         tmp_path,
         workspace_mode="direct_checkout",
     )
@@ -151,20 +165,24 @@ def test_direct_checkout_native_session_rejects_controlled_dirty_path(
     assert context["session_clean"] is False
     assert context["initial_state_hash"] is None
 
+    _, envelope = composer.compose(open_read_action())
+    assert envelope["manifest"]["base_sha"] == base_sha
+    assert envelope["command"]["expected_state_hash"] is None
+
     with pytest.raises(BridgeError) as exc:
-        composer.compose(open_read_action())
+        composer.compose(mutating_action())
     assert exc.value.code == "dirty_source_checkout"
 
 
-def test_isolated_worktree_keeps_whole_source_clean_requirement(
+def test_isolated_worktree_dirty_source_allows_read_but_rejects_mutation(
     tmp_path: Path,
 ) -> None:
-    fixture, composer, _ = setup_composer(
+    fixture, composer, base_sha = setup_composer(
         tmp_path,
         workspace_mode="isolated_worktree",
     )
     (fixture / "notes.txt").write_text(
-        "unrelated but still blocked in legacy mode\n",
+        "unrelated but still blocked for mutations\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -173,8 +191,12 @@ def test_isolated_worktree_keeps_whole_source_clean_requirement(
     assert context["source_clean"] is False
     assert context["session_clean"] is False
 
+    _, envelope = composer.compose(open_read_action())
+    assert envelope["manifest"]["base_sha"] == base_sha
+    assert envelope["command"]["expected_state_hash"] is None
+
     with pytest.raises(BridgeError) as exc:
-        composer.compose(open_read_action())
+        composer.compose(mutating_action())
     assert exc.value.code == "dirty_source_checkout"
 
 

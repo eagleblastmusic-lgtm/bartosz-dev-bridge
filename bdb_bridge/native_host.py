@@ -320,7 +320,7 @@ class NativeHostService:
                 arm = self.arm_store.status()
                 if not arm.armed:
                     raise BridgeError("policy_denied", "Native host is DISARMED or its TTL expired")
-                mirror_sync = self._sync_repository(repository, phase="pre_workspace_context")
+                mirror_sync = self._try_sync_repository(repository, phase="pre_workspace_context")
             context = self.action_composer.context(alias)
             if mirror_sync is not None:
                 context["mirror_sync"] = mirror_sync
@@ -349,7 +349,7 @@ class NativeHostService:
             if not isinstance(payload, dict):
                 raise BridgeError("invalid_payload", "search_text payload must be an object")
             repository = self._repository(alias)
-            mirror_sync = self._sync_repository(repository, phase="pre_search_text")
+            mirror_sync = self._try_sync_repository(repository, phase="pre_search_text")
             result = search_repository(repository.bridge_config, payload)
             if mirror_sync is not None:
                 result["mirror_sync"] = mirror_sync
@@ -372,7 +372,7 @@ class NativeHostService:
             if not isinstance(payload, dict):
                 raise BridgeError("invalid_payload", "inspect_bundle payload must be an object")
             repository = self._repository(alias)
-            mirror_sync = self._sync_repository(repository, phase="pre_inspect_bundle")
+            mirror_sync = self._try_sync_repository(repository, phase="pre_inspect_bundle")
             presentation = bdb_action.get("presentation")
             automation = bdb_action.get("automation")
             compact = bool(
@@ -405,9 +405,14 @@ class NativeHostService:
             if recovered is not None:
                 return recovered
             operation = bdb_action.get("operation")
-            if operation in {"replace_exact_and_test", "multi_file_patch"}:
+            mutating = operation in {"replace_exact_and_test", "multi_file_patch"}
+            if mutating:
                 require_compatible_service_runtime(repository.bridge_config.journal_path)
-            mirror_sync = self._sync_repository(repository, phase="pre_action")
+            mirror_sync = (
+                self._sync_repository(repository, phase="pre_action")
+                if mutating
+                else self._try_sync_repository(repository, phase="pre_action")
+            )
             composed_repository, envelope = self.action_composer.compose(bdb_action)
             if composed_repository.alias != repository.alias:
                 raise BridgeError("journal_conflict", "Composed repository alias changed unexpectedly")
@@ -440,16 +445,19 @@ class NativeHostService:
         if action == "submit":
             alias = require_string(request, "repo_alias")
             repository = self._repository(alias)
-            mirror_sync = self._sync_repository(repository, phase="pre_envelope")
             envelope = request.get("envelope")
             if not isinstance(envelope, dict) or envelope.get("schema") != LOCAL_ENVELOPE_SCHEMA:
                 raise BridgeError("invalid_payload", "submit requires bdb-local-envelope-v1")
             command = envelope.get("command")
-            if (
-                isinstance(command, dict)
-                and command.get("operation") in {"replace_exact_and_test", "multi_file_patch"}
-            ):
+            operation = command.get("operation") if isinstance(command, dict) else None
+            mutating = operation in {"replace_exact_and_test", "multi_file_patch"}
+            if mutating:
                 require_compatible_service_runtime(repository.bridge_config.journal_path)
+            mirror_sync = (
+                self._sync_repository(repository, phase="pre_envelope")
+                if mutating
+                else self._try_sync_repository(repository, phase="pre_envelope")
+            )
             filename = require_string(request, "filename")
             if _SAFE_FILENAME_RE.fullmatch(filename) is None:
                 raise BridgeError("unsafe_path", "filename must be a safe .json basename")
@@ -598,6 +606,10 @@ class NativeHostService:
     @staticmethod
     def _sync_repository(repository: RepositoryAlias, *, phase: str) -> dict[str, Any] | None:
         return MirrorSynchronizer(repository.bridge_config).sync(phase=phase)
+
+    @staticmethod
+    def _try_sync_repository(repository: RepositoryAlias, *, phase: str) -> dict[str, Any] | None:
+        return MirrorSynchronizer(repository.bridge_config).try_sync(phase=phase)
 
     def _repository_for_session(self, request: dict[str, Any], session_id: str) -> RepositoryAlias:
         requested_alias = request.get("repo_alias")

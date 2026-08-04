@@ -305,8 +305,19 @@ function startAssistedProgress(button, actionIdentity = null) {
   };
 }
 
+function bdbResultPayload(response) {
+  if (!response || typeof response !== "object" || Array.isArray(response)) {
+    return response;
+  }
+  const result = response.result;
+  const hasObjectResult = Boolean(
+    result && typeof result === "object" && !Array.isArray(result)
+  );
+  return response.status === "failed" || !hasObjectResult ? response : result;
+}
+
 function resultText(response, marker = null) {
-  const payload = response && response.result ? response.result : response;
+  const payload = bdbResultPayload(response);
   const prefix = marker ? `${marker}\n` : "";
   return `${prefix}BDB_RESULT:\n${JSON.stringify(payload, null, 2)}`;
 }
@@ -762,7 +773,7 @@ function autoResultText(
   marker = null,
   requestedMaxBytes = BDB_AUTO_CONTINUATION_MAX_BYTES
 ) {
-  const payload = response && response.result ? response.result : response;
+  const payload = bdbResultPayload(response);
   const prefix = marker ? `${marker}\n` : "";
   const originalJson = JSON.stringify(payload, null, 2);
   const hardLimit = Number.isInteger(requestedMaxBytes)
@@ -827,7 +838,16 @@ function autoResultText(
 }
 
 function resultSummary(response) {
-  const payload = response && response.result ? response.result : response;
+  const payload = bdbResultPayload(response);
+  if (response && response.status === "failed") {
+    const code = response.error && typeof response.error.code === "string"
+      ? response.error.code
+      : "unknown_error";
+    const message = response.error && typeof response.error.message === "string"
+      ? response.error.message
+      : null;
+    return `BDB zakończył operację błędem: ${code}${message ? ` — ${message}` : ""}`;
+  }
   if (payload && payload.acceptance && payload.acceptance.status === "unmet") {
     const failed = Array.isArray(payload.acceptance.checks)
       ? payload.acceptance.checks.filter((check) => check && check.passed !== true).length

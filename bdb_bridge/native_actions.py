@@ -257,10 +257,17 @@ class NativeActionComposer:
                 correlation=parsed_correlation,
             )
             repository_context = self._repository_context(repository)
-            if not repository_context.session_clean or repository_context.initial_state_hash is None:
+            read_only = operation == "open_read"
+            if (
+                not read_only
+                and (
+                    not repository_context.session_clean
+                    or repository_context.initial_state_hash is None
+                )
+            ):
                 raise BridgeError(
                     "dirty_source_checkout",
-                    "Trusted repository controlled paths must be clean",
+                    "Mutating actions require clean trusted repository controlled paths",
                 )
             created_at = _utc_text(self.now_fn())
             session_record = self.session_store.bind(
@@ -287,6 +294,16 @@ class NativeActionComposer:
             session_record = existing
             created_at = _utc_text(self.now_fn())
             expected_state_hash = None if supplied_state_hash is _MISSING else supplied_state_hash
+            if operation in _MUTATING_OPERATIONS:
+                repository_context = self._repository_context(repository)
+                if (
+                    not repository_context.session_clean
+                    or repository_context.initial_state_hash is None
+                ):
+                    raise BridgeError(
+                        "dirty_source_checkout",
+                        "Mutating actions require clean trusted repository controlled paths",
+                    )
             if sequence > 1 and operation in _MUTATING_OPERATIONS and expected_state_hash is None:
                 raise BridgeError(
                     "invalid_payload",

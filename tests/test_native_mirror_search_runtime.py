@@ -23,7 +23,10 @@ def git(repo: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def test_native_search_text_returns_current_local_match_and_sync_metadata(tmp_path: Path, monkeypatch) -> None:
+def test_native_read_inspection_uses_pinned_head_when_mirror_sync_reports_dirty(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     fixture = tmp_path / "fixture"
     control = tmp_path / "control"
     worktrees = tmp_path / "worktrees"
@@ -74,6 +77,34 @@ def test_native_search_text_returns_current_local_match_and_sync_metadata(tmp_pa
     NativeArmStore(config.state_path, now_fn=lambda: NOW).arm(minutes=5)
     service = NativeHostService(config, origin=ORIGIN, now_fn=lambda: NOW)
 
+    (fixture / "assets" / "theme.css").write_text(
+        ".working-tree-only { color: red; }\n",
+        encoding="utf-8",
+    )
+
+    def failed_read_sync(_repository, *, phase: str):
+        return {
+            "schema": "bdb-mirror-sync-v1",
+            "status": "failed",
+            "phase": phase,
+            "error_code": "dirty_source_checkout",
+            "pushed": False,
+        }
+
+    def strict_sync_must_not_run(_repository, *, phase: str):
+        raise AssertionError(f"read-only operation used strict mirror sync: {phase}")
+
+    monkeypatch.setattr(
+        NativeHostService,
+        "_try_sync_repository",
+        staticmethod(failed_read_sync),
+    )
+    monkeypatch.setattr(
+        NativeHostService,
+        "_sync_repository",
+        staticmethod(strict_sync_must_not_run),
+    )
+
     response = service.handle(
         {
             "schema": NATIVE_REQUEST_SCHEMA,
@@ -91,7 +122,10 @@ def test_native_search_text_returns_current_local_match_and_sync_metadata(tmp_pa
     assert response["status"] == "completed"
     assert response["result"]["operation"] == "search_text"
     assert response["result"]["matches"][0]["path"] == "assets/theme.css"
+    assert response["result"]["matches"][0]["text"].find("clip-path") >= 0
     assert response["result"]["changed_files"] == []
+    assert response["result"]["mirror_sync"]["status"] == "failed"
+    assert response["result"]["mirror_sync"]["error_code"] == "dirty_source_checkout"
 
     inspection = service.handle(
         {
@@ -113,3 +147,6 @@ def test_native_search_text_returns_current_local_match_and_sync_metadata(tmp_pa
     assert inspection["status"] == "completed"
     assert inspection["result"]["operation"] == "inspect_bundle"
     assert inspection["result"]["reads"][0]["path"] == "assets/theme.css"
+    assert "clip-path" in inspection["result"]["reads"][0]["content"]
+    assert inspection["result"]["mirror_sync"]["status"] == "failed"
+    assert inspection["result"]["mirror_sync"]["error_code"] == "dirty_source_checkout"

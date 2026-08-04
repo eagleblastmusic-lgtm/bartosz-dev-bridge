@@ -30,6 +30,18 @@ const TERMINAL_VALUES = new Set([
   "cancelled",
   "aborted"
 ]);
+const AUTO_RECOVERABLE_READ_OPERATIONS = new Set([
+  WORKSPACE_CONTEXT_OPERATION,
+  SEARCH_TEXT_OPERATION,
+  INSPECT_BUNDLE_OPERATION,
+  "open_read"
+]);
+const AUTO_RECOVERABLE_READ_ERROR_CODES = new Set([
+  "invalid_payload",
+  "dirty_source_checkout",
+  "mirror_sync_failed",
+  "result_too_large"
+]);
 const inFlightTabs = new Set();
 const replayClaimsInFlight = new Set();
 const nativeRequests = new Map();
@@ -593,6 +605,19 @@ function isRecoverableProfileFailure(metadata, response) {
   );
 }
 
+function isRecoverableReadFailure(action, metadata, response) {
+  const errorCode = response && response.error && response.error.code;
+  return Boolean(
+    metadata.continueOnFailure &&
+    action &&
+    AUTO_RECOVERABLE_READ_OPERATIONS.has(action.operation) &&
+    response &&
+    response.status === "failed" &&
+    typeof errorCode === "string" &&
+    AUTO_RECOVERABLE_READ_ERROR_CODES.has(errorCode)
+  );
+}
+
 async function considerAuto(action, tabId) {
   const metadata = automationMetadata(action);
   if (!metadata) {
@@ -688,17 +713,18 @@ async function considerAuto(action, tabId) {
 
   const response = await submitAction(action, tabId);
   const recoverableFailure = isRecoverableProfileFailure(metadata, response);
+  const recoverableReadFailure = isRecoverableReadFailure(action, metadata, response);
   const recoverableNativeError = Boolean(
     response &&
     response.status === "failed" &&
     response.error &&
     response.error.code === "internal_error"
   );
-  const terminal = recoverableFailure || recoverableNativeError
+  const terminal = recoverableFailure || recoverableReadFailure || recoverableNativeError
     ? null
     : structuredTerminalValue(response);
   const completed = response.status === "completed";
-  const canContinue = completed || recoverableNativeError;
+  const canContinue = completed || recoverableReadFailure || recoverableNativeError;
   state.lastIteration = metadata.iteration;
   state.lastCommandId = response.command_id || null;
   state.lastResponse = response;
@@ -715,6 +741,7 @@ async function considerAuto(action, tabId) {
     loopId: metadata.loopId,
     iteration: metadata.iteration,
     recoverableFailure,
+    recoverableReadFailure,
     recoverableNativeError,
     shouldContinue,
     stopReason: terminal || (canContinue ? null : "result_not_completed"),

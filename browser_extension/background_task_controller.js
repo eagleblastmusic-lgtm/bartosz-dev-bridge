@@ -586,29 +586,43 @@ function bdbTaskAttachGuidance(action, response, acceptance, cacheStatus) {
   if (!copy || typeof copy !== "object") {
     return response;
   }
-  const result = copy.result && typeof copy.result === "object" ? copy.result : {};
+  const hasObjectResult = Boolean(
+    copy.result && typeof copy.result === "object" && !Array.isArray(copy.result)
+  );
+  const result = hasObjectResult ? copy.result : null;
   const complexity = bdbTaskComplexity(action);
   const changedFiles = bdbTaskChangedFiles(copy);
+  const responseError = bdbTaskResponseError(copy);
   const nextOperation = acceptance
     ? acceptance.recommended_operation
-    : (BDB_TASK_READ_OPERATIONS.has(action.operation)
-      ? "multi_file_patch_or_focused_read"
-      : "verify_acceptance");
-  copy.result = {
-    ...result,
-    ...(acceptance ? { acceptance } : {}),
-    task_guidance: {
-      schema: "bdb-task-guidance-v1",
-      trace_id: action.trace_id || null,
-      phase: action.task && action.task.phase
-        ? action.task.phase
-        : (BDB_TASK_READ_OPERATIONS.has(action.operation) ? "analysis" : "implementation"),
-      complexity,
-      changed_files: changedFiles,
-      next_operation: nextOperation,
-      cache: cacheStatus
-    }
+    : (responseError
+      ? "recover_from_error"
+      : (BDB_TASK_READ_OPERATIONS.has(action.operation)
+        ? "multi_file_patch_or_focused_read"
+        : "verify_acceptance"));
+  const guidance = {
+    schema: "bdb-task-guidance-v1",
+    trace_id: action.trace_id || null,
+    phase: action.task && action.task.phase
+      ? action.task.phase
+      : (BDB_TASK_READ_OPERATIONS.has(action.operation) ? "analysis" : "implementation"),
+    complexity,
+    changed_files: changedFiles,
+    next_operation: nextOperation,
+    cache: cacheStatus
   };
+  if (hasObjectResult) {
+    copy.result = {
+      ...result,
+      ...(acceptance ? { acceptance } : {}),
+      task_guidance: guidance
+    };
+  } else {
+    if (acceptance) {
+      copy.acceptance = acceptance;
+    }
+    copy.task_guidance = guidance;
+  }
   return copy;
 }
 

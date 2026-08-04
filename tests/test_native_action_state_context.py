@@ -166,21 +166,33 @@ def test_later_mutating_action_requires_previous_result_hash(tmp_path: Path) -> 
     assert exc.value.code == "invalid_payload"
 
 
-def test_dirty_source_context_is_visible_and_new_session_fails_closed(tmp_path: Path) -> None:
-    fixture, composer, _ = setup(tmp_path)
+def test_dirty_source_context_allows_pinned_read_but_mutation_fails_closed(tmp_path: Path) -> None:
+    fixture, composer, base_sha = setup(tmp_path)
     (fixture / "src" / "clamp.py").write_text("dirty = True\n", encoding="utf-8")
 
     context = composer.context("synthetic")
     assert context["source_clean"] is False
     assert context["initial_state_hash"] is None
 
+    _, envelope = composer.compose(
+        {
+            "schema": ACTION_SCHEMA,
+            "repo_alias": "synthetic",
+            "operation": "open_read",
+            "payload": {"path": "src/clamp.py"},
+        }
+    )
+    assert envelope["manifest"]["base_sha"] == base_sha
+    assert envelope["command"]["operation"] == "open_read"
+    assert envelope["command"]["expected_state_hash"] is None
+
     with pytest.raises(BridgeError) as exc:
         composer.compose(
             {
                 "schema": ACTION_SCHEMA,
                 "repo_alias": "synthetic",
-                "operation": "open_read",
-                "payload": {"path": "src/clamp.py"},
+                "operation": "multi_file_patch",
+                "payload": valid_patch_payload(),
             }
         )
     assert exc.value.code == "dirty_source_checkout"
