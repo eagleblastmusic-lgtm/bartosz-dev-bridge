@@ -3,7 +3,7 @@
 // ChatGPT may replace the composer after an input event, accept insertion but
 // ignore a synthetic click, or keep the send button disabled briefly. AUTO must
 // operate on the current live composer and must not report success until the
-// exact marker has been consumed or appears in a submitted user message.
+// exact marker appears in a submitted user message.
 const BDB_AUTO_SEND_BUTTON_ATTEMPTS = 80;
 const BDB_AUTO_INSERTION_OBSERVE_POLLS = 40;
 const BDB_AUTO_SEND_CONFIRM_POLLS = 30;
@@ -166,18 +166,9 @@ async function bdbFindReadySendButton(composer) {
 }
 
 async function bdbWaitForSendConfirmation(marker) {
-  let consecutiveMissing = 0;
   for (let poll = 0; poll < BDB_AUTO_SEND_CONFIRM_POLLS; poll += 1) {
     if (bdbUserMessageContains(marker)) {
       return { confirmed: true, via: "user_message" };
-    }
-    if (bdbComposerContains(marker)) {
-      consecutiveMissing = 0;
-    } else {
-      consecutiveMissing += 1;
-      if (consecutiveMissing >= 3) {
-        return { confirmed: true, via: "composer_consumed" };
-      }
     }
     await bdbAutoSendSleep(BDB_AUTO_SEND_POLL_MS);
   }
@@ -298,12 +289,21 @@ autoSend = async function autoSendWithConfirmedFallbacks(response, loopId, itera
 
   const attempts = [];
   for (const strategy of BDB_AUTO_SEND_STRATEGIES) {
-    if (!bdbComposerContains(marker)) {
+    if (bdbUserMessageContains(marker)) {
       return {
         sent: true,
         reason: null,
         confirmed: true,
-        confirmedVia: "composer_consumed",
+        confirmedVia: "user_message",
+        attempts
+      };
+    }
+    if (!bdbComposerContains(marker)) {
+      return {
+        sent: false,
+        reason: "send_not_confirmed",
+        confirmed: false,
+        markerStillPresent: false,
         attempts
       };
     }
@@ -327,6 +327,15 @@ autoSend = async function autoSendWithConfirmedFallbacks(response, loopId, itera
     }
   }
 
+  if (bdbUserMessageContains(marker)) {
+    return {
+      sent: true,
+      reason: null,
+      confirmed: true,
+      confirmedVia: "user_message",
+      attempts
+    };
+  }
   return {
     sent: false,
     reason: "send_not_confirmed",
