@@ -109,7 +109,10 @@ def run_foreground(config: BridgeConfig) -> int:
             fault_hook=hook,
         )
         if config.direct_spool_enabled:
-            local_transport = LocalSpoolTransport(config.direct_spool_dir)
+            local_transport = LocalSpoolTransport(
+                config.direct_spool_dir,
+                result_dir=config.direct_result_dir,
+            )
             local_ingestor = CommandIngestor(
                 journal,
                 local_transport,

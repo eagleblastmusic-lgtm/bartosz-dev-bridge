@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -57,6 +58,58 @@ def test_transport_ignores_unpublished_temp_files(tmp_path: Path) -> None:
 
     assert snapshot.manifests == ()
     assert snapshot.commands == ()
+
+
+def test_transport_archives_only_completed_envelopes_and_preserves_evidence(tmp_path: Path) -> None:
+    inbox = tmp_path / "direct_spool" / "inbox"
+    results = tmp_path / "direct_spool" / "results"
+    completed = envelope()
+    pending_session = str(uuid4())
+    pending = envelope(
+        command={**command_payload(), "session_id": pending_session},
+        manifest={**manifest_payload(), "session_id": pending_session},
+    )
+    LocalSpoolWriter(inbox).submit(completed, filename="completed.json")
+    LocalSpoolWriter(inbox).submit(pending, filename="pending.json")
+    result = results / "sessions" / SESSION_ID / "results" / "000001.json"
+    result.parent.mkdir(parents=True)
+    result.write_text(json.dumps({"command_id": f"{SESSION_ID}:000001"}), encoding="utf-8")
+
+    transport = LocalSpoolTransport(inbox, result_dir=results)
+    snapshot = transport.fetch_snapshot()
+
+    assert transport.last_archived_completed == 1
+    assert not (inbox / "completed.json").exists()
+    assert (inbox.parent / "archive" / "inbox" / "completed.json").read_bytes()
+    assert result.exists()
+    assert (inbox / "pending.json").exists()
+    assert [item.path for item in snapshot.commands] == [
+        f"sessions/{pending_session}/commands/000001.json"
+    ]
+
+
+def test_completed_evidence_is_archived_before_active_spool_limit(tmp_path: Path) -> None:
+    inbox = tmp_path / "direct_spool" / "inbox"
+    results = tmp_path / "direct_spool" / "results"
+    for index in range(101):
+        session_id = str(uuid4())
+        completed = envelope(
+            command={**command_payload(), "session_id": session_id},
+            manifest={**manifest_payload(), "session_id": session_id},
+        )
+        LocalSpoolWriter(inbox).submit(completed, filename=f"completed-{index:03d}.json")
+        result = results / "sessions" / session_id / "results" / "000001.json"
+        result.parent.mkdir(parents=True)
+        result.write_text(json.dumps({"command_id": f"{session_id}:000001"}), encoding="utf-8")
+
+    transport = LocalSpoolTransport(inbox, result_dir=results)
+    snapshot = transport.fetch_snapshot()
+
+    assert transport.last_archived_completed == 101
+    assert snapshot.commands == ()
+    assert list(inbox.glob("*.json")) == []
+    assert len(list((inbox.parent / "archive" / "inbox").glob("*.json"))) == 101
+    assert len(list(results.rglob("*.json"))) == 101
 
 
 def test_writer_is_idempotent_for_exact_bytes_and_rejects_collision(tmp_path: Path) -> None:

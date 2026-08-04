@@ -5,6 +5,7 @@ import json
 import os
 import re
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 from .protocol import (
@@ -14,6 +15,7 @@ from .protocol import (
     parse_strict_utc_timestamp,
     require_int,
     require_string,
+    result_path_for,
 )
 from .serializers import canonical_json
 from .transport import CommandSnapshot, RemoteDocument
@@ -48,11 +50,70 @@ class LocalSpoolTransport:
     repeated reads idempotent.
     """
 
-    def __init__(self, inbox_dir: str | Path) -> None:
+    def __init__(
+        self,
+        inbox_dir: str | Path,
+        *,
+        result_dir: str | Path | None = None,
+        archive_dir: str | Path | None = None,
+    ) -> None:
         self.inbox_dir = Path(inbox_dir).expanduser().resolve(strict=False)
+        self.result_dir = (
+            Path(result_dir).expanduser().resolve(strict=False)
+            if result_dir is not None
+            else None
+        )
+        self.archive_dir = (
+            Path(archive_dir).expanduser().resolve(strict=False)
+            if archive_dir is not None
+            else self.inbox_dir.parent / "archive" / "inbox"
+        )
+        self.last_archived_completed = 0
+
+    def _archive_completed_envelopes(self) -> int:
+        if self.result_dir is None:
+            return 0
+        archived = 0
+        for path in sorted(self.inbox_dir.glob("*.json"), key=lambda item: item.name):
+            if not _SAFE_NAME_RE.fullmatch(path.name) or path.is_symlink() or not path.is_file():
+                continue
+            try:
+                if path.stat().st_size > _MAX_FILE_BYTES:
+                    continue
+                data = path.read_bytes()
+                envelope = json.loads(data.decode("utf-8", errors="strict"))
+                if not isinstance(envelope, dict) or envelope.get("schema") != LOCAL_ENVELOPE_SCHEMA:
+                    continue
+                command = envelope.get("command")
+                if not isinstance(command, dict):
+                    continue
+                session_id = require_string(command, "session_id")
+                sequence = require_int(command, "sequence")
+                relative = PurePosixPath(result_path_for(session_id, sequence))
+                result = self.result_dir.joinpath(*relative.parts)
+                if result.is_symlink() or not result.is_file():
+                    continue
+            except (OSError, UnicodeError, json.JSONDecodeError, BridgeError):
+                continue
+
+            self.archive_dir.mkdir(parents=True, exist_ok=True)
+            if self.archive_dir.is_symlink() or not self.archive_dir.is_dir():
+                raise BridgeError("unsafe_path", "Local spool archive must be a regular directory")
+            destination = self.archive_dir / path.name
+            if destination.exists():
+                if destination.is_symlink() or not destination.is_file():
+                    raise BridgeError("unsafe_path", "Local spool archive entry must be a regular file")
+                if destination.read_bytes() != data:
+                    raise BridgeError("journal_conflict", f"Local spool archive collision: {path.name}")
+                path.unlink()
+            else:
+                os.replace(path, destination)
+            archived += 1
+        return archived
 
     def fetch_snapshot(self) -> CommandSnapshot:
         self.inbox_dir.mkdir(parents=True, exist_ok=True)
+        self.last_archived_completed = self._archive_completed_envelopes()
         candidates = sorted(self.inbox_dir.glob("*.json"), key=lambda path: path.name)
         if len(candidates) > _MAX_FILES:
             raise BridgeError("invalid_payload", "Local spool contains too many envelopes")

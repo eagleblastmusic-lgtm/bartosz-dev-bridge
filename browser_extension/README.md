@@ -1,4 +1,4 @@
-# Bartosz Dev Bridge browser extension 0.4.6
+# Bartosz Dev Bridge browser extension 0.4.7
 
 This Manifest V3 extension implements bounded ASSISTED and explicit opt-in AUTO Direct Lane modes.
 
@@ -25,6 +25,7 @@ This Manifest V3 extension implements bounded ASSISTED and explicit opt-in AUTO 
 - The active conversation is durably correlated with `repo_alias`, `launch_id`, `session_id` and `command_id` in extension-local storage.
 - Failed mutating actions preserve an explicit `bdb-repair-correlation-v1`. `Napraw i uruchom ponownie` corrects deterministic hash metadata locally or returns the exact error to the same conversation; the next corrected action uses either the still-unbound initial session or a new repair session with an exact predecessor.
 - A result can always be copied or inserted manually when the composer DOM no longer matches the bounded selector set.
+- Completed local-spool command envelopes are moved atomically into a sibling archive after their durable result exists. Pending envelopes, results and the journal remain untouched, so long-running installations do not hit the 100-file active-inbox safety limit.
 - Repository paths, aliases and policy remain controlled by the local Native Host configuration. The extension does not silently widen an existing workspace allowlist.
 
 Load the directory as an unpacked extension only after installing the Native Host and registering the extension's exact ID in `allowed_origins`.

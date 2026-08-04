@@ -78,7 +78,7 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
             function response(request, body) {
               return {
                 schema: "bdb-native-response-v1",
-                host_version: "0.4.6",
+                host_version: "0.4.7",
                 request_id: request.request_id,
                 ...body
               };
@@ -105,7 +105,7 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
                 },
                 runtime: {
                   lastError: null,
-                  getManifest() { return { version: "0.4.6" }; },
+                  getManifest() { return { version: "0.4.7" }; },
                   onMessage: { addListener() {} },
                   sendNativeMessage(_host, request, callback) {
                     nativeCounts[request.action] = (nativeCounts[request.action] || 0) + 1;
@@ -387,7 +387,7 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               const armedRetry = await context.__consider(armAction, 7);
               assert.equal(armedRetry.executed, true, JSON.stringify(armedRetry));
 
-              const health = await context.bdbHealthSnapshot({ probeNative: true, contentVersion: "0.4.6" });
+              const health = await context.bdbHealthSnapshot({ probeNative: true, contentVersion: "0.4.7" });
               assert.equal(health.status, "ready");
               assert.equal(health.content_version_match, true);
               assert.equal(health.capabilities.durable_resume, true);

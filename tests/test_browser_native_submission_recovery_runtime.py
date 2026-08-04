@@ -42,7 +42,7 @@ def test_submission_retries_same_receipted_request_after_internal_error(tmp_path
                 },
                 runtime: {
                   lastError: null,
-                  getManifest() { return { version: "0.4.6" }; },
+                  getManifest() { return { version: "0.4.7" }; },
                   onMessage: { addListener() {} },
                   connectNative() {
                     return {
@@ -53,14 +53,14 @@ def test_submission_retries_same_receipted_request_after_internal_error(tmp_path
                         const response = posts.length === 1
                           ? {
                               schema: "bdb-native-response-v1",
-                              host_version: "0.4.6",
+                              host_version: "0.4.7",
                               request_id: request.request_id,
                               status: "failed",
                               error: { code: "internal_error" }
                             }
                           : {
                               schema: "bdb-native-response-v1",
-                              host_version: "0.4.6",
+                              host_version: "0.4.7",
                               request_id: request.request_id,
                               status: "completed",
                               command_id: `${request.bdb_action.session_id}:000001`,
@@ -89,7 +89,7 @@ def test_submission_retries_same_receipted_request_after_internal_error(tmp_path
               assert.equal(posts.length, 2);
               assert.equal(posts[0].request_id, posts[1].request_id);
               assert.equal(posts[0].bdb_action.session_id, posts[1].bdb_action.session_id);
-              assert.equal(posts[0].client_version, "0.4.6");
+              assert.equal(posts[0].client_version, "0.4.7");
             }).catch((error) => { console.error(error); process.exitCode = 1; });
             '''
         ),
@@ -156,14 +156,14 @@ def test_auto_loop_stays_running_after_bounded_internal_error_recovery(tmp_path:
                 storage: { local: area(local), session: area(session) },
                 runtime: {
                   lastError: null,
-                  getManifest() { return { version: "0.4.6" }; },
+                  getManifest() { return { version: "0.4.7" }; },
                   onMessage: { addListener() {} },
                       sendNativeMessage(_host, request, callback) {
                         nativeRequests.push(JSON.parse(JSON.stringify(request)));
                         if (request.action === "context") {
                           callback({
                             schema: "bdb-native-response-v1",
-                            host_version: "0.4.6",
+                            host_version: "0.4.7",
                             request_id: request.request_id,
                             status: "context",
                             context: { allowed_paths: ["**"] },
@@ -173,7 +173,7 @@ def test_auto_loop_stays_running_after_bounded_internal_error_recovery(tmp_path:
                         }
                         callback({
                       schema: "bdb-native-response-v1",
-                      host_version: "0.4.6",
+                      host_version: "0.4.7",
                       request_id: request.request_id,
                       status: "failed",
                       error: { code: "internal_error" }

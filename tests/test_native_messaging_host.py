@@ -371,7 +371,7 @@ def test_submit_action_replay_recovers_the_original_durable_result(tmp_path: Pat
     assert recovered["request_recovered"] is True
     assert recovered["command_id"] == accepted["command_id"]
     assert recovered["result"] == expected
-    assert recovered["host_version"] == "0.4.6"
+    assert recovered["host_version"] == "0.4.7"
 
 
 def test_result_poll_is_bounded_and_status_works_while_disarmed(tmp_path: Path) -> None:

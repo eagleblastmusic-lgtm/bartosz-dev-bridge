@@ -38,7 +38,7 @@ Version 0.4.0 also stores a bounded durable task ledger and up to sixteen compac
 
 For visual changes, `bdb-acceptance-v1` may set `manual_visual_confirmation_required: true`. After all automated checks pass, the controller returns `needs_confirmation` and stops AUTO with `needs_user`; it does not infer that the rendered UI is correct from compilation or source searches alone. The resulting guidance is `await_user_visual_feedback`, which means that ChatGPT asks in normal prose and must not create a `manual_visual_confirmation` BDB operation.
 
-If the user reports that the visual result is wrong, the next sequential action in the same loop may set `automation.continue_after_user_feedback: true`. Version 0.4.6 accepts that flag only when the preceding delivered checkpoint has `acceptance.status: needs_confirmation`. It reopens the same task with a fresh bounded iteration window. The flag cannot resume policy failures, undelivered results, unrelated `needs_user` states or a different loop.
+If the user reports that the visual result is wrong, the next sequential action in the same loop may set `automation.continue_after_user_feedback: true`. Version 0.4.7 accepts that flag only when the preceding delivered checkpoint has `acceptance.status: needs_confirmation`. It reopens the same task with a fresh bounded iteration window. The flag cannot resume policy failures, undelivered results, unrelated `needs_user` states or a different loop.
 
 One user task uses one `loop_id` (up to 128 safe characters) and monotonically increasing iterations. A fresh `loop_id` is reserved for a new user task, not every BDB action. Short identifiers under 48 characters are recommended for readable result markers.
 
@@ -113,7 +113,7 @@ The result contains `bdb-acceptance-result-v1` with `passed` or `unmet`. An unme
 
 ## Adaptive AUTO result transport
 
-Version 0.4.6 uses one consistent set of composer budgets:
+Version 0.4.7 uses one consistent set of composer budgets:
 
 - 12 KiB is the preferred result target;
 - 16 KiB is the hard ceiling when the current contenteditable composer supports one-shot `replaceChildren` insertion;

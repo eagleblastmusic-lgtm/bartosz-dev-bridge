@@ -14,7 +14,9 @@ Messages are strict UTF-8 JSON objects prefixed by one unsigned 32-bit native-or
 
 The browser extension keeps one `connectNative` port and correlates concurrent responses by `request_id`. If a browser runtime does not expose ports, it falls back to one-shot Native Messaging. A submitted command is durably bound to its request ID, so one bounded reconnect with the same request recovers the original command result instead of creating another effect.
 
-Extension `0.4.6` sends its version with every Native request and validates the `host_version` response. A mismatch stops the action with an explicit reload diagnostic. Before a mutating command is queued, Native Host also verifies that the active Bridge worker recorded the same runtime version. A missing or stale worker returns `bridge_restart_required` without writing a command.
+Extension `0.4.7` sends its version with every Native request and validates the `host_version` response. A mismatch stops the action with an explicit reload diagnostic. Before a mutating command is queued, Native Host also verifies that the active Bridge worker recorded the same runtime version. A missing or stale worker returns `bridge_restart_required` without writing a command.
+
+Version 0.4.7 keeps the direct-spool inbox bounded without deleting evidence. Once a command has a durable local result, its immutable envelope is moved atomically from `direct_spool/inbox` to `direct_spool/archive/inbox`. Envelopes without results remain active, while result documents and the SQLite journal stay in their original locations.
 
 ## Trusted aliases
 
