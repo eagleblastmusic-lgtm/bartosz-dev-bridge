@@ -7,8 +7,10 @@
 // remain owned by the background worker.
 const BDB_AUTO_DECISION_RETRY_ATTEMPTS = 24;
 const BDB_AUTO_DECISION_RETRY_MS = 250;
+// Keep the in-progress retry window longer than the 180-second replay claim lease.
+// 280 attempts x 750 ms = 210 seconds, leaving 30 seconds for abandoned-claim recovery.
 const BDB_AUTO_IN_PROGRESS_RETRY_ATTEMPTS = 280;
-const BDB_AUTO_IN_PROGRESS_RETRY_MS = 500;
+const BDB_AUTO_IN_PROGRESS_RETRY_MS = 750;
 const BDB_AUTO_TRANSIENT_REASONS = new Set([
   "non_sequential_iteration",
   "iteration_in_progress"
