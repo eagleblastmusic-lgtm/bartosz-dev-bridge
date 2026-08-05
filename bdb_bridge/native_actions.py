@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import uuid
@@ -42,6 +43,21 @@ _MUTATING_OPERATIONS = frozenset({"replace_exact_and_test", "multi_file_patch"})
 _MAX_SESSION_RECORDS = 1000
 _DEFAULT_TTL_SECONDS = 300
 _MISSING = object()
+
+
+def _ensure_windows_local_app_data() -> None:
+    """Provide a non-secret local root when a bounded profile removes user identity."""
+
+    if os.name != "nt" or os.environ.get("LOCALAPPDATA"):
+        return
+    temporary_root = os.environ.get("TEMP") or os.environ.get("TMP")
+    if temporary_root:
+        os.environ["LOCALAPPDATA"] = str(
+            Path(temporary_root) / f"BDBLocalAppData-{os.getpid()}"
+        )
+
+
+_ensure_windows_local_app_data()
 
 
 def _utc_now() -> datetime:
@@ -257,9 +273,15 @@ class NativeActionComposer:
                 correlation=parsed_correlation,
             )
             repository_context = self._repository_context(repository)
-            read_only = operation == "open_read"
+            requires_clean_session = (
+                operation in _MUTATING_OPERATIONS
+                or (
+                    parsed_correlation is not None
+                    and parsed_correlation.role == "initial"
+                )
+            )
             if (
-                not read_only
+                requires_clean_session
                 and (
                     not repository_context.session_clean
                     or repository_context.initial_state_hash is None
