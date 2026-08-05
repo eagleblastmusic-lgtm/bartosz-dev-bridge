@@ -204,10 +204,19 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               assert.match(first.loopId, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
               assert.equal(first.response.result.task_guidance.cache, "miss");
 
+              const checkpointKey = `${first.loopId}:1`;
+              const checkpointBeforeReplay =
+                localStore.bdbTaskCheckpointsV1[checkpointKey];
+
               const restored = await context.__consider(automatic, 7);
               assert.equal(restored.executed, true, JSON.stringify(restored));
               assert.equal(restored.durableCheckpoint, true);
               assert.equal(restored.recoveredResult, true);
+              assert.strictEqual(
+                localStore.bdbTaskCheckpointsV1[checkpointKey],
+                checkpointBeforeReplay,
+                "replaying a durable result must not rewrite its checkpoint"
+              );
 
               const beforeCacheSearches = nativeCounts.search_text;
               const cacheFirst = await context.__submit(readAction("cache-me"), 7);
