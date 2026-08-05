@@ -84,18 +84,8 @@ def test_foreground_cli_lifecycle_full_contract(tmp_path: Path) -> None:
         assert stop.returncode == 0
         assert "Graceful stop request sent successfully" in stop.stdout
 
-        observed_stopping = False
-        deadline = time.monotonic() + 4.0
-        final_status = None
-        while time.monotonic() < deadline:
-            final_status = read_status(config_path)
-            if final_status["status"] == "STOPPING":
-                observed_stopping = True
-            if final_status["status"] == "OFFLINE":
-                break
-            time.sleep(0.05)
-        assert observed_stopping is True
-        assert final_status is not None and final_status["status"] == "OFFLINE"
+        final_status = wait_for_status(config_path, "OFFLINE", timeout=4.0)
+        assert final_status["status"] == "OFFLINE"
 
         proc.wait(timeout=8.0)
         assert proc.returncode == 0
