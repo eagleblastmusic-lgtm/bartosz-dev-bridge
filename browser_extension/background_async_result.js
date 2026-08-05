@@ -3,7 +3,10 @@
 // Native Host may accept a command before its durable result is available. Keep
 // the AUTO decision open and poll the existing bounded `result` action instead
 // of treating `accepted`/`pending` as a user-intervention terminal state.
-const BDB_ASYNC_RESULT_ATTEMPTS = 8;
+// Each bounded result request may wait up to DEFAULT_WAIT_SECONDS. Keep the
+// same command under observation for up to 15 minutes so normal full test runs
+// do not fall into async_poll_exhausted after only a few minutes.
+const BDB_ASYNC_RESULT_ATTEMPTS = 30;
 const submitActionBeforeAsyncResultPolling = submitAction;
 
 function parseBdbCommandId(value) {
