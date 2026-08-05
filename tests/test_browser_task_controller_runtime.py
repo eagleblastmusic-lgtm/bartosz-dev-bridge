@@ -218,6 +218,55 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
                 "replaying a durable result must not rewrite its checkpoint"
               );
 
+              const deliveredLoop = "delivered-checkpoint-loop";
+              const deliveredCheckpointKey = `${deliveredLoop}:1`;
+              const deliveredAt = Date.now() - 1000;
+              const deliveredResponse = JSON.parse(JSON.stringify(first.response));
+              localStore.bdbTaskCheckpointsV1[deliveredCheckpointKey] = {
+                created_at: Date.now(),
+                loop_id: deliveredLoop,
+                iteration: 1,
+                delivered: false,
+                should_continue: true,
+                stop_reason: null,
+                state_status: "running",
+                response: deliveredResponse
+              };
+              sessionStore[`bdbAuto:7:${deliveredLoop}`] = {
+                startedAt: Date.now() - 2000,
+                lastIteration: 1,
+                status: "running",
+                iterationCeiling: 8,
+                lastResponse: deliveredResponse,
+                lastResponseIteration: 1,
+                lastResponseDelivered: true,
+                lastResponseDeliveredAt: deliveredAt,
+                updatedAt: Date.now()
+              };
+
+              const submitsBeforeDeliveredCheckpoint = nativeCounts.submit_action;
+              const deliveredCheckpoint = await context.__consider(
+                {
+                  ...readAction("delivered-checkpoint"),
+                  automation: {
+                    mode: "auto",
+                    loop_id: deliveredLoop,
+                    iteration: 1
+                  }
+                },
+                7
+              );
+              assert.equal(deliveredCheckpoint.executed, false, JSON.stringify(deliveredCheckpoint));
+              assert.equal(deliveredCheckpoint.reason, "iteration_already_processed", JSON.stringify(deliveredCheckpoint));
+              assert.equal(deliveredCheckpoint.expectedIteration, 2, JSON.stringify(deliveredCheckpoint));
+              assert.equal(deliveredCheckpoint.durableCheckpoint, true, JSON.stringify(deliveredCheckpoint));
+              assert.equal(deliveredCheckpoint.alreadyDelivered, true, JSON.stringify(deliveredCheckpoint));
+              assert.equal(nativeCounts.submit_action, submitsBeforeDeliveredCheckpoint);
+              assert.equal(sessionStore[`bdbAuto:7:${deliveredLoop}`].lastResponseDelivered, true);
+              assert.equal(sessionStore[`bdbAuto:7:${deliveredLoop}`].lastResponseDeliveredAt, deliveredAt);
+              assert.equal(localStore.bdbTaskCheckpointsV1[deliveredCheckpointKey].delivered, true);
+              assert.equal(localStore.bdbTaskCheckpointsV1[deliveredCheckpointKey].delivered_at, deliveredAt);
+
               const beforeCacheSearches = nativeCounts.search_text;
               const cacheFirst = await context.__submit(readAction("cache-me"), 7);
               const cacheSecond = await context.__submit(readAction("cache-me"), 7);
