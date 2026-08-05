@@ -31,7 +31,10 @@ function compactAction(action) {
 }
 
 
-const BDB_ASSISTED_POLL_ATTEMPTS = 120;
+// A single assisted poll may block for up to five seconds in the background.
+// Keep manual execution attached to the same command for about 16 minutes,
+// matching the longer AUTO result-observation window without resubmitting it.
+const BDB_ASSISTED_POLL_ATTEMPTS = 180;
 const BDB_ASSISTED_POLL_DELAY_MS = 500;
 
 function bdbAssistedSleep(milliseconds) {
