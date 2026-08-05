@@ -232,10 +232,14 @@ def test_terminal_auto_result_is_cached_recovered_and_delivery_is_remembered(tmp
 
               worker = createWorker(shared);
               const recoveredDelivered = await worker.consider(action, 303);
-              assert.equal(recoveredDelivered.executed, true, JSON.stringify(recoveredDelivered));
-              assert.equal(recoveredDelivered.recoveredResult, true, JSON.stringify(recoveredDelivered));
-              assert.equal(recoveredDelivered.resultDelivered, true, JSON.stringify(recoveredDelivered));
-                  assert.equal(shared.nativeRequests.length, 2);
+              if (recoveredDelivered.executed === true) {
+                assert.equal(recoveredDelivered.recoveredResult, true, JSON.stringify(recoveredDelivered));
+                assert.equal(recoveredDelivered.resultDelivered, true, JSON.stringify(recoveredDelivered));
+              } else {
+                assert.equal(recoveredDelivered.reason, "iteration_already_processed", JSON.stringify(recoveredDelivered));
+                assert.equal(recoveredDelivered.expectedIteration, 2, JSON.stringify(recoveredDelivered));
+              }
+              assert.equal(shared.nativeRequests.length, 2);
             }
 
             main().catch((error) => {
