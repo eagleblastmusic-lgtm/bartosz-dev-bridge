@@ -545,48 +545,64 @@ async function claimAutoReplay(loopId, iteration) {
   }
 }
 
-function containsTerminalValue(value, depth = 0) {
-  if (depth > 8) {
-    return "needs_user";
-  }
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
-    return TERMINAL_VALUES.has(normalized) ? normalized : null;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value.slice(0, 100)) {
-      const terminal = containsTerminalValue(item, depth + 1);
-      if (terminal) {
-        return terminal;
-      }
-    }
+function bdbExplicitTerminalValue(value) {
+  if (typeof value !== "string") {
     return null;
   }
-  if (value && typeof value === "object") {
-    for (const item of Object.values(value).slice(0, 100)) {
-      const terminal = containsTerminalValue(item, depth + 1);
-      if (terminal) {
-        return terminal;
-      }
-    }
-  }
-  return null;
+  const normalized = value.trim().toLowerCase();
+  return TERMINAL_VALUES.has(normalized) ? normalized : null;
 }
 
 function structuredTerminalValue(response) {
   const result = response && response.result;
-  if (result && typeof result === "object" && !Array.isArray(result)) {
-    if (result.acceptance && result.acceptance.status === "passed") {
+  const resultObject = result && typeof result === "object" && !Array.isArray(result)
+    ? result
+    : null;
+  const data = resultObject && resultObject.data && typeof resultObject.data === "object"
+    ? resultObject.data
+    : null;
+  const error = response && response.error && typeof response.error === "object"
+    ? response.error
+    : null;
+
+  if (resultObject) {
+    if (resultObject.acceptance && resultObject.acceptance.status === "passed") {
       return "done";
     }
-    if (result.acceptance && result.acceptance.status === "needs_confirmation") {
+    if (resultObject.acceptance && resultObject.acceptance.status === "needs_confirmation") {
       return "needs_user";
     }
-    if (result.task_guidance && result.task_guidance.next_operation === "complete") {
+    if (
+      resultObject.task_guidance &&
+      resultObject.task_guidance.next_operation === "complete"
+    ) {
       return "done";
     }
   }
-  return containsTerminalValue(result || response);
+
+  // Only protocol-owned status fields may control the AUTO state machine.
+  // Repository contents, search queries, diffs, logs and arbitrary nested text
+  // are data and must never be interpreted as execution status.
+  for (const candidate of [
+    error && error.code,
+    data && data.terminal_error_code,
+    resultObject && resultObject.error_code,
+    resultObject && resultObject.status,
+    response && response.status
+  ]) {
+    const terminal = bdbExplicitTerminalValue(candidate);
+    if (terminal) {
+      return terminal;
+    }
+  }
+
+  if (response && response.status === "failed") {
+    return "failed";
+  }
+  if (resultObject && resultObject.status === "failed") {
+    return "failed";
+  }
+  return null;
 }
 
 function isRecoverableProfileFailure(metadata, response) {
