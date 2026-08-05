@@ -1033,7 +1033,14 @@ considerAuto = async function considerAutoWithTaskController(action, tabId) {
       )
     );
     if (decision && decision.executed === true) {
-      await bdbTaskCheckpointStore(decision, effective);
+      // A recovered checkpoint already exists in durable storage. Re-storing the
+      // stale recovered decision can race with result delivery and overwrite a
+      // freshly persisted `delivered: true` marker back to false, causing an
+      // already delivered result to be replayed again. Only original executions
+      // create or replace their checkpoint; recovered results remain read-only.
+      if (!replayed) {
+        await bdbTaskCheckpointStore(decision, effective);
+      }
       await bdbTaskMetric(replayed ? "auto_results_replayed" : "auto_executed");
     } else if (!repeatedBenignStop) {
       await bdbTaskMetric(`auto_stop_${(decision && decision.reason) || "unknown"}`);
