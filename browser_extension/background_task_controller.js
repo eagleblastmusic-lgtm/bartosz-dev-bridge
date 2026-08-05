@@ -668,9 +668,62 @@ async function bdbTaskCheckpointStore(decision, action) {
 async function bdbTaskCheckpointRestore(loopId, iteration) {
   const stored = await chrome.storage.local.get(BDB_TASK_CHECKPOINTS_KEY);
   const checkpoints = stored[BDB_TASK_CHECKPOINTS_KEY];
-  const checkpoint = checkpoints && checkpoints[`${loopId}:${iteration}`];
+  const checkpointKey = `${loopId}:${iteration}`;
+  const checkpoint = checkpoints && checkpoints[checkpointKey];
+  if (!checkpoint) {
+    return null;
+  }
+
+  const session = await chrome.storage.session.get(null);
+  const deliveredState = Object.entries(session)
+    .filter(([key, state]) => (
+      key.startsWith("bdbAuto:") &&
+      key.endsWith(`:${loopId}`) &&
+      state &&
+      typeof state === "object" &&
+      !Array.isArray(state) &&
+      state.lastResponseDelivered === true &&
+      state.lastResponseIteration === iteration &&
+      iteration <= (state.lastIteration || 0) &&
+      state.lastResponse
+    ))
+    .map(([, state]) => state)
+    .sort((left, right) => (
+      (right.lastResponseDeliveredAt || right.updatedAt || 0) -
+      (left.lastResponseDeliveredAt || left.updatedAt || 0)
+    ))[0];
+
+  if (deliveredState) {
+    if (checkpoint.delivered !== true) {
+      await bdbTaskWithStorageLock(async () => {
+        const latestStored = await chrome.storage.local.get(BDB_TASK_CHECKPOINTS_KEY);
+        const latest = latestStored[BDB_TASK_CHECKPOINTS_KEY] &&
+          typeof latestStored[BDB_TASK_CHECKPOINTS_KEY] === "object"
+          ? { ...latestStored[BDB_TASK_CHECKPOINTS_KEY] }
+          : {};
+        if (latest[checkpointKey]) {
+          latest[checkpointKey] = {
+            ...latest[checkpointKey],
+            delivered: true,
+            delivered_at: deliveredState.lastResponseDeliveredAt || Date.now()
+          };
+          await chrome.storage.local.set({ [BDB_TASK_CHECKPOINTS_KEY]: latest });
+        }
+      });
+    }
+    return {
+      executed: false,
+      reason: "iteration_already_processed",
+      expectedIteration: Math.max(deliveredState.lastIteration || 0, iteration) + 1,
+      loopId,
+      iteration,
+      durableCheckpoint: true,
+      alreadyDelivered: true,
+      state: bdbTaskClone(deliveredState)
+    };
+  }
+
   if (
-    !checkpoint ||
     checkpoint.delivered === true ||
     Date.now() - checkpoint.created_at > BDB_TASK_CHECKPOINT_MS ||
     !checkpoint.response
@@ -712,6 +765,16 @@ function bdbTaskCheckpointRuntimeStatus(checkpoint) {
 }
 
 async function bdbTaskRestoreCheckpointState(loopId, iteration, tabId, checkpoint) {
+  if (checkpoint && checkpoint.alreadyDelivered === true) {
+    await bdbTaskUpsert(loopId, {
+      last_iteration: iteration,
+      expected_iteration: iteration + 1
+    });
+    return checkpoint.state && typeof checkpoint.state.status === "string"
+      ? checkpoint.state.status
+      : "running";
+  }
+
   const status = bdbTaskCheckpointRuntimeStatus(checkpoint);
   if (Number.isInteger(tabId) && tabId >= 0) {
     const key = autoStateKey(tabId, loopId);
@@ -719,13 +782,20 @@ async function bdbTaskRestoreCheckpointState(loopId, iteration, tabId, checkpoin
     const current = stored[key] && typeof stored[key] === "object"
       ? stored[key]
       : {};
+    const delivered = Boolean(
+      current.lastResponseDelivered === true &&
+      current.lastResponseIteration === iteration
+    );
     await chrome.storage.session.set({
       [key]: {
         ...current,
         lastIteration: Math.max(current.lastIteration || 0, iteration),
         lastResponse: bdbTaskClone(checkpoint.response),
         lastResponseIteration: iteration,
-        lastResponseDelivered: false,
+        lastResponseDelivered: delivered,
+        ...(delivered && Number.isFinite(current.lastResponseDeliveredAt)
+          ? { lastResponseDeliveredAt: current.lastResponseDeliveredAt }
+          : {}),
         status,
         updatedAt: Date.now()
       }
