@@ -684,10 +684,22 @@ async function considerAuto(action, tabId) {
     state.lastResponse &&
     typeof state.lastResponse === "object" &&
     !Array.isArray(state.lastResponse) &&
-    (
-      state.status !== "running" ||
-      state.lastResponseDelivered !== true
-    ) &&
+    state.lastResponseDelivered === true &&
+    state.lastResponseIteration === metadata.iteration &&
+    metadata.iteration <= state.lastIteration
+  ) {
+    return {
+      executed: false,
+      reason: "iteration_already_processed",
+      expectedIteration: state.lastIteration + 1,
+      state
+    };
+  }
+  if (
+    state.lastResponse &&
+    typeof state.lastResponse === "object" &&
+    !Array.isArray(state.lastResponse) &&
+    state.lastResponseDelivered !== true &&
     state.lastResponseIteration === metadata.iteration &&
     metadata.iteration <= state.lastIteration
   ) {
@@ -697,7 +709,7 @@ async function considerAuto(action, tabId) {
       loopId: metadata.loopId,
       iteration: metadata.iteration,
       recoveredResult: true,
-      resultDelivered: state.lastResponseDelivered === true,
+      resultDelivered: false,
       shouldContinue: false,
       stopReason: state.status === "running" ? "iteration_already_processed" : state.status,
       state
