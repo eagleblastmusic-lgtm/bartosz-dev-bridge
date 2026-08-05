@@ -12,5 +12,6 @@ importScripts(
   "background_action_preflight.js",
   "background_repair_correlation.js",
   "background_conversation_binding.js",
+  "background_auto_mutation_safety.js",
   "background_task_controller.js"
 );
