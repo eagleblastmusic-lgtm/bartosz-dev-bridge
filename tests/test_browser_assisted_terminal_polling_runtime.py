@@ -37,6 +37,38 @@ def test_assisted_async_polling_keeps_same_command_long_enough() -> None:
     assert exhausted_position > loop_position
 
 
+def test_manual_assisted_polling_keeps_same_command_for_long_test_runs() -> None:
+    content = (EXTENSION / "content.js").read_text(encoding="utf-8")
+
+    attempts_match = re.search(
+        r"const BDB_ASSISTED_POLL_ATTEMPTS = ([0-9]+);",
+        content,
+    )
+    delay_match = re.search(
+        r"const BDB_ASSISTED_POLL_DELAY_MS = ([0-9]+);",
+        content,
+    )
+
+    assert attempts_match is not None
+    assert delay_match is not None
+    assert int(attempts_match.group(1)) >= 180
+    assert int(delay_match.group(1)) == 500
+
+    runner_start = content.index(
+        "async function bdbRunAssistedAction(action) {"
+    )
+    runner_end = content.index(
+        "\nfunction bdbAssistedCompletionLabel",
+        runner_start,
+    )
+    runner = content[runner_start:runner_end]
+
+    assert runner.count('type: "BDB_SUBMIT_ASSISTED"') == 1
+    assert runner.count('type: "BDB_POLL_ASSISTED"') == 1
+    assert "commandId" in runner
+    assert "async_poll_exhausted: true" in runner
+
+
 def test_required_promotion_accepts_exact_replacement_results() -> None:
     source = (
         EXTENSION / "background.js"
