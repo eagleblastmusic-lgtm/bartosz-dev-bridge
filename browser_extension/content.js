@@ -3,20 +3,67 @@
 const ACTION_SCHEMA = "bdb-action-v1";
 const MAX_ACTION_TEXT = 1024 * 1024;
 const processedBlocks = new WeakSet();
+const warnedRawActionMessages = new WeakSet();
 
-function parseAction(codeBlock) {
-  const text = codeBlock.textContent || "";
-  if (text.length === 0 || text.length > MAX_ACTION_TEXT || !text.includes(ACTION_SCHEMA)) {
+function bdbParseActionText(text) {
+  const candidate = typeof text === "string" ? text.trim() : "";
+  if (
+    candidate.length === 0 ||
+    candidate.length > MAX_ACTION_TEXT ||
+    !candidate.includes(ACTION_SCHEMA)
+  ) {
     return null;
   }
   try {
-    const value = JSON.parse(text);
+    const value = JSON.parse(candidate);
     if (!value || typeof value !== "object" || Array.isArray(value) || value.schema !== ACTION_SCHEMA) {
       return null;
     }
     return value;
   } catch (_error) {
     return null;
+  }
+}
+
+function parseAction(codeBlock) {
+  return bdbParseActionText(codeBlock.textContent || "");
+}
+
+function bdbAssistantMessageCandidates(root) {
+  const messages = [];
+  const selector = "[data-message-author-role='assistant']";
+  if (root instanceof HTMLElement) {
+    const owner = root.matches(selector) ? root : root.closest(selector);
+    if (owner) {
+      messages.push(owner);
+    }
+  }
+  if (root && typeof root.querySelectorAll === "function") {
+    messages.push(...root.querySelectorAll(selector));
+  }
+  return [...new Set(messages)];
+}
+
+function warnAboutRawBdbActions(root) {
+  for (const message of bdbAssistantMessageCandidates(root)) {
+    if (!(message instanceof HTMLElement) || warnedRawActionMessages.has(message)) {
+      continue;
+    }
+    if (
+      message.querySelector("pre code, code") ||
+      message.querySelector(":scope > .bdb-format-warning")
+    ) {
+      continue;
+    }
+    if (!bdbParseActionText(message.textContent || "")) {
+      continue;
+    }
+
+    const warning = document.createElement("div");
+    warning.className = "bdb-output bdb-format-warning";
+    warning.textContent = "BDB: nie uruchomiono akcji — bdb-action-v1 został wysłany jako zwykły tekst. Akcja musi znajdować się w jednym bloku kodu JSON.";
+    warnedRawActionMessages.add(message);
+    message.append(warning);
   }
 }
 
@@ -1224,6 +1271,7 @@ function scan(root) {
     processedBlocks.add(block);
     enhance(block, action);
   }
+  warnAboutRawBdbActions(root);
 }
 
 scan(document);
