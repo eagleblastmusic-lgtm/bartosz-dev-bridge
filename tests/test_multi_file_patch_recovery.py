@@ -77,6 +77,21 @@ def replacement(path: str, before: bytes, after: bytes) -> dict[str, str]:
     }
 
 
+def text_replacement(
+    path: str,
+    before: bytes,
+    old: str,
+    new: str,
+) -> dict[str, object]:
+    return {
+        "schema": "bdb-text-replacement-v1",
+        "kind": "replace_exact_text",
+        "path": path,
+        "expected_sha256": sha256_bytes(before),
+        "replacements": [{"old": old, "new": new}],
+    }
+
+
 def create(path: str, content: bytes) -> dict[str, str]:
     return {
         "schema": "bdb-edit-operation-v1",
@@ -99,7 +114,7 @@ def patch_document() -> dict[str, object]:
     return {
         "schema": "bdb-multi-file-patch-v1",
         "operations": [
-            replacement("a.txt", b"a", b"A"),
+            text_replacement("a.txt", b"a", "a", "A"),
             create("new.txt", b"new"),
             delete("old.txt", b"old"),
         ],
