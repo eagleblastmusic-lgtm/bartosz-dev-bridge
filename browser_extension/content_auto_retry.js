@@ -131,7 +131,14 @@ function bdbRecoverDetachedAutoPanel(action, phase) {
   };
 }
 
-function bdbAutoStopLabel(reason) {
+function bdbAutoTerminalStatus(auto) {
+  const state = auto && auto.state;
+  return state && typeof state.status === "string" && state.status.length > 0
+    ? state.status
+    : null;
+}
+
+function bdbAutoStopLabel(reason, auto = null) {
   if (reason === "native_host_disarmed") {
     return "uzbrój sesję BDB i spróbuj ponownie";
   }
@@ -142,7 +149,11 @@ function bdbAutoStopLabel(reason) {
     return "już wykonano";
   }
   if (reason === "loop_not_running") {
-    return "zadanie zakończone";
+    const status = bdbAutoTerminalStatus(auto);
+    if (status) {
+      return `pętla zakończona (${status}) — użyj nowego loop_id; nie zwiększaj iteration`;
+    }
+    return "pętla zakończona — użyj nowego loop_id; nie zwiększaj iteration";
   }
   if (reason === "visual_feedback_not_expected") {
     return "brak oczekującej oceny wizualnej";
@@ -219,8 +230,8 @@ async function bdbRunAutoPanel(action, button, output, compact) {
     }
     if (!auto.executed) {
       const suffix = auto.retryExhausted
-        ? `${bdbAutoStopLabel(auto.reason)}, retry exhausted`
-        : bdbAutoStopLabel(auto.reason);
+        ? `${bdbAutoStopLabel(auto.reason, auto)}, retry exhausted`
+        : bdbAutoStopLabel(auto.reason, auto);
       bdbSetAutoButtonText(button, `BDB: Wykonaj (${suffix})`);
       keepDisabled = ["iteration_already_processed", "loop_not_running"].includes(auto.reason);
       return { retryForReplacement: false };
