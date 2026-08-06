@@ -6,11 +6,16 @@ from .edit_operation_models import StructuralEditSpec
 
 
 FILE_REPLACEMENT_SCHEMA = "bdb-file-replacement-v1"
+TEXT_REPLACEMENT_SCHEMA = "bdb-text-replacement-v1"
 MULTI_FILE_PATCH_SCHEMA = "bdb-multi-file-patch-v1"
 MAX_BATCH_OPERATIONS = 100
 MAX_BATCH_PATHS = 200
 MAX_BATCH_CONTENT_BYTES = 8 * 1024 * 1024
 MAX_BATCH_SNAPSHOT_BYTES = 16 * 1024 * 1024
+MAX_TEXT_EDIT_OPERATIONS = 32
+MAX_TEXT_REPLACEMENTS = 64
+MAX_TEXT_REPLACEMENT_BYTES = 256 * 1024
+MAX_TEXT_FILE_BYTES = 1 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -24,7 +29,25 @@ class FileReplacementSpec:
     operation_sha256: str
 
 
-BatchOperation = StructuralEditSpec | FileReplacementSpec
+@dataclass(frozen=True)
+class ExactTextReplacement:
+    old: str
+    new: str
+
+
+@dataclass(frozen=True)
+class TextReplacementSpec:
+    schema: str
+    kind: str
+    path: str
+    expected_sha256: str
+    replacements: tuple[ExactTextReplacement, ...]
+    replacement_count: int
+    supplied_text_bytes: int
+    operation_sha256: str
+
+
+BatchOperation = StructuralEditSpec | FileReplacementSpec | TextReplacementSpec
 
 
 @dataclass(frozen=True)
