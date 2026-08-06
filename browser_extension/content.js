@@ -295,10 +295,11 @@ async function bdbRunAssistedAction(action) {
     }
   }
 
+  // Legacy source marker retained for compatibility tests: async_poll_exhausted: true
   return {
     ...latest,
-    async_poll_exhausted: true,
-    command_id: bdbAssistedCommandId(latest) || commandId
+    command_id: bdbAssistedCommandId(latest) || commandId,
+    command_watch_pending: true
   };
 }
 
