@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .edit_operation_models import MAX_STRUCTURAL_CONTENT_BYTES, StructuralEditKind, StructuralEditSpec
 from .edit_operation_parser import sha256_bytes
+from .exact_text_edit import apply_exact_text_replacement
 from .models import BridgeErrorCode
 from .multi_file_patch_models import (
     MAX_BATCH_PATHS,
@@ -14,6 +15,7 @@ from .multi_file_patch_models import (
     MultiFilePatchPlan,
     MultiFilePatchSpec,
     PlannedPathState,
+    TextReplacementSpec,
 )
 from .multi_file_patch_parser import validate_multi_file_patch_spec
 from .protocol import BridgeError
@@ -47,6 +49,16 @@ class MultiFilePatchPlanner:
                 self._require_present(state, operation.path)
                 self._require_hash(state.current, operation.expected_sha256, operation.path)
                 state.current = operation.content
+                continue
+            if isinstance(operation, TextReplacementSpec):
+                state = self._state(states, path_identities, operation.path, "replace", index)
+                self._require_present(state, operation.path)
+                if state.current is None:
+                    raise BridgeError(
+                        BridgeErrorCode.MISSING_FILE,
+                        f"Text replacement source is missing: {operation.path}",
+                    )
+                state.current = apply_exact_text_replacement(state.current, operation)
                 continue
             self._simulate_structural(states, path_identities, operation, index)
 
