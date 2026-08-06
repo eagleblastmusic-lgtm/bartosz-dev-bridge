@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .edit_operation_models import StructuralEditSpec
-from .multi_file_patch_models import FileReplacementSpec
+from .multi_file_patch_models import FileReplacementSpec, TextReplacementSpec
 from .multi_file_patch_parser import parse_multi_file_patch
 from .protocol import BridgeError, path_matches, require_string, validate_repo_relative_path
 
@@ -28,7 +28,7 @@ def _preflight_multi_file_patch(action: dict[str, Any], patterns: tuple[str, ...
         raise BridgeError("invalid_payload", "multi_file_patch payload.patch must be an object")
     patch = parse_multi_file_patch(patch_document)
     for operation in patch.operations:
-        if isinstance(operation, FileReplacementSpec):
+        if isinstance(operation, (FileReplacementSpec, TextReplacementSpec)):
             _require_allowed(operation.path, patterns)
             continue
         if not isinstance(operation, StructuralEditSpec):
