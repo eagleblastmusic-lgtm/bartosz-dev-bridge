@@ -150,6 +150,20 @@ def test_action_preflight_hash_scope_and_success_runtime(tmp_path: Path) -> None
               };
             }
 
+            function textReplacement(
+              pathValue,
+              replacements,
+              expectedSha256 = `sha256:${"0".repeat(64)}`
+            ) {
+              return {
+                schema: "bdb-text-replacement-v1",
+                kind: "replace_exact_text",
+                path: pathValue,
+                expected_sha256: expectedSha256,
+                replacements
+              };
+            }
+
             function action(operation) {
               return {
                 schema: "bdb-action-v1",
@@ -231,6 +245,65 @@ def test_action_preflight_hash_scope_and_success_runtime(tmp_path: Path) -> None
                 /Path is not allowed by local policy: START-APP\.cmd/
               );
 
+              await expectFailure(
+                action(textReplacement(
+                  "src/app.py",
+                  [{ old: "old text", new: "new text" }],
+                  "sha256:not-a-digest"
+                )),
+                "invalid_payload",
+                /invalid expected_sha256/
+              );
+
+              await expectFailure(
+                action(textReplacement("src/app.py", [
+                  { old: "same text", new: "first" },
+                  { old: "same text", new: "second" }
+                ])),
+                "invalid_payload",
+                /duplicates an earlier replacement/
+              );
+
+              const tooManyTextOperations = action(
+                textReplacement("src/text-0.py", [{ old: "old-0", new: "new-0" }])
+              );
+              tooManyTextOperations.payload.patch.operations = Array.from(
+                { length: 33 },
+                (_, index) => textReplacement(
+                  `src/text-${index}.py`,
+                  [{ old: `old-${index}`, new: `new-${index}` }]
+                )
+              );
+              await expectFailure(
+                tooManyTextOperations,
+                "invalid_payload",
+                /at most 32 text edit operations/
+              );
+
+              const tooManyReplacements = action(
+                textReplacement(
+                  "src/first.py",
+                  Array.from(
+                    { length: 33 },
+                    (_, index) => ({ old: `first-old-${index}`, new: `first-new-${index}` })
+                  )
+                )
+              );
+              tooManyReplacements.payload.patch.operations.push(
+                textReplacement(
+                  "src/second.py",
+                  Array.from(
+                    { length: 32 },
+                    (_, index) => ({ old: `second-old-${index}`, new: `second-new-${index}` })
+                  )
+                )
+              );
+              await expectFailure(
+                tooManyReplacements,
+                "invalid_payload",
+                /at most 64 exact text replacements/
+              );
+
               const content = "print('green')\n";
               const response = await context.__bdbSubmitAction(
                 action(replacement("src/app.py", content, await sha256(content))),
@@ -240,6 +313,19 @@ def test_action_preflight_hash_scope_and_success_runtime(tmp_path: Path) -> None
               assert.equal(
                 nativeRequests.filter((item) => item.action === "submit_action").length,
                 1
+              );
+
+              const textResponse = await context.__bdbSubmitAction(
+                action(textReplacement("src/app.py", [
+                  { old: "unique old text", new: "unique new text" },
+                  { old: "another old text", new: "another new text" }
+                ])),
+                7
+              );
+              assert.equal(textResponse.status, "accepted");
+              assert.equal(
+                nativeRequests.filter((item) => item.action === "submit_action").length,
+                2
               );
 
               const beforeScopeGuard = nativeRequests.filter(
