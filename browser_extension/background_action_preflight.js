@@ -123,18 +123,104 @@ async function bdbAllowedPaths(repoAlias) {
   return allowed;
 }
 
+function bdbUtf8TextBytes(value, label) {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x7f) {
+      bytes += 1;
+    } else if (code <= 0x7ff) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (index + 1 >= value.length || next < 0xdc00 || next > 0xdfff) {
+        throw bdbPreflightError("invalid_payload", `${label} must contain valid UTF-8 text`);
+      }
+      bytes += 4;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      throw bdbPreflightError("invalid_payload", `${label} must contain valid UTF-8 text`);
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+function bdbPreflightTextReplacement(operation, index) {
+  const label = `operations[${index}]`;
+  const allowedKeys = new Set(["schema", "kind", "path", "expected_sha256", "replacements"]);
+  for (const key of Object.keys(operation)) {
+    if (!allowedKeys.has(key)) {
+      throw bdbPreflightError("invalid_payload", `${label} has unsupported field: ${key}`);
+    }
+  }
+  if (operation.schema !== "bdb-text-replacement-v1") {
+    throw bdbPreflightError("unsupported_schema", `${label} must use bdb-text-replacement-v1`);
+  }
+  if (operation.kind !== "replace_exact_text") {
+    throw bdbPreflightError("invalid_payload", `${label}.kind must be replace_exact_text`);
+  }
+  if (typeof operation.expected_sha256 !== "string" || !/^sha256:[0-9a-f]{64}$/.test(operation.expected_sha256)) {
+    throw bdbPreflightError("invalid_payload", `${label} has an invalid expected_sha256`);
+  }
+  if (!Array.isArray(operation.replacements) || operation.replacements.length < 1 || operation.replacements.length > 64) {
+    throw bdbPreflightError("invalid_payload", `${label}.replacements must contain 1-64 items`);
+  }
+
+  const seen = new Set();
+  let suppliedTextBytes = 0;
+  for (let replacementIndex = 0; replacementIndex < operation.replacements.length; replacementIndex += 1) {
+    const replacementLabel = `${label}.replacements[${replacementIndex}]`;
+    const replacement = bdbRequireObject(operation.replacements[replacementIndex], replacementLabel);
+    const replacementKeys = Object.keys(replacement);
+    if (replacementKeys.length !== 2 || !replacementKeys.includes("old") || !replacementKeys.includes("new")) {
+      throw bdbPreflightError("invalid_payload", `${replacementLabel} must contain only old and new`);
+    }
+    if (typeof replacement.old !== "string" || replacement.old.length === 0) {
+      throw bdbPreflightError("invalid_payload", `${replacementLabel}.old must be a non-empty string`);
+    }
+    if (typeof replacement.new !== "string") {
+      throw bdbPreflightError("invalid_payload", `${replacementLabel}.new must be a string`);
+    }
+    if (seen.has(replacement.old)) {
+      throw bdbPreflightError("invalid_payload", `${replacementLabel}.old duplicates an earlier replacement`);
+    }
+    seen.add(replacement.old);
+    suppliedTextBytes += bdbUtf8TextBytes(replacement.old, `${replacementLabel}.old`);
+    suppliedTextBytes += bdbUtf8TextBytes(replacement.new, `${replacementLabel}.new`);
+  }
+  if (suppliedTextBytes > 256 * 1024) {
+    throw bdbPreflightError("invalid_payload", `${label} exceeds the 256 KiB supplied-text limit`);
+  }
+  return operation.replacements.length;
+}
+
 async function bdbPreflightMultiFilePatch(action, allowedPaths) {
   const payload = bdbRequireObject(action.payload, "action.payload");
   const patch = bdbRequireObject(payload.patch, "action.payload.patch");
   if (patch.schema !== "bdb-multi-file-patch-v1") {
     throw bdbPreflightError("unsupported_schema", "action.payload.patch must use bdb-multi-file-patch-v1");
   }
-  if (!Array.isArray(patch.operations) || patch.operations.length === 0) {
-    throw bdbPreflightError("invalid_payload", "action.payload.patch.operations must be a non-empty list");
+  if (!Array.isArray(patch.operations) || patch.operations.length === 0 || patch.operations.length > 100) {
+    throw bdbPreflightError("invalid_payload", "action.payload.patch.operations must contain 1-100 items");
   }
 
+  let textEditOperations = 0;
+  let textReplacementCount = 0;
   for (let index = 0; index < patch.operations.length; index += 1) {
     const operation = bdbRequireObject(patch.operations[index], `operations[${index}]`);
+    if (operation.schema === "bdb-text-replacement-v1" || operation.kind === "replace_exact_text") {
+      textEditOperations += 1;
+      textReplacementCount += bdbPreflightTextReplacement(operation, index);
+      if (textEditOperations > 32) {
+        throw bdbPreflightError("invalid_payload", "A patch may contain at most 32 text edit operations");
+      }
+      if (textReplacementCount > 64) {
+        throw bdbPreflightError("invalid_payload", "A patch may contain at most 64 exact text replacements");
+      }
+    }
+
     const paths = bdbOperationPaths(operation, index);
     for (const item of paths) {
       if (!bdbPathMatches(item.path, allowedPaths)) {
