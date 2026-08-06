@@ -175,7 +175,7 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               vm.runInContext(fs.readFileSync(scriptPath, "utf8"), context, { filename: scriptPath });
             }
             vm.runInContext(
-              "globalThis.__consider = considerAuto; globalThis.__submit = submitAction;",
+              "globalThis.__consider = considerAuto; globalThis.__submit = submitAction; globalThis.__fingerprintAction = async (action) => bdbTaskFingerprint(bdbTaskActionIdentity(action));",
               context
             );
 
@@ -299,6 +299,49 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               const accepted = await context.__submit(mutating, 7);
               assert.equal(accepted.result.acceptance.status, "passed", JSON.stringify(accepted));
               assert.equal(accepted.result.task_guidance.next_operation, "complete");
+              assert.ok(localStore.bdbMutationGuardsV1);
+              assert.deepEqual(
+                Object.keys(localStore.bdbMutationGuardsV1.entries),
+                [],
+                JSON.stringify(localStore.bdbMutationGuardsV1)
+              );
+
+              const mutationFingerprint = await context.__fingerprintAction(mutating);
+              const mutationGuardKey = `synthetic:${mutationFingerprint}`;
+              const mutationGuardCreatedAt = Date.now();
+              localStore.bdbMutationGuardsV1.entries[mutationGuardKey] = {
+                repo_alias: "synthetic",
+                operation: "replace_exact_and_test",
+                fingerprint: mutationFingerprint,
+                status: "submitting",
+                command_id: null,
+                response: null,
+                created_at: mutationGuardCreatedAt,
+                updated_at: mutationGuardCreatedAt
+              };
+              delete sessionStore.bdbActionCacheV1;
+
+              const submitsBeforeGuardedRepeat = nativeCounts.submit_action;
+              const guardedRepeat = await context.__submit(mutating, 7);
+              assert.equal(guardedRepeat.status, "pending", JSON.stringify(guardedRepeat));
+              assert.equal(guardedRepeat.mutation_guard.status, "blocked");
+              assert.equal(
+                guardedRepeat.mutation_guard.reason,
+                "mutation_submission_state_unknown"
+              );
+              assert.equal(nativeCounts.submit_action, submitsBeforeGuardedRepeat);
+              assert.ok(localStore.bdbMutationGuardsV1.entries[mutationGuardKey]);
+
+              const guardedRepeatAgain = await context.__submit(mutating, 7);
+              assert.equal(guardedRepeatAgain.status, "pending", JSON.stringify(guardedRepeatAgain));
+              assert.equal(guardedRepeatAgain.mutation_guard.status, "blocked");
+              assert.equal(nativeCounts.submit_action, submitsBeforeGuardedRepeat);
+              assert.equal(
+                localStore.bdbMutationGuardsV1.entries[mutationGuardKey].created_at,
+                mutationGuardCreatedAt
+              );
+
+              delete localStore.bdbMutationGuardsV1.entries[mutationGuardKey];
 
               const acceptedAuto = {
                 ...mutating,
