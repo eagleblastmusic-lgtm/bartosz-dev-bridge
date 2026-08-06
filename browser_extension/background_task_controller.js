@@ -406,6 +406,178 @@ function bdbTaskResponseBaseSha(response) {
   return null;
 }
 
+const BDB_TASK_MUTATION_GUARDS_KEY = "bdbMutationGuardsV1";
+const BDB_TASK_MUTATION_GUARD_SCHEMA = "bdb-mutation-guards-v1";
+
+function bdbTaskMutationGuardKey(action, fingerprint) {
+  return `${action.repo_alias}:${fingerprint}`;
+}
+
+function bdbTaskMutationCommandId(response) {
+  if (!response || typeof response !== "object") {
+    return null;
+  }
+  if (typeof response.command_id === "string" && response.command_id.length > 0) {
+    return response.command_id;
+  }
+  const result = response.result;
+  return result && typeof result.command_id === "string" && result.command_id.length > 0
+    ? result.command_id
+    : null;
+}
+
+function bdbTaskMutationGuardResolved(response) {
+  if (!response || typeof response !== "object") {
+    return false;
+  }
+  if (response.status === "failed") {
+    return true;
+  }
+  if (response.status !== "completed") {
+    return false;
+  }
+  const result = response.result;
+  if (!result || typeof result !== "object" || result.status !== "success") {
+    return true;
+  }
+  const promotion = result.promotion;
+  const commandId = bdbTaskMutationCommandId(response);
+  return Boolean(
+    promotion &&
+    promotion.status === "promoted" &&
+    (typeof promotion.command_id !== "string" || promotion.command_id === commandId)
+  );
+}
+
+async function bdbTaskMutationGuardDocument() {
+  const stored = await chrome.storage.local.get(BDB_TASK_MUTATION_GUARDS_KEY);
+  const raw = stored[BDB_TASK_MUTATION_GUARDS_KEY];
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? bdbTaskClone(raw)
+    : { schema: BDB_TASK_MUTATION_GUARD_SCHEMA, entries: {} };
+}
+
+async function bdbTaskMutationGuardAcquire(action, fingerprint) {
+  return bdbTaskWithStorageLock(async () => {
+    const document = await bdbTaskMutationGuardDocument();
+    document.entries = document.entries && typeof document.entries === "object"
+      ? document.entries
+      : {};
+    const key = bdbTaskMutationGuardKey(action, fingerprint);
+    const existing = document.entries[key];
+    if (existing && typeof existing === "object") {
+      return { acquired: false, entry: bdbTaskClone(existing) };
+    }
+    const now = Date.now();
+    const entry = {
+      repo_alias: action.repo_alias,
+      operation: action.operation,
+      fingerprint,
+      status: "submitting",
+      command_id: null,
+      response: null,
+      created_at: now,
+      updated_at: now
+    };
+    document.entries[key] = entry;
+    await chrome.storage.local.set({ [BDB_TASK_MUTATION_GUARDS_KEY]: document });
+    return { acquired: true, entry: bdbTaskClone(entry) };
+  });
+}
+
+async function bdbTaskMutationGuardRecord(action, fingerprint, response) {
+  await bdbTaskWithStorageLock(async () => {
+    const document = await bdbTaskMutationGuardDocument();
+    document.entries = document.entries && typeof document.entries === "object"
+      ? document.entries
+      : {};
+    const key = bdbTaskMutationGuardKey(action, fingerprint);
+    const existing = document.entries[key];
+    if (!existing || typeof existing !== "object") {
+      return;
+    }
+    if (bdbTaskMutationGuardResolved(response)) {
+      delete document.entries[key];
+      await chrome.storage.local.set({ [BDB_TASK_MUTATION_GUARDS_KEY]: document });
+      return;
+    }
+    const commandId = bdbTaskMutationCommandId(response) || existing.command_id || null;
+    const responseBytes = response && typeof response === "object"
+      ? bdbTaskSerializedBytes(response)
+      : Number.POSITIVE_INFINITY;
+    document.entries[key] = {
+      ...existing,
+      status: response && typeof response.status === "string" ? response.status : "pending",
+      command_id: commandId,
+      response: responseBytes <= BDB_TASK_MAX_CACHE_BYTES ? bdbTaskClone(response) : null,
+      updated_at: Date.now()
+    };
+    await chrome.storage.local.set({ [BDB_TASK_MUTATION_GUARDS_KEY]: document });
+  });
+}
+
+function bdbTaskMutationGuardBlocked(entry, reason) {
+  return {
+    status: "pending",
+    command_id: entry && typeof entry.command_id === "string" ? entry.command_id : null,
+    mutation_guard: {
+      schema: "bdb-mutation-guard-v1",
+      status: "blocked",
+      reason,
+      operation: entry && entry.operation,
+      created_at: entry && entry.created_at,
+      updated_at: entry && entry.updated_at
+    }
+  };
+}
+
+async function bdbTaskMutationGuardResume(action, fingerprint) {
+  const document = await bdbTaskMutationGuardDocument();
+  const entry = document.entries && document.entries[bdbTaskMutationGuardKey(action, fingerprint)];
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+
+  let latest = entry.response && typeof entry.response === "object"
+    ? bdbTaskClone(entry.response)
+    : null;
+  try {
+    if (latest && latest.status === "completed" && typeof waitForRequiredPromotion === "function") {
+      latest = await waitForRequiredPromotion(action, latest);
+    } else if (
+      typeof entry.command_id === "string" &&
+      entry.command_id.length > 0 &&
+      typeof pollBdbCommandResult === "function"
+    ) {
+      latest = await pollBdbCommandResult(action, {
+        status: "pending",
+        command_id: entry.command_id
+      });
+    }
+  } catch (_error) {
+    latest = null;
+  }
+
+  if (!latest) {
+    return bdbTaskMutationGuardBlocked(
+      entry,
+      entry.command_id ? "mutation_result_still_unavailable" : "mutation_submission_state_unknown"
+    );
+  }
+  await bdbTaskMutationGuardRecord(action, fingerprint, latest);
+  if (bdbTaskMutationGuardResolved(latest)) {
+    return latest;
+  }
+  const guarded = bdbTaskClone(latest);
+  guarded.mutation_guard = {
+    schema: "bdb-mutation-guard-v1",
+    status: "reconciling",
+    reason: "existing_mutation_not_yet_terminal",
+    command_id: bdbTaskMutationCommandId(latest) || entry.command_id || null
+  };
+  return guarded;
+}
+
 async function bdbTaskCacheDocument() {
   const stored = await chrome.storage.session.get(BDB_TASK_CACHE_KEY);
   const raw = stored[BDB_TASK_CACHE_KEY];
@@ -415,6 +587,12 @@ async function bdbTaskCacheDocument() {
 }
 
 async function bdbTaskCacheLookup(action, fingerprint) {
+  if (BDB_TASK_MUTATING_OPERATIONS.has(action.operation)) {
+    const guarded = await bdbTaskMutationGuardResume(action, fingerprint);
+    if (guarded) {
+      return guarded;
+    }
+  }
   const cache = await bdbTaskCacheDocument();
   const entry = cache.entries[fingerprint];
   if (!entry || typeof entry !== "object") {
@@ -448,6 +626,9 @@ async function bdbTaskCacheLookup(action, fingerprint) {
 }
 
 async function bdbTaskCacheStore(action, fingerprint, response) {
+  if (BDB_TASK_MUTATING_OPERATIONS.has(action.operation)) {
+    await bdbTaskMutationGuardRecord(action, fingerprint, response);
+  }
   if (!response || response.status !== "completed") {
     return;
   }
@@ -944,6 +1125,7 @@ async function bdbTaskResumeAfterVisualFeedback(action, tabId) {
 submitAction = async function submitActionWithTaskController(action, tabId) {
   const started = Date.now();
   const fingerprint = await bdbTaskFingerprint(bdbTaskActionIdentity(action));
+  const mutating = BDB_TASK_MUTATING_OPERATIONS.has(action.operation);
   const cached = await bdbTaskCacheLookup(action, fingerprint);
   if (cached) {
     await bdbTaskMetric(BDB_TASK_MUTATING_OPERATIONS.has(action.operation) ? "deduplicated_mutations" : "cache_hits");
@@ -960,6 +1142,22 @@ submitAction = async function submitActionWithTaskController(action, tabId) {
   }
 
   await bdbTaskMetric("cache_misses");
+  if (mutating) {
+    const guard = await bdbTaskMutationGuardAcquire(action, fingerprint);
+    if (!guard.acquired) {
+      const guarded = await bdbTaskMutationGuardResume(action, fingerprint);
+      if (guarded) {
+        await bdbTaskMetric("deduplicated_mutations");
+        return bdbTaskAttachGuidance(
+          action,
+          guarded,
+          guarded.result && guarded.result.acceptance,
+          "guard"
+        );
+      }
+      return bdbTaskMutationGuardBlocked(guard.entry, "mutation_guard_race");
+    }
+  }
   let response = await bdbSubmitActionBeforeTaskController(action, tabId);
   const acceptance = await bdbTaskEvaluateAcceptance(action, response);
   response = bdbTaskAttachGuidance(action, response, acceptance, "miss");
