@@ -223,13 +223,6 @@ function bdbContentRepairResponseFromOutput(output) {
 }
 
 async function bdbContentRepairAutoSend(text, marker) {
-  if (
-    document.visibilityState !== "visible" ||
-    typeof document.hasFocus !== "function" ||
-    !document.hasFocus()
-  ) {
-    return { sent: false, reason: "rozmowa_nie_jest_aktywna" };
-  }
   const composer = prepareContinuation(text, { requireEmpty: true });
   if (!composer || !composerText(composer).includes(marker)) {
     return { sent: false, reason: "pole_wiadomosci_jest_zajete" };

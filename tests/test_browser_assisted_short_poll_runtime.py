@@ -67,6 +67,20 @@ def test_repair_observer_is_context_safe_and_failure_gated() -> None:
     assert local_gate < remote_peek
 
 
+def test_repair_auto_send_remains_safe_in_background_tab() -> None:
+    repair = read("content_repair_retry.js")
+    start = repair.index("async function bdbContentRepairAutoSend(text, marker)")
+    end = repair.index("async function bdbContentRepairRequestCorrection", start)
+    auto_send = repair[start:end]
+
+    assert "document.visibilityState" not in auto_send
+    assert "document.hasFocus" not in auto_send
+    assert "prepareContinuation(text, { requireEmpty: true })" in auto_send
+    assert "composerText(composer).includes(marker)" in auto_send
+    assert "bdbWaitForSendConfirmation(marker)" in auto_send
+    assert 'reason: "wyslanie_niepotwierdzone"' in auto_send
+
+
 def test_assisted_background_poll_is_one_native_result_call(
     tmp_path: Path,
 ) -> None:
