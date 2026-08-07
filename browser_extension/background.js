@@ -361,6 +361,15 @@ function inspectBundlePreflight(action) {
     }
   }
 
+  const includeTree = payload.include_tree;
+  const includeSymbols = payload.include_symbols;
+  if (
+    (includeTree !== undefined && typeof includeTree !== "boolean") ||
+    (includeSymbols !== undefined && typeof includeSymbols !== "boolean")
+  ) {
+    return "inspect_bundle include_tree/include_symbols must be boolean";
+  }
+
   const readTopMatches = payload.read_top_matches;
   if (
     readTopMatches !== undefined &&

@@ -296,6 +296,31 @@ def test_auto_read_failure_continues_when_continue_on_failure_is_enabled(tmp_pat
                 "search_text payload.query must contain 1-200 characters on one line"
               );
 
+              const invalidFlagsAction = {
+                ...action,
+                payload: {
+                  searches: [],
+                  reads: [],
+                  read_top_matches: 1,
+                  include_tree: "yes"
+                },
+                automation: {
+                  ...action.automation,
+                  loop_id: "recover-invalid-inspect-flags"
+                }
+              };
+              const invalidFlagsDecision = await context.considerAuto(invalidFlagsAction, 9);
+              assert.equal(invalidFlagsDecision.executed, true, JSON.stringify(invalidFlagsDecision));
+              assert.equal(invalidFlagsDecision.recoverableReadFailure, true, JSON.stringify(invalidFlagsDecision));
+              assert.equal(invalidFlagsDecision.shouldContinue, true, JSON.stringify(invalidFlagsDecision));
+              assert.equal(invalidFlagsDecision.response.error.code, "invalid_payload");
+              assert.equal(invalidFlagsDecision.response.client_preflight, true);
+              assert.equal(inspectNativeCalls, 0, "invalid inspect_bundle flags must stop before Native Host");
+              assert.equal(
+                invalidFlagsDecision.response.error.message,
+                "inspect_bundle include_tree/include_symbols must be boolean"
+              );
+
               const policyAction = {
                 ...action,
                 payload: {
