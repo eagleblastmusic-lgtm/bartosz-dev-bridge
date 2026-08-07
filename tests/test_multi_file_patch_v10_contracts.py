@@ -11,7 +11,7 @@ V10_CHECKSUM = "6ba6a3338f95ff66679025a177c7a2d95adb75901c22f724d3bddf89ce5fd0fe
 
 
 def test_v10_registry_name_statements_and_literal_checksum() -> None:
-    assert tuple(migration.version for migration in MIGRATIONS) == tuple(range(1, 12))
+    assert tuple(migration.version for migration in MIGRATIONS) == tuple(range(1, 13))
     assert MIGRATIONS[9] is MIGRATION_V10
     assert MIGRATION_V10.name == "journal_v10_multi_file_patch_runtime"
     assert MIGRATION_V10.statements == MIGRATION_V10_STATEMENTS

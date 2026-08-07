@@ -20,7 +20,7 @@ from .models import BridgeErrorCode, ProfileRunOutcome
 from .multi_file_patch_recovery_models import MultiFileCheckpointState
 from .protocol import BridgeError
 from .shopify_theme_check_profile import run_shopify_theme_check_profile
-from .staged_validation import run_staged_pytest_profile
+from .staged_validation import run_durable_staged_pytest_profile, run_staged_pytest_profile
 
 
 _DOTNET_ENVIRONMENT_KEYS = (
@@ -217,7 +217,22 @@ def install_fixed_test_profile_support(
         fixed_profile_arguments(profile_id)
         started_at = self.journal._now_fn()
         self._fault("BEFORE_GHB2D_PROFILE")
-        outcome = self.profile_runner(workspace, profile_id)
+        if profile_id == STAGED_PYTEST_PROFILE:
+            outcome = run_durable_staged_pytest_profile(
+                journal=self.journal,
+                command_id=command_id,
+                workspace_path=Path(workspace.path),
+                python_executable=self.config.python_executable,
+                timeout_seconds=self.config.test_timeout_seconds,
+                environment=_profile_environment(PYTEST_PROFILE),
+                changed_paths=tuple(
+                    workspace.controlled_changed_paths()
+                    if callable(getattr(workspace, "controlled_changed_paths", None))
+                    else ()
+                ),
+            )
+        else:
+            outcome = self.profile_runner(workspace, profile_id)
         finished_at = self.journal._now_fn()
         profile = self.journal.record_multi_file_patch_profile_run(
             command_id=command_id,

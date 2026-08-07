@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Type
 
 from . import migrations as _base
+from .serializers import MAX_TAIL_CHARS
 
 
 MIGRATION_V11_STATEMENTS: tuple[str, ...] = (
@@ -126,11 +127,45 @@ MIGRATION_V11 = _base.Migration(
 )
 
 
-def install_direct_checkout_workspace_migration(journal_cls: Type[object]) -> None:
-    if any(migration.version == 11 for migration in _base.MIGRATIONS):
-        return
+MIGRATION_V12_STATEMENTS: tuple[str, ...] = (
+    f"""CREATE TABLE validation_runs (
+  command_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL CHECK (length(plan_id) > 0 AND length(plan_id) <= 80),
+  stage_index INTEGER NOT NULL CHECK (stage_index >= 1 AND stage_index <= 16),
+  stage_name TEXT NOT NULL CHECK (length(stage_name) > 0 AND length(stage_name) <= 80),
+  status TEXT NOT NULL CHECK (status IN ('success','failed','timeout','internal_error')),
+  exit_code INTEGER,
+  stdout_tail TEXT NOT NULL CHECK (length(stdout_tail) <= {MAX_TAIL_CHARS}),
+  stderr_tail TEXT NOT NULL CHECK (length(stderr_tail) <= {MAX_TAIL_CHARS}),
+  stdout_sha256 TEXT NOT NULL,
+  stderr_sha256 TEXT NOT NULL,
+  duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (command_id, plan_id, stage_index),
+  UNIQUE (command_id, plan_id, stage_name),
+  FOREIGN KEY (command_id) REFERENCES multi_file_patch_checkpoints(command_id)
+)""",
+    "CREATE INDEX idx_validation_runs_command_plan ON validation_runs(command_id, plan_id, stage_index)",
+)
 
-    _base.MIGRATIONS = (*_base.MIGRATIONS, MIGRATION_V11)
+MIGRATION_V12 = _base.Migration(
+    12,
+    "journal_v12_staged_validation",
+    MIGRATION_V12_STATEMENTS,
+)
+
+
+def install_direct_checkout_workspace_migration(journal_cls: Type[object]) -> None:
+    additions = tuple(
+        migration
+        for migration in (MIGRATION_V11, MIGRATION_V12)
+        if not any(existing.version == migration.version for existing in _base.MIGRATIONS)
+    )
+    if additions:
+        _base.MIGRATIONS = (*_base.MIGRATIONS, *additions)
+    _base.JOURNAL_TABLES = frozenset((*_base.JOURNAL_TABLES, "validation_runs"))
     _base._validate_migration_registry(_base.MIGRATIONS)
     if _base.apply_migrations.__kwdefaults__ is not None:
         _base.apply_migrations.__kwdefaults__["migrations"] = _base.MIGRATIONS

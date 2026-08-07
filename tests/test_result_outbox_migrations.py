@@ -38,6 +38,7 @@ def test_v6_registry_and_literal_checksums() -> None:
         (9, "journal_v9_multi_file_patch_recovery", V9),
         (10, "journal_v10_multi_file_patch_runtime", V10),
         (11, "journal_v11_shared_direct_checkout_paths", "178a97cf4ebc1e879964b3b77a7650d994487b92f4d95c3b4541793a92ca921c"),
+        (12, "journal_v12_staged_validation", "ac59208c889f0113cddb65737efbc340a462e533fae076396a2d69df0b8d2b65"),
     ]
     assert "outbox" in JOURNAL_TABLES
     assert "workspace_lifecycle" in JOURNAL_TABLES
@@ -47,7 +48,7 @@ def test_v6_registry_and_literal_checksums() -> None:
 def test_empty_and_populated_v3_upgrade(tmp_path: Path) -> None:
     empty = Journal.open(tmp_path / "empty.db", now_fn=now)
     assert empty._connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall() == [
-        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,),
+        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,),
     ]
     assert {r[0] for r in empty._connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")} == JOURNAL_TABLES
     empty.close()

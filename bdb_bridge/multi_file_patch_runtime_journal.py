@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from typing import Any, Type
 
 from .migrations import map_sqlite_error
@@ -341,8 +342,203 @@ def finalize_multi_file_patch_execution(self: Any, command_id: str) -> None:
         )
 
 
+@dataclass(frozen=True)
+class ValidationRunRecord:
+    command_id: str
+    plan_id: str
+    stage_index: int
+    stage_name: str
+    status: str
+    exit_code: int | None
+    stdout_tail: str
+    stderr_tail: str
+    stdout_sha256: str
+    stderr_sha256: str
+    duration_ms: int
+    started_at: str
+    finished_at: str
+    created_at: str
+
+    def to_outcome(self) -> ProfileRunOutcome:
+        return ProfileRunOutcome(
+            status=self.status,
+            exit_code=self.exit_code,
+            stdout=self.stdout_tail,
+            stderr=self.stderr_tail,
+            duration_ms=self.duration_ms,
+        )
+
+
+_VALIDATION_SELECT = """SELECT command_id, plan_id, stage_index, stage_name, status, exit_code,
+       stdout_tail, stderr_tail, stdout_sha256, stderr_sha256,
+       duration_ms, started_at, finished_at, created_at
+FROM validation_runs"""
+
+
+def _row_to_validation_run(row: sqlite3.Row | tuple[Any, ...]) -> ValidationRunRecord:
+    try:
+        status = str(row[4])
+        if status not in _ALLOWED_STATUSES:
+            raise ValueError("invalid validation status")
+        exit_code = row[5]
+        if exit_code is not None and (isinstance(exit_code, bool) or not isinstance(exit_code, int)):
+            raise ValueError("invalid validation exit code")
+        stage_index = int(row[2])
+        duration_ms = int(row[10])
+        if not 1 <= stage_index <= 16 or duration_ms < 0:
+            raise ValueError("invalid validation bounds")
+        return ValidationRunRecord(
+            command_id=str(row[0]),
+            plan_id=str(row[1]),
+            stage_index=stage_index,
+            stage_name=str(row[3]),
+            status=status,
+            exit_code=exit_code,
+            stdout_tail=str(row[6]),
+            stderr_tail=str(row[7]),
+            stdout_sha256=str(row[8]),
+            stderr_sha256=str(row[9]),
+            duration_ms=duration_ms,
+            started_at=str(row[11]),
+            finished_at=str(row[12]),
+            created_at=str(row[13]),
+        )
+    except (IndexError, TypeError, ValueError) as exc:
+        raise BridgeError(
+            BridgeErrorCode.JOURNAL_CORRUPT,
+            "Invalid durable staged-validation outcome",
+        ) from exc
+
+
+def get_validation_run(
+    self: Any,
+    command_id: str,
+    plan_id: str,
+    stage_index: int,
+) -> ValidationRunRecord | None:
+    self._ensure_open()
+    try:
+        row = self._connection.execute(
+            _VALIDATION_SELECT + " WHERE command_id = ? AND plan_id = ? AND stage_index = ?",
+            (command_id, plan_id, stage_index),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise map_sqlite_error(exc, context="staged validation outcome read") from exc
+    return None if row is None else _row_to_validation_run(row)
+
+
+def record_validation_run(
+    self: Any,
+    *,
+    command_id: str,
+    plan_id: str,
+    stage_index: int,
+    stage_name: str,
+    outcome: ProfileRunOutcome,
+    started_at: str,
+    finished_at: str,
+) -> ValidationRunRecord:
+    self._ensure_open()
+    if outcome.status not in _ALLOWED_STATUSES:
+        raise BridgeError(
+            BridgeErrorCode.INVALID_PAYLOAD,
+            f"Unsupported validation status: {outcome.status!r}",
+        )
+    if isinstance(stage_index, bool) or not isinstance(stage_index, int) or not 1 <= stage_index <= 16:
+        raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "stage_index is not bounded")
+    plan_id = _strict_text(plan_id, "plan_id")
+    stage_name = _strict_text(stage_name, "stage_name")
+    if not plan_id or len(plan_id) > 80 or not stage_name or len(stage_name) > 80:
+        raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "validation identity is not bounded")
+    stdout = _strict_text(outcome.stdout, "validation.stdout")
+    stderr = _strict_text(outcome.stderr, "validation.stderr")
+    if outcome.exit_code is not None and (
+        isinstance(outcome.exit_code, bool) or not isinstance(outcome.exit_code, int)
+    ):
+        raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "validation.exit_code must be int or null")
+    if (
+        isinstance(outcome.duration_ms, bool)
+        or not isinstance(outcome.duration_ms, int)
+        or outcome.duration_ms < 0
+    ):
+        raise BridgeError(
+            BridgeErrorCode.INVALID_PAYLOAD,
+            "validation.duration_ms must be non-negative",
+        )
+    stdout_tail = stdout[-MAX_TAIL_CHARS:]
+    stderr_tail = stderr[-MAX_TAIL_CHARS:]
+    immutable = (
+        plan_id,
+        stage_index,
+        stage_name,
+        outcome.status,
+        outcome.exit_code,
+        stdout_tail,
+        stderr_tail,
+        sha256_bytes(stdout.encode("utf-8")),
+        sha256_bytes(stderr.encode("utf-8")),
+        outcome.duration_ms,
+        started_at,
+        finished_at,
+    )
+    existing = self.get_validation_run(command_id, plan_id, stage_index)
+    if existing is not None:
+        current = (
+            existing.plan_id,
+            existing.stage_index,
+            existing.stage_name,
+            existing.status,
+            existing.exit_code,
+            existing.stdout_tail,
+            existing.stderr_tail,
+            existing.stdout_sha256,
+            existing.stderr_sha256,
+            existing.duration_ms,
+            existing.started_at,
+            existing.finished_at,
+        )
+        if current != immutable:
+            raise BridgeError(
+                BridgeErrorCode.EFFECT_COLLISION,
+                "Different immutable staged-validation outcome already exists",
+            )
+        return existing
+
+    command = self.get_command(command_id)
+    checkpoint = self.get_multi_file_patch_checkpoint(command_id)
+    if command is None or command.state is not CommandState.EXECUTING:
+        raise BridgeError(
+            BridgeErrorCode.INVALID_STATE_TRANSITION,
+            "New staged-validation outcome requires EXECUTING command",
+        )
+    if checkpoint is None or checkpoint.state is not MultiFileCheckpointState.APPLIED:
+        raise BridgeError(
+            BridgeErrorCode.INVALID_STATE_TRANSITION,
+            "Staged-validation outcome requires an applied multi-file checkpoint",
+        )
+    created_at = self._now_fn()
+    try:
+        with self._transaction():
+            self._connection.execute(
+                """INSERT INTO validation_runs (
+  command_id, plan_id, stage_index, stage_name, status, exit_code,
+  stdout_tail, stderr_tail, stdout_sha256, stderr_sha256,
+  duration_ms, started_at, finished_at, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (command_id, *immutable, created_at),
+            )
+    except sqlite3.Error as exc:
+        raise map_sqlite_error(exc, context="staged validation outcome write") from exc
+    recorded = self.get_validation_run(command_id, plan_id, stage_index)
+    if recorded is None:
+        raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Staged-validation outcome disappeared")
+    return recorded
+
+
 def install_journal_multi_file_patch_runtime_api(journal_cls: Type[object]) -> None:
     setattr(journal_cls, "get_multi_file_patch_profile_run", get_multi_file_patch_profile_run)
     setattr(journal_cls, "record_multi_file_patch_profile_run", record_multi_file_patch_profile_run)
+    setattr(journal_cls, "get_validation_run", get_validation_run)
+    setattr(journal_cls, "record_validation_run", record_validation_run)
     setattr(journal_cls, "mark_multi_file_patch_command_executing", mark_multi_file_patch_command_executing)
     setattr(journal_cls, "finalize_multi_file_patch_execution", finalize_multi_file_patch_execution)

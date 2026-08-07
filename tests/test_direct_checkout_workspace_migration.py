@@ -80,7 +80,7 @@ def test_v11_allows_two_sessions_to_share_direct_checkout_path(tmp_path: Path) -
         latest = connection.execute(
             "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1"
         ).fetchone()
-        assert latest == (11, "journal_v11_shared_direct_checkout_paths")
+        assert latest == (12, "journal_v12_staged_validation")
         assert ["workspace_path"] not in unique_index_columns(connection, "workspaces")
         assert ["workspace_path"] not in unique_index_columns(
             connection,
