@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EXTENSION = ROOT / "browser_extension"
 
 
-def test_content_script_runs_delayed_document_scan_after_streaming_settles(
+def test_content_script_reconciles_streaming_action_before_background_timer_fires(
     tmp_path: Path,
 ) -> None:
     node = shutil.which("node")
@@ -178,8 +178,8 @@ def test_content_script_runs_delayed_document_scan_after_streaming_settles(
             let sendCalls = 0;
             const document = new FakeElement("document");
             document.documentElement = document;
-            document.visibilityState = "visible";
-            document.hasFocus = () => true;
+            document.visibilityState = "hidden";
+            document.hasFocus = () => false;
             document.createElement = (tagName) => (
               tagName === "button" ? new FakeButton() : new FakeElement(tagName)
             );
@@ -284,15 +284,30 @@ def test_content_script_runs_delayed_document_scan_after_streaming_settles(
               presentation: { mode: "compact" }
             });
 
+            reconciliationObserver([
+              {
+                type: "characterData",
+                target: { parentElement: code },
+                addedNodes: [],
+                removedNodes: []
+              }
+            ]);
+
+            assert.ok(
+              host.querySelector(":scope > .bdb-assisted"),
+              "the final streaming mutation must enhance a complete action without waiting for background-tab timers"
+            );
+            assert.equal(sendCalls, 1);
+
             while (scheduledTimers.length > 0) {
               scheduledTimers.shift()();
             }
 
-            assert.ok(
-              host.querySelector(":scope > .bdb-assisted"),
-              "the delayed global scan must enhance JSON that became valid after the mutation"
+            assert.equal(
+              sendCalls,
+              1,
+              "the delayed fallback must not duplicate AUTO after immediate reconciliation"
             );
-            assert.equal(sendCalls, 1);
             '''
         ),
         encoding="utf-8",

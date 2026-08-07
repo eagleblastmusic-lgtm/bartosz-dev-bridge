@@ -115,9 +115,11 @@ scan = function scanWithRerenderReconciliation(root) {
 // The original observer scans additions and character changes immediately. This
 // companion observer covers two complementary cases:
 // 1. React removes an extension-owned panel while keeping the same <code> node.
-// 2. A streaming block is invalid during the immediate local scan but becomes a
-//    complete action before a delayed whole-document reconciliation runs.
-// It never submits an action directly; replay protection remains in background.js.
+// 2. A streaming block is invalid during one local scan but becomes a complete
+//    action on a later mutation, including while the ChatGPT tab is backgrounded.
+// The observer scans synchronously on relevant mutations and also keeps a delayed
+// whole-document fallback. It never submits directly; replay protection remains
+// in background.js.
 const bdbRemovedPanelObserver = new MutationObserver((records) => {
   let shouldReconcileDocument = false;
   for (const record of records) {
@@ -133,6 +135,10 @@ const bdbRemovedPanelObserver = new MutationObserver((records) => {
     }
   }
   if (shouldReconcileDocument) {
+    // MutationObserver callbacks are not background-tab timer driven. Scan now so
+    // a completed streamed action can enter AUTO even when delayed timers are
+    // throttled until the ChatGPT tab becomes active again.
+    scan(document);
     scheduleBdbDocumentReconciliation();
   }
 });
