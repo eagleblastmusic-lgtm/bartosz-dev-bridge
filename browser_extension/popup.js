@@ -200,7 +200,8 @@ resumeTaskButton.addEventListener("click", async () => {
           type: "BDB_CONTENT_RESUME_TASK",
           loopId: latestTaskLoopId,
           expectedIteration: result.response && result.response.expected_iteration,
-          conversationId: latestTaskConversationId
+          conversationId: latestTaskConversationId,
+          recoveryResponse: result.response && result.response.recovery_response
         });
         if (contentResult && contentResult.retried === false) {
           output.textContent = `Wznowienie wyniku nieudane: ${contentResult.reason || "nieznany_powod"}`;

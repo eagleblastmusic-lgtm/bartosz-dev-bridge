@@ -444,6 +444,10 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               assert.equal(visualRecovery.task_status, "needs_user");
               assert.equal(visualRecovery.expected_iteration, 1);
               assert.equal(visualRecovery.recovery_only, true);
+              assert.equal(
+                visualRecovery.recovery_response.result.acceptance.status,
+                "needs_confirmation"
+              );
               assert.equal(sessionStore["bdbAuto:7:visual-loop"].status, "needs_user");
 
               const restoredVisual = await context.__consider(visual, 7);

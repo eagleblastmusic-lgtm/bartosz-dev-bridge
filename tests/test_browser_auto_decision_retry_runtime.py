@@ -31,7 +31,7 @@ class AutoDecisionRetryRuntimeTests(unittest.TestCase):
                     const scriptPath = path.join(process.argv[2], "content_auto_retry.js");
                     const script = fs.readFileSync(scriptPath, "utf8");
 
-                    async function run(responses, sendResult) {
+                    async function run(responses, sendResult, { resume = false } = {}) {
                       let calls = 0;
                       let delivered = 0;
                       const button = { disabled: false, textContent: "" };
@@ -59,13 +59,23 @@ class AutoDecisionRetryRuntimeTests(unittest.TestCase):
                       context.globalThis = context;
                       vm.createContext(context);
                       vm.runInContext(script, context, { filename: scriptPath });
-                      await context.maybeAuto(
-                        { automation: { mode: "auto", loop_id: "loop", iteration: 3 } },
-                        button,
-                        output,
-                        true
-                      );
-                      return { calls, delivered, button };
+                      let resumeResult = null;
+                      if (resume) {
+                        resumeResult = await context.bdbRetryResumedTask(
+                          "loop",
+                          3,
+                          null,
+                          { status: "recovered" }
+                        );
+                      } else {
+                        await context.maybeAuto(
+                          { automation: { mode: "auto", loop_id: "loop", iteration: 3 } },
+                          button,
+                          output,
+                          true
+                        );
+                      }
+                      return { calls, delivered, button, resumeResult };
                     }
 
                     const completed = {
@@ -92,6 +102,20 @@ class AutoDecisionRetryRuntimeTests(unittest.TestCase):
                       });
                       assert.equal(confirmed.calls, 2);
                       assert.equal(confirmed.delivered, 1);
+
+                      const recoveredResume = await run(
+                        [],
+                        {
+                          sent: true,
+                          confirmed: true,
+                          confirmedVia: "user_message"
+                        },
+                        { resume: true }
+                      );
+                      assert.equal(recoveredResume.delivered, 1);
+                      assert.equal(recoveredResume.resumeResult.retried, true);
+                      assert.equal(recoveredResume.resumeResult.recovered, true);
+                      assert.equal(recoveredResume.resumeResult.iteration, 3);
 
                       let handoffSendCalls = 0;
                       const terminalHandoff = await run([

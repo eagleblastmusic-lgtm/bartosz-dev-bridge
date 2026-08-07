@@ -396,7 +396,7 @@ function bdbResumeConversationId() {
   return match ? match[1] : null;
 }
 
-async function bdbRetryResumedTask(loopId, expectedIteration, expectedConversationId = null) {
+async function bdbRetryResumedTask(loopId, expectedIteration, expectedConversationId = null, recoveryResponse = null) {
   if (typeof loopId !== "string" || !Number.isInteger(expectedIteration)) {
     return { retried: false, reason: "invalid_resume_message" };
   }
@@ -412,6 +412,56 @@ async function bdbRetryResumedTask(loopId, expectedIteration, expectedConversati
       reason: "conversation_mismatch",
       expected_conversation_id: expectedConversationId,
       actual_conversation_id: bdbResumeConversationId()
+    };
+  }
+  if (
+    recoveryResponse &&
+    typeof recoveryResponse === "object" &&
+    !Array.isArray(recoveryResponse)
+  ) {
+    let sent = null;
+    for (let attempt = 0; attempt < BDB_AUTO_DELIVERY_RETRY_ATTEMPTS; attempt += 1) {
+      sent = await autoSend(recoveryResponse, loopId, expectedIteration);
+      if (
+        sent &&
+        sent.sent === true &&
+        sent.confirmed === true &&
+        sent.confirmedVia === "user_message"
+      ) {
+        break;
+      }
+      if (!sent || !BDB_AUTO_DELIVERY_TRANSIENT_REASONS.has(sent.reason)) {
+        break;
+      }
+      if (attempt + 1 >= BDB_AUTO_DELIVERY_RETRY_ATTEMPTS) {
+        break;
+      }
+      await bdbAutoDecisionSleep(BDB_AUTO_DELIVERY_RETRY_MS);
+    }
+    if (
+      sent &&
+      sent.sent === true &&
+      sent.confirmed === true &&
+      sent.confirmedVia === "user_message"
+    ) {
+      try {
+        await chrome.runtime.sendMessage({
+          type: "BDB_MARK_AUTO_RESULT_DELIVERED",
+          loopId,
+          iteration: expectedIteration
+        });
+      } catch (_error) {
+      }
+      return {
+        retried: true,
+        recovered: true,
+        iteration: expectedIteration
+      };
+    }
+    return {
+      retried: false,
+      reason: sent && sent.reason ? sent.reason : "send_not_confirmed",
+      recovery_pending: true
     };
   }
   const blocks = document.querySelectorAll("pre code, code");
@@ -448,7 +498,12 @@ if (
     if (!message || message.type !== "BDB_CONTENT_RESUME_TASK") {
       return undefined;
     }
-    bdbRetryResumedTask(message.loopId, message.expectedIteration, message.conversationId)
+    bdbRetryResumedTask(
+      message.loopId,
+      message.expectedIteration,
+      message.conversationId,
+      message.recoveryResponse
+    )
       .then(sendResponse)
       .catch((error) => sendResponse({
         retried: false,

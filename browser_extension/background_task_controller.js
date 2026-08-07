@@ -1628,6 +1628,7 @@ async function bdbResumeTask(loopId, tabId) {
       task_status: restoredStatus,
       expected_iteration: pendingCheckpoint.iteration,
       recovery_only: true,
+      recovery_response: bdbTaskClone(pendingCheckpoint.response),
       instruction: "BDB odzyska zapisany wynik bez ponownego wykonania operacji."
     };
   }
