@@ -22,7 +22,7 @@ def workspace_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     stderr_log = runtime / "workspace-promoter.stderr.log"
 
     bridge_config.write_text(
-        json.dumps({"schema_version": "1.1", "journal_path": str(journal)}),
+        json.dumps({"schema_version": "1.1", "journal_path": str(journal), "runtime_dir": str(runtime)}),
         encoding="utf-8",
     )
     state = {
@@ -87,6 +87,21 @@ def create_journal(path: Path) -> None:
           result_json TEXT NOT NULL,
           remote_path TEXT NOT NULL,
           created_at TEXT NOT NULL
+        );
+        CREATE TABLE outbox (
+          command_id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          sequence INTEGER NOT NULL,
+          result_sha256 TEXT NOT NULL,
+          remote_path TEXT NOT NULL,
+          state TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL,
+          next_attempt_at TEXT,
+          last_error TEXT,
+          published_commit_sha TEXT,
+          published_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
         );
         CREATE TABLE events (
           event_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -243,17 +258,109 @@ def test_current_operation_returns_summary_without_command_payload(tmp_path: Pat
     assert "command_json" not in serialized
 
 
-def test_current_operation_is_empty_after_terminal_transition(tmp_path: Path) -> None:
+def test_current_operation_retains_terminal_failure(tmp_path: Path) -> None:
     root, journal, _, _ = workspace_fixture(tmp_path)
     connection = sqlite3.connect(journal)
-    connection.execute("UPDATE commands SET state = 'acknowledged'")
+    connection.execute("UPDATE commands SET state = 'rejected'")
     connection.commit()
     connection.close()
 
     result = ObservabilityReader.from_workspace_root(root).current_operation()
 
     assert result["active"] is False
-    assert result["operation"] is None
+    assert result["operation"] is not None
+    assert result["operation"]["status"] == {
+        "schema": "bdb-operation-status-v1",
+        "execution": "failed",
+        "result": "none",
+        "promotion": "pending",
+        "delivery": "pending",
+        "session": "active",
+        "terminal": True,
+    }
+
+
+def test_published_mutation_without_receipt_is_promotion_pending(tmp_path: Path) -> None:
+    root, journal, _, _ = workspace_fixture(tmp_path)
+    session = "session-00000000-0000-4000-8000-000000000001"
+    command = f"{session}:000001"
+    result_sha = "sha256:" + "b" * 64
+    result_json = json.dumps({"status": "success", "changed_files": ["README.md"]})
+    connection = sqlite3.connect(journal)
+    connection.execute("UPDATE commands SET state = 'result_published' WHERE command_id = ?", (command,))
+    connection.execute(
+        "INSERT INTO results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (command, session, 1, "success", None, result_sha, result_json, "results/result.json", NOW),
+    )
+    connection.execute(
+        "INSERT INTO outbox VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (command, session, 1, result_sha, "results/result.json", "published", 1, None, None, "c" * 40, NOW, NOW, NOW),
+    )
+    connection.commit()
+    connection.close()
+
+    result = ObservabilityReader.from_workspace_root(root).current_operation()
+
+    assert result["active"] is True
+    assert result["operation"]["status"] == {
+        "schema": "bdb-operation-status-v1",
+        "execution": "succeeded",
+        "result": "published",
+        "promotion": "pending",
+        "delivery": "delivered",
+        "session": "active",
+        "terminal": False,
+    }
+
+
+def test_promoted_terminal_operation_is_retained(tmp_path: Path) -> None:
+    root, journal, _, _ = workspace_fixture(tmp_path)
+    session = "session-00000000-0000-4000-8000-000000000001"
+    command = f"{session}:000001"
+    result_sha = "sha256:" + "b" * 64
+    result_json = json.dumps({"status": "success", "changed_files": ["README.md"]})
+    connection = sqlite3.connect(journal)
+    connection.execute("UPDATE commands SET state = 'acknowledged' WHERE command_id = ?", (command,))
+    connection.execute(
+        "INSERT INTO results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (command, session, 1, "success", None, result_sha, result_json, "results/result.json", NOW),
+    )
+    connection.execute(
+        "INSERT INTO outbox VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (command, session, 1, result_sha, "results/result.json", "published", 1, None, None, "c" * 40, NOW, NOW, NOW),
+    )
+    connection.commit()
+    connection.close()
+    promotions = root / "runtime" / "promotions"
+    promotions.mkdir()
+    (promotions / f"{session}-000001.json").write_text(
+        json.dumps(
+            {
+                "schema": "bdb-workspace-promotion-v1",
+                "session_id": session,
+                "sequence": 1,
+                "result_sha256": result_sha,
+                "changed_files": ["README.md"],
+                "source_commit": "d" * 40,
+                "parent_commit": "e" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = ObservabilityReader.from_workspace_root(root).current_operation()
+
+    assert result["active"] is False
+    assert result["operation"] is not None
+    assert result["operation"]["status"] == {
+        "schema": "bdb-operation-status-v1",
+        "execution": "succeeded",
+        "result": "published",
+        "promotion": "promoted",
+        "delivery": "delivered",
+        "session": "active",
+        "terminal": True,
+    }
 
 
 def test_log_snapshot_is_bounded_and_declared_paths_only(tmp_path: Path) -> None:

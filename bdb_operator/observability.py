@@ -14,20 +14,28 @@ from .models import utc_now_iso
 
 EVENT_SCHEMA = "bdb-event-v1"
 CURRENT_OPERATION_SCHEMA = "bdb-current-operation-v1"
+OPERATION_STATUS_SCHEMA = "bdb-operation-status-v1"
+PROMOTION_RECEIPT_SCHEMA = "bdb-workspace-promotion-v1"
 LOG_SNAPSHOT_SCHEMA = "bdb-log-snapshot-v1"
 WORKSPACE_STATE_SCHEMA = "bdb-workspace-loop-state-v1"
 MAX_EVENT_LIMIT = 500
 MAX_EVENT_PAYLOAD_CHARS = 16_384
 MAX_LOG_BYTES = 65_536
 MAX_LOG_LINES = 500
-_ACTIVE_COMMAND_STATES = (
-    "discovered",
-    "validated",
-    "claimed",
-    "executing",
-    "effect_recorded",
-    "result_staged",
-    "result_published",
+MAX_PROMOTION_RECEIPT_BYTES = 2 * 1024 * 1024
+_MUTATING_OPERATIONS = frozenset({"replace_exact_and_test", "multi_file_patch"})
+_QUEUED_COMMAND_STATES = frozenset({"discovered", "validated", "claimed"})
+_RUNNING_COMMAND_STATES = frozenset({"executing", "effect_recorded", "result_staged"})
+_FINAL_FAILURE_STATES = frozenset(
+    {
+        "rejected",
+        "expired",
+        "policy_denied",
+        "stale_revision",
+        "state_mismatch",
+        "manual_reconciliation_required",
+        "cancelled",
+    }
 )
 
 
@@ -36,6 +44,7 @@ class ObservabilityWorkspace:
     root: Path
     alias: str
     journal_path: Path
+    runtime_dir: Path
     promoter_stdout: Path | None
     promoter_stderr: Path | None
 
@@ -75,11 +84,18 @@ class ObservabilityReader:
         journal_path = Path(_required_string(bridge_config, "journal_path", bridge_config_path)).expanduser().resolve(
             strict=False
         )
+        runtime_value = bridge_config.get("runtime_dir")
+        runtime_dir = (
+            Path(runtime_value).expanduser().resolve(strict=False)
+            if isinstance(runtime_value, str) and runtime_value
+            else journal_path.parent
+        )
         return cls(
             ObservabilityWorkspace(
                 root=root,
                 alias=alias,
                 journal_path=journal_path,
+                runtime_dir=runtime_dir,
                 promoter_stdout=_optional_path(state.get("promoter_stdout")),
                 promoter_stderr=_optional_path(state.get("promoter_stderr")),
             )
@@ -147,8 +163,7 @@ class ObservabilityReader:
         }
 
     def current_operation(self) -> dict[str, Any]:
-        placeholders = ", ".join("?" for _ in _ACTIVE_COMMAND_STATES)
-        query = f"""
+        query = """
             SELECT
                 c.command_id,
                 c.session_id,
@@ -165,25 +180,30 @@ class ObservabilityReader:
                 w.revision AS workspace_revision,
                 w.state_hash AS workspace_state_hash,
                 r.status AS result_status,
-                r.error_code
+                r.error_code,
+                r.result_sha256,
+                r.result_json,
+                o.state AS outbox_state,
+                o.published_at AS outbox_published_at
             FROM commands c
             JOIN sessions s ON s.session_id = c.session_id
             LEFT JOIN operation_plans p ON p.command_id = c.command_id
             LEFT JOIN workspaces w ON w.session_id = c.session_id
             LEFT JOIN results r ON r.command_id = c.command_id
-            WHERE c.state IN ({placeholders})
+            LEFT JOIN outbox o ON o.command_id = c.command_id
             ORDER BY c.updated_at DESC, c.sequence DESC
             LIMIT 1
         """
         with self._read_only_connection() as connection:
-            row = connection.execute(query, _ACTIVE_COMMAND_STATES).fetchone()
+            row = connection.execute(query).fetchone()
 
+        operation = self._operation_document(row) if row is not None else None
         return {
             "schema": CURRENT_OPERATION_SCHEMA,
             "project_alias": self.workspace.alias,
             "generated_at": utc_now_iso(),
-            "active": row is not None,
-            "operation": self._operation_document(row) if row is not None else None,
+            "active": bool(operation is not None and not operation["status"]["terminal"]),
+            "operation": operation,
         }
 
     def log_snapshot(self, *, max_bytes: int = MAX_LOG_BYTES, max_lines: int = 200) -> dict[str, Any]:
@@ -265,12 +285,13 @@ class ObservabilityReader:
 
     def _operation_document(self, row: sqlite3.Row) -> dict[str, Any]:
         command = _decode_command_summary(row["command_json"])
+        operation = row["planned_operation"] or command.get("operation")
         return {
             "command_id": row["command_id"],
             "session_id": row["session_id"],
             "sequence": int(row["sequence"]),
             "state": row["state"],
-            "operation": row["planned_operation"] or command.get("operation"),
+            "operation": operation,
             "target_path": row["target_path"] or command.get("target_path"),
             "profile_id": row["profile_id"] or command.get("profile_id"),
             "repository_id": row["repository_id"],
@@ -279,6 +300,11 @@ class ObservabilityReader:
             "workspace_state_hash": row["workspace_state_hash"],
             "result_status": row["result_status"],
             "error_code": row["error_code"],
+            "status": _canonical_operation_status(
+                row,
+                operation=operation,
+                runtime_dir=self.workspace.runtime_dir,
+            ),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -395,6 +421,113 @@ def _decode_payload(raw: Any) -> tuple[dict[str, Any], bool]:
     if isinstance(value, dict):
         return value, False
     return {"value": value}, False
+
+
+def _canonical_operation_status(
+    row: sqlite3.Row,
+    *,
+    operation: Any,
+    runtime_dir: Path,
+) -> dict[str, Any]:
+    state = str(row["state"])
+    result_status = str(row["result_status"]).lower() if row["result_status"] is not None else None
+    outbox_state = str(row["outbox_state"]).lower() if row["outbox_state"] is not None else None
+    mutating = operation in _MUTATING_OPERATIONS
+
+    if state in _FINAL_FAILURE_STATES or result_status in {"failed", "error", "internal_error"}:
+        execution = "failed"
+    elif state in _QUEUED_COMMAND_STATES:
+        execution = "queued"
+    elif state in _RUNNING_COMMAND_STATES:
+        execution = "running"
+    else:
+        execution = "succeeded"
+
+    if state in {"result_published", "acknowledged"} or outbox_state == "published":
+        result = "published"
+    elif row["result_status"] is not None:
+        result = "staged"
+    else:
+        result = "none"
+
+    delivery = "delivered" if state == "acknowledged" or outbox_state == "published" else "pending"
+    if mutating:
+        promotion = "pending"
+        if result == "published":
+            promotion = _promotion_status(row, runtime_dir)
+    else:
+        promotion = "not_required"
+
+    session_state = str(row["session_state"])
+    if session_state == "completing":
+        session = "completing"
+    elif session_state in {"completed", "aborted", "manual_reconciliation_required"}:
+        session = "completed"
+    else:
+        session = "active"
+
+    terminal = execution == "failed" or promotion == "blocked"
+    if not terminal:
+        terminal = bool(
+            execution == "succeeded"
+            and result == "published"
+            and delivery == "delivered"
+            and promotion in {"promoted", "not_required"}
+        )
+
+    return {
+        "schema": OPERATION_STATUS_SCHEMA,
+        "execution": execution,
+        "result": result,
+        "promotion": promotion,
+        "delivery": delivery,
+        "session": session,
+        "terminal": terminal,
+    }
+
+
+def _promotion_status(row: sqlite3.Row, runtime_dir: Path) -> str:
+    receipt_path = runtime_dir / "promotions" / f"{row['session_id']}-{int(row['sequence']):06d}.json"
+    if not receipt_path.is_file() or receipt_path.is_symlink():
+        return "pending"
+    try:
+        if receipt_path.stat().st_size > MAX_PROMOTION_RECEIPT_BYTES:
+            return "blocked"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return "blocked"
+    if not isinstance(receipt, dict) or receipt.get("schema") != PROMOTION_RECEIPT_SCHEMA:
+        return "blocked"
+    if receipt.get("session_id") != row["session_id"] or receipt.get("sequence") != int(row["sequence"]):
+        return "blocked"
+    if row["result_sha256"] is not None and receipt.get("result_sha256") != row["result_sha256"]:
+        return "blocked"
+    changed_files = _result_changed_files(row["result_json"])
+    receipt_changed = receipt.get("changed_files")
+    if not isinstance(receipt_changed, list) or not all(isinstance(path, str) for path in receipt_changed):
+        return "blocked"
+    if changed_files and receipt_changed != changed_files:
+        return "blocked"
+    source_commit = receipt.get("source_commit")
+    parent_commit = receipt.get("parent_commit")
+    if not _is_sha40(source_commit) or not _is_sha40(parent_commit):
+        return "blocked"
+    return "promoted"
+
+
+def _result_changed_files(raw: Any) -> list[str]:
+    try:
+        document = json.loads(str(raw))
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(document, dict):
+        return []
+    changed = document.get("changed_files")
+    return changed if isinstance(changed, list) and all(isinstance(path, str) for path in changed) else []
+
+
+def _is_sha40(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 40 and all(character in "0123456789abcdefABCDEF" for character in value)
 
 
 def _event_severity(event_type: str, payload: dict[str, Any], payload_warning: bool) -> str:
