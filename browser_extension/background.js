@@ -38,6 +38,7 @@ const AUTO_RECOVERABLE_READ_OPERATIONS = new Set([
 ]);
 const AUTO_RECOVERABLE_READ_ERROR_CODES = new Set([
   "invalid_payload",
+  "policy_denied",
   "dirty_source_checkout",
   "mirror_sync_failed",
   "result_too_large"

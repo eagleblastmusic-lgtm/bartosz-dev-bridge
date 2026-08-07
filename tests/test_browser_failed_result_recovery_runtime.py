@@ -227,8 +227,8 @@ def test_auto_read_failure_continues_when_continue_on_failure_is_enabled(tmp_pat
                       request_id: request.request_id,
                       status: "failed",
                       error: {
-                        code: "invalid_payload",
-                        message: "Native request failed: invalid_payload"
+                        code: "policy_denied",
+                        message: "Path is not allowed by local policy"
                       }
                     });
                   }
@@ -256,7 +256,7 @@ def test_auto_read_failure_continues_when_continue_on_failure_is_enabled(tmp_pat
               }
             };
 
-            context.considerAuto(action, 7).then((decision) => {
+            context.considerAuto(action, 7).then(async (decision) => {
               assert.equal(decision.executed, true, JSON.stringify(decision));
               assert.equal(decision.recoverableReadFailure, true, JSON.stringify(decision));
               assert.equal(decision.shouldContinue, true, JSON.stringify(decision));
@@ -266,6 +266,30 @@ def test_auto_read_failure_continues_when_continue_on_failure_is_enabled(tmp_pat
               assert.equal(
                 decision.response.error.message,
                 "inspect_bundle read_top_matches must be boolean or 0-12"
+              );
+
+              const policyAction = {
+                ...action,
+                payload: {
+                  searches: [],
+                  reads: [],
+                  read_top_matches: 1
+                },
+                automation: {
+                  ...action.automation,
+                  loop_id: "recover-policy-read"
+                }
+              };
+              const policyDecision = await context.considerAuto(policyAction, 8);
+              assert.equal(policyDecision.executed, true, JSON.stringify(policyDecision));
+              assert.equal(policyDecision.recoverableReadFailure, true, JSON.stringify(policyDecision));
+              assert.equal(policyDecision.shouldContinue, true, JSON.stringify(policyDecision));
+              assert.equal(policyDecision.stopReason, null, JSON.stringify(policyDecision));
+              assert.equal(policyDecision.state.status, "running", JSON.stringify(policyDecision));
+              assert.equal(policyDecision.response.error.code, "policy_denied");
+              assert.equal(
+                policyDecision.response.error.message,
+                "Path is not allowed by local policy"
               );
             }).catch((error) => { console.error(error); process.exitCode = 1; });
             '''
