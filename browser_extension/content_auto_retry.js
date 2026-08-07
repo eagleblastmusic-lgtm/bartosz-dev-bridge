@@ -237,11 +237,73 @@ async function bdbRunAutoPanel(action, button, output, compact) {
       return { retryForReplacement: true };
     }
     if (!auto.executed) {
+      if (auto.reason === "loop_not_running") {
+        const automation = action && action.automation;
+        const status = bdbAutoTerminalStatus(auto) || "terminal";
+        const handoffResponse = {
+          schema: "bdb-auto-loop-handoff-v1",
+          status: "failed",
+          error: {
+            code: "loop_not_running",
+            message: `AUTO loop is terminal (${status}); continue automatically with a new loop_id at iteration 1.`
+          },
+          previous_loop_id: automation && automation.loop_id,
+          rejected_iteration: automation && automation.iteration,
+          task_guidance: {
+            schema: "bdb-task-guidance-v1",
+            phase: "handoff",
+            next_operation: "start_new_loop"
+          }
+        };
+        let handoff = null;
+        for (let attempt = 0; attempt < BDB_AUTO_DELIVERY_RETRY_ATTEMPTS; attempt += 1) {
+          handoff = await autoSend(
+            handoffResponse,
+            automation && automation.loop_id,
+            automation && automation.iteration
+          );
+          if (
+            handoff &&
+            handoff.sent === true &&
+            handoff.confirmed === true &&
+            handoff.confirmedVia === "user_message"
+          ) {
+            break;
+          }
+          if (!handoff || !BDB_AUTO_DELIVERY_TRANSIENT_REASONS.has(handoff.reason)) {
+            break;
+          }
+          if (attempt + 1 >= BDB_AUTO_DELIVERY_RETRY_ATTEMPTS) {
+            break;
+          }
+          bdbSetAutoButtonText(
+            button,
+            `BDB AUTO: przekazuję zakończenie pętli do ChatGPT… (${attempt + 1}/${BDB_AUTO_DELIVERY_RETRY_ATTEMPTS})`
+          );
+          await bdbAutoDecisionSleep(BDB_AUTO_DELIVERY_RETRY_MS);
+        }
+        if (
+          handoff &&
+          handoff.sent === true &&
+          handoff.confirmed === true &&
+          handoff.confirmedVia === "user_message"
+        ) {
+          bdbSetAutoButtonText(button, "BDB AUTO: przekazano zakończenie pętli do ChatGPT");
+          keepDisabled = true;
+          return { retryForReplacement: false };
+        }
+        const handoffReason = handoff && handoff.reason ? handoff.reason : "send_not_confirmed";
+        bdbSetAutoButtonText(
+          button,
+          `BDB AUTO: automatyczne przekazanie pętli oczekuje na ponowienie (${handoffReason})`
+        );
+        return { retryForReplacement: false };
+      }
       const suffix = auto.retryExhausted
         ? `${bdbAutoStopLabel(auto.reason, auto)}, retry exhausted`
         : bdbAutoStopLabel(auto.reason, auto);
       bdbSetAutoButtonText(button, `BDB: Wykonaj (${suffix})`);
-      keepDisabled = ["iteration_already_processed", "loop_not_running"].includes(auto.reason);
+      keepDisabled = auto.reason === "iteration_already_processed";
       return { retryForReplacement: false };
     }
 

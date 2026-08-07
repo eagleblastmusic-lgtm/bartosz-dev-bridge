@@ -93,6 +93,60 @@ class AutoDecisionRetryRuntimeTests(unittest.TestCase):
                       assert.equal(confirmed.calls, 2);
                       assert.equal(confirmed.delivered, 1);
 
+                      let handoffSendCalls = 0;
+                      const terminalHandoff = await run([
+                        {
+                          executed: false,
+                          reason: "loop_not_running",
+                          state: { status: "done" }
+                        }
+                      ], () => {
+                        handoffSendCalls += 1;
+                        return {
+                          sent: true,
+                          confirmed: true,
+                          confirmedVia: "user_message"
+                        };
+                      });
+                      assert.equal(terminalHandoff.calls, 1);
+                      assert.equal(handoffSendCalls, 1);
+                      assert.equal(terminalHandoff.delivered, 0);
+                      assert.equal(
+                        terminalHandoff.button.textContent,
+                        "BDB AUTO: przekazano zakończenie pętli do ChatGPT"
+                      );
+                      assert.equal(terminalHandoff.button.disabled, true);
+
+                      let handoffRetryCalls = 0;
+                      const terminalHandoffRetry = await run([
+                        {
+                          executed: false,
+                          reason: "loop_not_running",
+                          state: { status: "done" }
+                        }
+                      ], () => {
+                        handoffRetryCalls += 1;
+                        if (handoffRetryCalls === 1) {
+                          return {
+                            sent: false,
+                            confirmed: false,
+                            confirmedVia: null,
+                            reason: "composer_missing"
+                          };
+                        }
+                        return {
+                          sent: true,
+                          confirmed: true,
+                          confirmedVia: "user_message"
+                        };
+                      });
+                      assert.equal(handoffRetryCalls, 2);
+                      assert.equal(terminalHandoffRetry.delivered, 0);
+                      assert.equal(
+                        terminalHandoffRetry.button.textContent,
+                        "BDB AUTO: przekazano zakończenie pętli do ChatGPT"
+                      );
+
                       let transientSendCalls = 0;
                       const transient = await run([completed], () => {
                         transientSendCalls += 1;
