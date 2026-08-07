@@ -438,7 +438,7 @@ function normalizeAutoSettings(raw) {
   const shadowMode = raw.autoShadowMode === true;
   const iterations = Number.isInteger(raw.autoMaxIterations) ? raw.autoMaxIterations : DEFAULT_AUTO_SETTINGS.autoMaxIterations;
   const minutes = Number.isInteger(raw.autoMaxMinutes) ? raw.autoMaxMinutes : DEFAULT_AUTO_SETTINGS.autoMaxMinutes;
-  if (iterations < 1 || iterations > 8 || minutes < 1 || minutes > 30) {
+  if (iterations < 1 || iterations > 30 || minutes < 1 || minutes > 30) {
     throw new Error("AUTO limits are outside the allowed range");
   }
   return {

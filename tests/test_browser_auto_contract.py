@@ -16,7 +16,7 @@ def test_auto_is_disabled_by_default_and_has_bounded_limits() -> None:
     assert "autoEnabled: false" in background
     assert "autoMaxIterations: 4" in background
     assert "autoMaxMinutes: 10" in background
-    assert "iterations < 1 || iterations > 8" in background
+    assert "iterations < 1 || iterations > 30" in background
     assert "minutes < 1 || minutes > 30" in background
     assert "chrome.storage.session" in background
     assert "non_sequential_iteration" in background
