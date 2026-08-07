@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from bdb_bridge import BridgeError, BridgeErrorCode, Journal
-from bdb_bridge.migrations import JOURNAL_TABLES, MIGRATIONS, Migration, apply_migrations
+from bdb_bridge.migrations import JOURNAL_TABLES, LATEST_SCHEMA_VERSION, MIGRATIONS, Migration, apply_migrations
 
 FIXED_NOW = "2026-07-15T12:00:00Z"
 V5_CHECKSUM = "9bfc62c82e71ebbf968f6a171eb0b320a4d2510dec158db13a8d940afd315670"
@@ -65,7 +65,7 @@ def test_v5_populated_upgrade(tmp_path: Path) -> None:
     assert journal._conn.execute("SELECT session_id FROM sessions").fetchone()[0] == "s1"
     assert journal._conn.execute("SELECT command_id FROM commands").fetchone()[0] == "c1"
     assert journal._conn.execute("SELECT COUNT(*) FROM service_instances").fetchone()[0] == 0
-    assert journal._conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 12
+    assert journal._conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == LATEST_SCHEMA_VERSION
     journal.close()
 
 

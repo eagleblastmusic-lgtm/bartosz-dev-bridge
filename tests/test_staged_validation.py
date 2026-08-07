@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from bdb_bridge.models import ProfileRunOutcome
 from bdb_bridge.staged_validation import (
     VALIDATION_PLAN_ID,
+    _migration_schema_literal_issue,
     _targeted_test_paths,
     run_durable_staged_pytest_profile,
     run_staged_pytest_profile,
@@ -54,6 +55,73 @@ def test_migration_changes_preflight_all_migration_contract_tests(tmp_path: Path
 
     assert selected_for_migration_module == expected
     assert selected_for_registry == expected
+
+
+def test_schema_literal_preflight_rejects_hardcoded_full_registry_range(tmp_path: Path) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_example_migrations.py").write_text(
+        "from bdb_bridge.migrations import MIGRATIONS\n"
+        "def test_registry():\n"
+        "    assert tuple(m.version for m in MIGRATIONS) == tuple(range(1, 13))\n",
+        encoding="utf-8",
+    )
+
+    issue = _migration_schema_literal_issue(tmp_path, ("bdb_bridge/migrations.py",))
+
+    assert issue is not None
+    assert "hardcoded full migration range" in issue
+
+
+def test_schema_literal_preflight_rejects_hardcoded_future_version(tmp_path: Path) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_example_migrations.py").write_text(
+        "def test_future(conn):\n"
+        "    conn.execute(\"INSERT INTO schema_migrations(version,name) VALUES(13,'future')\")\n",
+        encoding="utf-8",
+    )
+
+    issue = _migration_schema_literal_issue(tmp_path, ("bdb_bridge/migrations.py",))
+
+    assert issue is not None
+    assert "hardcoded future schema version" in issue
+
+
+def test_schema_literal_preflight_rejects_current_version_after_journal_open(tmp_path: Path) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_example_migrations.py").write_text(
+        "class Journal:\n"
+        "    @classmethod\n"
+        "    def open(cls, path):\n"
+        "        return cls()\n"
+        "def test_current():\n"
+        "    journal = Journal.open('journal.db')\n"
+        "    assert journal.execute(\"SELECT MAX(version) FROM schema_migrations\").fetchone()[0] == 12\n",
+        encoding="utf-8",
+    )
+
+    issue = _migration_schema_literal_issue(tmp_path, ("bdb_bridge/migrations.py",))
+
+    assert issue is not None
+    assert "hardcoded current schema version after Journal.open" in issue
+
+
+def test_schema_literal_preflight_allows_historical_subset_contracts(tmp_path: Path) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_example_migrations.py").write_text(
+        "from bdb_bridge.migrations import MIGRATIONS\n"
+        "def test_v9_history(conn):\n"
+        "    assert tuple(m.version for m in MIGRATIONS[:9]) == tuple(range(1, 10))\n"
+        "    assert conn.execute(\"SELECT MAX(version) FROM schema_migrations\").fetchone()[0] == 7\n",
+        encoding="utf-8",
+    )
+
+    issue = _migration_schema_literal_issue(tmp_path, ("bdb_bridge/migrations.py",))
+
+    assert issue is None
 
 
 def test_staged_profile_runs_targeted_before_one_full_pytest(

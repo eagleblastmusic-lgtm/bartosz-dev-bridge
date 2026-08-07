@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -55,6 +57,99 @@ def _targeted_test_paths(workspace_path: Path, changed_paths: Sequence[str]) -> 
                 add_glob(f"test_{package_label}*.py")
 
     return tuple(sorted(selected))
+
+
+def _migration_contract_changed(changed_paths: Sequence[str]) -> bool:
+    for relative in changed_paths:
+        changed_path = Path(relative)
+        if relative == "bdb_bridge/migrations.py" or (
+            relative.startswith("bdb_bridge/")
+            and changed_path.stem.endswith("_migration")
+        ):
+            return True
+    return False
+
+
+def _migration_schema_literal_issue(
+    workspace_path: Path,
+    changed_paths: Sequence[str],
+) -> str | None:
+    if not _migration_contract_changed(changed_paths):
+        return None
+
+    future_literal_pattern = re.compile(
+        r"VALUES\s*\(\s*\d+\s*,\s*['\"]future['\"]",
+        re.IGNORECASE,
+    )
+    full_registry_range_pattern = re.compile(
+        r"\bMIGRATIONS\b(?!\s*\[).*?\brange\s*\(\s*1\s*,\s*\d+\s*\)",
+        re.DOTALL,
+    )
+    latest_registry_literal_pattern = re.compile(
+        r"MIGRATIONS\s*\[\s*-\s*1\s*\]\s*\.version\s*==\s*\d+\b",
+        re.DOTALL,
+    )
+    max_schema_literal_pattern = re.compile(
+        r"SELECT MAX\(version\) FROM schema_migrations.*?\]\s*==\s*\d+\b",
+        re.DOTALL,
+    )
+
+    for relative in _targeted_test_paths(workspace_path, changed_paths):
+        test_path = Path(relative)
+        if "migration" not in test_path.name and test_path.name != "test_multi_file_patch_v10_contracts.py":
+            continue
+        candidate = workspace_path / test_path
+        try:
+            source = candidate.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(candidate))
+        except (OSError, UnicodeError, SyntaxError) as exc:
+            return f"{relative}: unable to inspect migration schema literals: {exc}"
+
+        future_match = future_literal_pattern.search(source)
+        if future_match is not None:
+            line = source.count("\n", 0, future_match.start()) + 1
+            return f"{relative}:{line}: hardcoded future schema version; use LATEST_SCHEMA_VERSION + 1"
+
+        for assertion in (node for node in ast.walk(tree) if isinstance(node, ast.Assert)):
+            segment = ast.get_source_segment(source, assertion) or ""
+            if full_registry_range_pattern.search(segment):
+                return (
+                    f"{relative}:{assertion.lineno}: hardcoded full migration range; "
+                    "derive it from LATEST_SCHEMA_VERSION"
+                )
+            if latest_registry_literal_pattern.search(segment):
+                return (
+                    f"{relative}:{assertion.lineno}: hardcoded latest migration version; "
+                    "use LATEST_SCHEMA_VERSION"
+                )
+
+        functions = (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        )
+        for function in functions:
+            has_journal_open = any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "open"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "Journal"
+                for node in ast.walk(function)
+            )
+            if not has_journal_open:
+                continue
+            for assertion in (
+                node for node in ast.walk(function) if isinstance(node, ast.Assert)
+            ):
+                segment = ast.get_source_segment(source, assertion) or ""
+                if max_schema_literal_pattern.search(segment):
+                    return (
+                        f"{relative}:{assertion.lineno}: hardcoded current schema version "
+                        "after Journal.open; use LATEST_SCHEMA_VERSION"
+                    )
+
+    return None
 
 
 def _run_pytest(
@@ -141,6 +236,16 @@ def run_staged_pytest_profile(
                 str(exc),
                 int((time.monotonic() - started) * 1000),
             )
+
+    schema_literal_issue = _migration_schema_literal_issue(workspace_path, changed_paths)
+    if schema_literal_issue is not None:
+        return ProfileRunOutcome(
+            "failed",
+            1,
+            "[structural] schema_literal_preflight failed\n",
+            schema_literal_issue,
+            int((time.monotonic() - started) * 1000),
+        )
 
     targeted = _targeted_test_paths(workspace_path, changed_paths)
     stdout_parts = ["[structural] success\n"]
@@ -250,6 +355,15 @@ def run_durable_staged_pytest_profile(
                     str(exc),
                     int((time.monotonic() - started) * 1000),
                 )
+        schema_literal_issue = _migration_schema_literal_issue(workspace_path, changed_paths)
+        if schema_literal_issue is not None:
+            return ProfileRunOutcome(
+                "failed",
+                1,
+                "[structural] schema_literal_preflight failed\n",
+                schema_literal_issue,
+                int((time.monotonic() - started) * 1000),
+            )
         return ProfileRunOutcome(
             "success",
             0,

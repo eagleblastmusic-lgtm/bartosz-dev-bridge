@@ -73,7 +73,7 @@ def test_v6_upgrade_preserves_data(tmp_path: Path, populated: bool) -> None:
     path = tmp_path / "v6.db"
     _make_v6(path, populated=populated)
     journal = Journal.open(path, now_fn=lambda: NOW)
-    assert journal._connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 12
+    assert journal._connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == LATEST_SCHEMA_VERSION
     if populated:
         assert journal.get_workspace("018f3f66-6cb3-4f66-9f2e-3d7647d1b707") is not None
     journal.close()

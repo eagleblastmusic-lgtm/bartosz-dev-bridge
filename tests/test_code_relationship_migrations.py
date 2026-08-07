@@ -48,7 +48,7 @@ def test_v7_upgrade_and_reopen(tmp_path: Path, populated: bool) -> None:
     path = tmp_path / "journal.db"
     _make_v7(path, populated=populated)
     journal = Journal.open(path, now_fn=lambda: NOW)
-    assert journal._connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 12
+    assert journal._connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == LATEST_SCHEMA_VERSION
     if populated:
         assert journal.get_repository_snapshot("repo", "a" * 40) is not None
     journal.close()
