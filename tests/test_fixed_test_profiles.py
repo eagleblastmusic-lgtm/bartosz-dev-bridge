@@ -12,6 +12,7 @@ from bdb_bridge.fixed_test_profiles import (
     DOTNET_PROFILE,
     PYTEST_PROFILE,
     SHOPIFY_THEME_CHECK_PROFILE,
+    STAGED_PYTEST_PROFILE,
     UNITTEST_PROFILE,
     fixed_profile_arguments,
     fixed_profile_command,
@@ -25,11 +26,13 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_fixed_profiles_have_exact_bounded_arguments() -> None:
     assert ALLOWED_FIXED_TEST_PROFILES == {
         PYTEST_PROFILE,
+        STAGED_PYTEST_PROFILE,
         UNITTEST_PROFILE,
         DOTNET_PROFILE,
         SHOPIFY_THEME_CHECK_PROFILE,
     }
     assert fixed_profile_arguments(PYTEST_PROFILE) == ("-m", "pytest", "-q")
+    assert fixed_profile_arguments(STAGED_PYTEST_PROFILE) == ("-m", "pytest", "-q")
     assert fixed_profile_arguments(UNITTEST_PROFILE) == (
         "-m",
         "unittest",

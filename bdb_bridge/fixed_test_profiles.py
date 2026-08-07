@@ -10,12 +10,14 @@ from .protocol import BridgeError
 
 
 PYTEST_PROFILE = "poc_pytest"
+STAGED_PYTEST_PROFILE = "bdb_pytest_staged_v1"
 UNITTEST_PROFILE = "poc_unittest"
 DOTNET_PROFILE = "poc_dotnet"
 SHOPIFY_THEME_CHECK_PROFILE = "shopify_theme_check"
 
 _FIXED_PROFILE_ARGUMENTS: dict[str, tuple[str, ...]] = {
     PYTEST_PROFILE: ("-m", "pytest", "-q"),
+    STAGED_PYTEST_PROFILE: ("-m", "pytest", "-q"),
     UNITTEST_PROFILE: (
         "-m",
         "unittest",
@@ -49,6 +51,7 @@ _FIXED_PROFILE_ARGUMENTS: dict[str, tuple[str, ...]] = {
 
 _FIXED_PROFILE_EXECUTABLES: dict[str, str] = {
     PYTEST_PROFILE: "python",
+    STAGED_PYTEST_PROFILE: "python",
     UNITTEST_PROFILE: "python",
     DOTNET_PROFILE: "dotnet",
     SHOPIFY_THEME_CHECK_PROFILE: "shopify",

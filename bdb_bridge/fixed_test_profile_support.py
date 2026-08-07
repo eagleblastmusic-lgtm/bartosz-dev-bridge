@@ -12,6 +12,7 @@ from .fixed_test_profiles import (
     DOTNET_PROFILE,
     PYTEST_PROFILE,
     SHOPIFY_THEME_CHECK_PROFILE,
+    STAGED_PYTEST_PROFILE,
     fixed_profile_arguments,
     fixed_profile_command,
 )
@@ -19,6 +20,7 @@ from .models import BridgeErrorCode, ProfileRunOutcome
 from .multi_file_patch_recovery_models import MultiFileCheckpointState
 from .protocol import BridgeError
 from .shopify_theme_check_profile import run_shopify_theme_check_profile
+from .staged_validation import run_staged_pytest_profile
 
 
 _DOTNET_ENVIRONMENT_KEYS = (
@@ -85,6 +87,18 @@ def install_fixed_test_profile_support(
         workspace: Any,
         profile_id: str = PYTEST_PROFILE,
     ) -> ProfileRunOutcome:
+        if profile_id == STAGED_PYTEST_PROFILE:
+            return run_staged_pytest_profile(
+                workspace_path=Path(workspace.path),
+                python_executable=self.config.python_executable,
+                timeout_seconds=self.config.test_timeout_seconds,
+                environment=_profile_environment(PYTEST_PROFILE),
+                changed_paths=tuple(
+                    workspace.controlled_changed_paths()
+                    if callable(getattr(workspace, "controlled_changed_paths", None))
+                    else ()
+                ),
+            )
         try:
             command = fixed_profile_command(
                 profile_id,
