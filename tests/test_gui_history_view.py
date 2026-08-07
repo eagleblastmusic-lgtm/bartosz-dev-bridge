@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from bdb_gui.history import GuiEvent, HistoryCursor, HistoryFilters, HistorySnapshot
+from bdb_gui.style import CONTROL_CENTER_STYLESHEET
 
 
 pytest.importorskip("PySide6")
@@ -60,6 +61,14 @@ def test_widget_starts_read_only_without_project() -> None:
     assert report["history_loaded"] is False
     assert widget.refresh_button.isEnabled() is False
     assert widget.load_more_button.isEnabled() is False
+    header = widget.table.horizontalHeader()
+    assert all(
+        header.sectionResizeMode(column).name == "Interactive"
+        for column in range(widget.table.columnCount())
+    )
+    assert "QHeaderView::section" in CONTROL_CENTER_STYLESHEET
+    assert "QScrollBar::handle:vertical" in CONTROL_CENTER_STYLESHEET
+    assert "QScrollBar::handle:horizontal" in CONTROL_CENTER_STYLESHEET
     widget.close()
 
 

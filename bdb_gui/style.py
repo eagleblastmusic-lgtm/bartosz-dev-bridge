@@ -25,11 +25,11 @@ QMainWindow, #AppShell, #Content { background: #f4f6f8; color: #172033; }
     background: #ffffff; border: 1px solid #dfe5ec; border-radius: 12px;
 }
 #StatusCardTitle, #RuntimeCardTitle, #ControlTitle, #OperationSectionTitle,
-#HistorySectionTitle { color: #64748b; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+#HistorySectionTitle { color: #475569; font-size: 11px; font-weight: 800; letter-spacing: 1px; }
 #StatusCardValue, #RuntimeCardValue { color: #111827; font-size: 19px; font-weight: 700; }
 #StatusCardDetail, #RuntimeCardDetail, #ControlDescription, #HeroText, #PlaceholderText,
 #OperationFeedback, #OperationFieldLabel, #HistoryFeedback, #SessionHistoryFeedback,
-#SessionHistoryNotice, #DiagnosticsHint, #DiagnosticsFeedback { color: #64748b; font-size: 11px; }
+#SessionHistoryNotice, #DiagnosticsHint, #DiagnosticsFeedback { color: #475569; font-size: 12px; }
 #HeroTitle, #PlaceholderTitle { color: #172033; font-size: 18px; font-weight: 700; }
 #OverallStatus, #OperationState, #DiagnosticsState {
     color: #1d4ed8; background: #eff6ff; border: 1px solid #bfdbfe;
@@ -40,7 +40,7 @@ QMainWindow, #AppShell, #Content { background: #f4f6f8; color: #172033; }
     background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
 }
 #OperationFlowStepTitle { color: #172033; font-size: 11px; font-weight: 700; min-width: 145px; }
-#OperationFlowStepDetail { color: #64748b; font-size: 10px; }
+#OperationFlowStepDetail { color: #475569; font-size: 11px; }
 #OperationFlowStepStatus {
     color: #475569; background: #e2e8f0; border-radius: 6px; padding: 4px 7px;
     font-size: 9px; font-weight: 800;
@@ -76,9 +76,31 @@ QPushButton:disabled { background: #e5e7eb; border-color: #d1d5db; color: #9ca3a
 #StatusLine { color: #64748b; font-size: 11px; }
 #HistoryTabs::pane { border: 0; }
 #HistoryTable, #SessionHistoryTable, #DiagnosticsTable {
-    background: #ffffff; border: 1px solid #dfe5ec; gridline-color: #e5e7eb;
+    background: #ffffff; color: #1e293b; border: 1px solid #cbd5e1; gridline-color: #d7dee8;
+    selection-background-color: #dbeafe; selection-color: #172033;
 }
+QHeaderView::section {
+    background: #eef2f7; color: #334155; border: 0; border-right: 1px solid #cbd5e1;
+    border-bottom: 1px solid #cbd5e1; padding: 7px 8px; font-weight: 700;
+}
+QHeaderView::section:hover { background: #e2e8f0; }
 #HistorySessionFilter, #HistoryCommandFilter, #HistoryLimitSpin, #SessionHistoryLimitSpin {
-    min-height: 32px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px;
+    min-height: 32px; background: #ffffff; color: #1e293b; border: 1px solid #94a3b8; border-radius: 6px;
 }
+QScrollBar:vertical {
+    background: #eef2f7; width: 14px; margin: 0; border: 1px solid #d7dee8; border-radius: 7px;
+}
+QScrollBar::handle:vertical {
+    background: #94a3b8; min-height: 30px; border-radius: 6px; margin: 2px;
+}
+QScrollBar::handle:vertical:hover { background: #64748b; }
+QScrollBar:horizontal {
+    background: #eef2f7; height: 14px; margin: 0; border: 1px solid #d7dee8; border-radius: 7px;
+}
+QScrollBar::handle:horizontal {
+    background: #94a3b8; min-width: 30px; border-radius: 6px; margin: 2px;
+}
+QScrollBar::handle:horizontal:hover { background: #64748b; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; border: 0; background: transparent; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 """

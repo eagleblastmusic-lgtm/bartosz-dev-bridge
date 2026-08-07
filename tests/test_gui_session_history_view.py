@@ -36,6 +36,11 @@ def test_session_history_view_shows_explicit_repair_chain_and_opens_only_validat
     assert opened == []
     assert widget.session_count == 2
     assert widget.repair_group_count == 1
+    header = widget.table.horizontalHeader()
+    assert all(
+        header.sectionResizeMode(column).name == "Interactive"
+        for column in range(widget.table.columnCount())
+    )
     assert widget.table.item(0, 7).text() == "NAPRAWA"
     assert widget.table.item(1, 7).text() == "START"
     assert "repair_group" in widget.details.toPlainText()

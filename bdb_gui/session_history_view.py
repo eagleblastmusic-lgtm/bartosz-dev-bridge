@@ -182,10 +182,12 @@ class SessionHistoryWidget(QWidget):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for column in range(2, 8):
-            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        header.setMinimumSectionSize(60)
+        header.setSectionsMovable(False)
+        for column in range(self.table.columnCount()):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+        for column, width in enumerate((170, 340, 90, 70, 105, 115, 105, 115)):
+            header.resizeSection(column, width)
         self.table.itemSelectionChanged.connect(self._render_selection)
         content.addWidget(self.table, 3)
 
