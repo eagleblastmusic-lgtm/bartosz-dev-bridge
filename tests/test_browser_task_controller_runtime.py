@@ -442,6 +442,11 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
 
               const visualDelivered = await context.markAutoResultDelivered("visual-loop", 1, 7);
               assert.equal(visualDelivered.marked, true);
+              const deliveredSnapshot = await context.bdbTaskSnapshot();
+              const deliveredVisualTask = deliveredSnapshot.tasks.find((task) => task.loop_id === "visual-loop");
+              assert.ok(deliveredVisualTask, JSON.stringify(deliveredSnapshot));
+              assert.equal(deliveredVisualTask.recovery_pending, false);
+              assert.equal(deliveredVisualTask.recovery_iteration, null);
               const feedbackDecision = await context.__consider({
                 ...readAction("visual-follow-up-after-user-feedback"),
                 automation: {
