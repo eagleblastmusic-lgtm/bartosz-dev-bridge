@@ -54,7 +54,7 @@ class AutoDecisionRetryRuntimeTests(unittest.TestCase):
                         },
                         maybeAuto: async () => {},
                         renderResult() {},
-                        autoSend: async () => sendResult
+                        autoSend: async () => typeof sendResult === "function" ? sendResult() : sendResult
                       };
                       context.globalThis = context;
                       vm.createContext(context);
@@ -92,6 +92,26 @@ class AutoDecisionRetryRuntimeTests(unittest.TestCase):
                       });
                       assert.equal(confirmed.calls, 2);
                       assert.equal(confirmed.delivered, 1);
+
+                      let transientSendCalls = 0;
+                      const transient = await run([completed], () => {
+                        transientSendCalls += 1;
+                        if (transientSendCalls === 1) {
+                          return {
+                            sent: false,
+                            confirmed: false,
+                            confirmedVia: null,
+                            reason: "composer_missing"
+                          };
+                        }
+                        return {
+                          sent: true,
+                          confirmed: true,
+                          confirmedVia: "user_message"
+                        };
+                      });
+                      assert.equal(transientSendCalls, 2);
+                      assert.equal(transient.delivered, 1);
 
                       const unconfirmed = await run([completed], {
                         sent: true,

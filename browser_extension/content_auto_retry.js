@@ -11,6 +11,14 @@ const BDB_AUTO_DECISION_RETRY_MS = 250;
 // 280 attempts x 750 ms = 210 seconds, leaving 30 seconds for abandoned-claim recovery.
 const BDB_AUTO_IN_PROGRESS_RETRY_ATTEMPTS = 280;
 const BDB_AUTO_IN_PROGRESS_RETRY_MS = 750;
+// AUTO result delivery may race a transiently unavailable or still-busy composer.
+// Retry only pre-insertion states so user text is never replaced or submitted.
+const BDB_AUTO_DELIVERY_RETRY_ATTEMPTS = 24;
+const BDB_AUTO_DELIVERY_RETRY_MS = 250;
+const BDB_AUTO_DELIVERY_TRANSIENT_REASONS = new Set([
+  "composer_missing",
+  "composer_not_empty"
+]);
 const BDB_AUTO_TRANSIENT_REASONS = new Set([
   "non_sequential_iteration",
   "iteration_in_progress"
@@ -250,7 +258,33 @@ async function bdbRunAutoPanel(action, button, output, compact) {
       bdbRecoverDetachedAutoPanel(action, "before_result_delivery");
       return { retryForReplacement: true };
     }
-    const sent = await autoSend(auto.response, auto.loopId, auto.iteration);
+    let sent = null;
+    for (let attempt = 0; attempt < BDB_AUTO_DELIVERY_RETRY_ATTEMPTS; attempt += 1) {
+      if (bdbAutoPanelDetached(button)) {
+        bdbRecoverDetachedAutoPanel(action, "while_waiting_for_result_delivery");
+        return { retryForReplacement: true };
+      }
+      sent = await autoSend(auto.response, auto.loopId, auto.iteration);
+      if (
+        sent.sent &&
+        sent.confirmed === true &&
+        sent.confirmedVia === "user_message"
+      ) {
+        break;
+      }
+      if (!BDB_AUTO_DELIVERY_TRANSIENT_REASONS.has(sent.reason)) {
+        break;
+      }
+      if (attempt + 1 >= BDB_AUTO_DELIVERY_RETRY_ATTEMPTS) {
+        sent = { ...sent, deliveryRetryExhausted: true };
+        break;
+      }
+      bdbSetAutoButtonText(
+        button,
+        `BDB AUTO: oczekiwanie na wolny edytor… (${attempt + 1}/${BDB_AUTO_DELIVERY_RETRY_ATTEMPTS})`
+      );
+      await bdbAutoDecisionSleep(BDB_AUTO_DELIVERY_RETRY_MS);
+    }
     if (sent.sent && sent.confirmed === true && sent.confirmedVia === "user_message") {
       bdbReportAutoDelivery(action, "composer_send_confirmed", sent.confirmedVia, "sent", "composer_send_successes");
       try {
