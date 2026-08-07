@@ -164,6 +164,7 @@ def test_auto_read_failure_continues_when_continue_on_failure_is_enabled(tmp_pat
               autoShadowMode: false
             };
             const session = {};
+            let inspectNativeCalls = 0;
 
             function area(store) {
               return {
@@ -221,6 +222,7 @@ def test_auto_read_failure_continues_when_continue_on_failure_is_enabled(tmp_pat
                       return;
                     }
                     assert.equal(request.action, "inspect_bundle");
+                    inspectNativeCalls += 1;
                     callback({
                       schema: "bdb-native-response-v1",
                       host_version: "0.4.7",
@@ -263,6 +265,8 @@ def test_auto_read_failure_continues_when_continue_on_failure_is_enabled(tmp_pat
               assert.equal(decision.stopReason, null, JSON.stringify(decision));
               assert.equal(decision.state.status, "running", JSON.stringify(decision));
               assert.equal(decision.response.error.code, "invalid_payload");
+              assert.equal(decision.response.client_preflight, true);
+              assert.equal(inspectNativeCalls, 0, "invalid inspect_bundle must stop before Native Host");
               assert.equal(
                 decision.response.error.message,
                 "inspect_bundle read_top_matches must be boolean or 0-12"
@@ -287,6 +291,8 @@ def test_auto_read_failure_continues_when_continue_on_failure_is_enabled(tmp_pat
               assert.equal(policyDecision.stopReason, null, JSON.stringify(policyDecision));
               assert.equal(policyDecision.state.status, "running", JSON.stringify(policyDecision));
               assert.equal(policyDecision.response.error.code, "policy_denied");
+              assert.equal(policyDecision.response.client_preflight, undefined);
+              assert.equal(inspectNativeCalls, 1, "valid inspect_bundle must reach Native Host");
               assert.equal(
                 policyDecision.response.error.message,
                 "Path is not allowed by local policy"

@@ -331,6 +331,7 @@ async function repositoryInspection(action) {
       host_version: currentExtensionVersion() || BDB_EXTENSION_VERSION,
       request_id: requestId("inspect-bundle-preflight"),
       status: "failed",
+      client_preflight: true,
       error: {
         code: "invalid_payload",
         message: preflightError
