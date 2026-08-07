@@ -13,6 +13,8 @@ const taskState = document.getElementById("task-state");
 const resumeTaskButton = document.getElementById("resume-task");
 const cancelTaskButton = document.getElementById("cancel-task");
 let latestTaskLoopId = null;
+let latestTaskConversationId = null;
+let latestTaskConversationTabId = null;
 
 function isAutoState(value) {
   return Boolean(
@@ -64,6 +66,8 @@ async function loadTasks() {
       : [];
     if (tasks.length === 0) {
       latestTaskLoopId = null;
+      latestTaskConversationId = null;
+      latestTaskConversationTabId = null;
       taskState.textContent = "Brak trwałych zadań.";
       resumeTaskButton.disabled = true;
       cancelTaskButton.disabled = true;
@@ -71,6 +75,10 @@ async function loadTasks() {
     }
     const task = tasks.find((candidate) => candidate.recovery_pending === true) || tasks[0];
     latestTaskLoopId = task.loop_id;
+    latestTaskConversationId = typeof task.conversation_id === "string" ? task.conversation_id : null;
+    latestTaskConversationTabId = Number.isInteger(task.conversation_tab_id)
+      ? task.conversation_tab_id
+      : null;
     taskState.textContent = [
       `Zadanie: ${task.title || task.loop_id}`,
       `Faza: ${task.phase || "nieznana"}`,
@@ -170,15 +178,29 @@ document.getElementById("test-auto").addEventListener("click", async () => {
 
 resumeTaskButton.addEventListener("click", async () => {
   if (latestTaskLoopId) {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const tabId = tab && Number.isInteger(tab.id) ? tab.id : null;
+    let tabId = latestTaskConversationTabId;
+    if (!Number.isInteger(tabId)) {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      tabId = tab && Number.isInteger(tab.id) ? tab.id : null;
+    }
     const result = await run({ type: "BDB_RESUME_TASK", loopId: latestTaskLoopId, tabId });
+    if (
+      result &&
+      result.ok === true &&
+      result.response &&
+      result.response.status === "conversation_mismatch"
+    ) {
+      output.textContent = "Wznowienie zablokowane: zadanie jest przypisane do innej rozmowy ChatGPT.";
+      await loadTasks();
+      return;
+    }
     if (result && result.ok === true && Number.isInteger(tabId)) {
       try {
         const contentResult = await chrome.tabs.sendMessage(tabId, {
           type: "BDB_CONTENT_RESUME_TASK",
           loopId: latestTaskLoopId,
-          expectedIteration: result.response && result.response.expected_iteration
+          expectedIteration: result.response && result.response.expected_iteration,
+          conversationId: latestTaskConversationId
         });
         if (contentResult && contentResult.retried === false) {
           output.textContent = `Wznowienie wyniku nieudane: ${contentResult.reason || "nieznany_powod"}`;

@@ -329,9 +329,28 @@ async function bdbRunAutoPanel(action, button, output, compact) {
   }
 }
 
-async function bdbRetryResumedTask(loopId, expectedIteration) {
+function bdbResumeConversationId() {
+  const match = location.pathname.match(/(?:^|\/)c\/([A-Za-z0-9-]{8,})(?:\/|$)/);
+  return match ? match[1] : null;
+}
+
+async function bdbRetryResumedTask(loopId, expectedIteration, expectedConversationId = null) {
   if (typeof loopId !== "string" || !Number.isInteger(expectedIteration)) {
     return { retried: false, reason: "invalid_resume_message" };
+  }
+  if (
+    expectedConversationId !== null &&
+    (
+      typeof expectedConversationId !== "string" ||
+      bdbResumeConversationId() !== expectedConversationId
+    )
+  ) {
+    return {
+      retried: false,
+      reason: "conversation_mismatch",
+      expected_conversation_id: expectedConversationId,
+      actual_conversation_id: bdbResumeConversationId()
+    };
   }
   const blocks = document.querySelectorAll("pre code, code");
   for (const block of blocks) {
@@ -367,7 +386,7 @@ if (
     if (!message || message.type !== "BDB_CONTENT_RESUME_TASK") {
       return undefined;
     }
-    bdbRetryResumedTask(message.loopId, message.expectedIteration)
+    bdbRetryResumedTask(message.loopId, message.expectedIteration, message.conversationId)
       .then(sendResponse)
       .catch((error) => sendResponse({
         retried: false,

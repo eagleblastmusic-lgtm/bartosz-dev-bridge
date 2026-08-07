@@ -347,7 +347,23 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
                 ...mutating,
                 automation: { mode: "auto", loop_id: "accepted-auto-loop", iteration: 1 }
               };
+              localStore.bdbConversationBindingsV1 = {
+                "conversation-accepted": {
+                  schema: "bdb-conversation-binding-v1",
+                  conversation_id: "conversation-accepted",
+                  tab_id: 7,
+                  repo_alias: acceptedAuto.repo_alias,
+                  updated_at: Date.now()
+                }
+              };
               const acceptedDecision = await context.__consider(acceptedAuto, 7);
+              const acceptedTaskSnapshot = await context.bdbTaskSnapshot();
+              const acceptedTask = acceptedTaskSnapshot.tasks.find(
+                (task) => task.loop_id === "accepted-auto-loop"
+              );
+              assert.ok(acceptedTask, JSON.stringify(acceptedTaskSnapshot));
+              assert.equal(acceptedTask.conversation_id, "conversation-accepted");
+              assert.equal(acceptedTask.conversation_tab_id, 7);
               assert.equal(acceptedDecision.executed, true, JSON.stringify(acceptedDecision));
               assert.equal(acceptedDecision.state.status, "done");
               assert.equal(acceptedDecision.shouldContinue, false);
@@ -365,6 +381,24 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               assert.equal(resumed.allowed_through_iteration, 9);
               assert.equal(sessionStore["bdbAuto:7:accepted-auto-loop"].lastIteration, 1);
               assert.equal(sessionStore["bdbAuto:7:accepted-auto-loop"].iterationCeiling, 9);
+
+              await context.bdbTaskUpsert("bound-resume-loop", {
+                status: "stopped",
+                last_iteration: 1,
+                expected_iteration: 2,
+                repo_alias: "synthetic",
+                conversation_id: "conversation-bound",
+                conversation_tab_id: 7
+              });
+              const mismatchedResume = await context.bdbResumeTask("bound-resume-loop", 8);
+              assert.equal(mismatchedResume.status, "conversation_mismatch");
+              assert.equal(mismatchedResume.expected_tab_id, 7);
+              assert.equal(mismatchedResume.conversation_id, "conversation-bound");
+              assert.equal(sessionStore["bdbAuto:8:bound-resume-loop"], undefined);
+
+              const boundResume = await context.bdbResumeTask("bound-resume-loop", 7);
+              assert.equal(boundResume.status, "running");
+              assert.equal(boundResume.expected_iteration, 2);
 
               await context.bdbTaskUpsert("monotonic-loop", {
                 status: "running",

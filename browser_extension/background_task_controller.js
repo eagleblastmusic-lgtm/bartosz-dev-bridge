@@ -12,6 +12,7 @@ const BDB_TASK_DIAGNOSTICS_KEY = "bdbAutoDiagnosticsV1";
 const BDB_TASK_METRICS_KEY = "bdbTaskMetricsV1";
 const BDB_TASK_CHECKPOINTS_KEY = "bdbTaskCheckpointsV1";
 const BDB_TASK_CACHE_KEY = "bdbActionCacheV1";
+const BDB_TASK_CONVERSATION_BINDINGS_KEY = "bdbConversationBindingsV1";
 const BDB_TASK_RELEASE_CHANNEL = "stable";
 const BDB_TASK_MAX_LEDGER = 64;
 const BDB_TASK_MAX_DIAGNOSTICS = 200;
@@ -197,6 +198,28 @@ function bdbTaskRisk(action) {
     return { level: "high", reason: `${risky.kind}_requires_assisted` };
   }
   return { level: "bounded_mutation", reason: null };
+}
+
+async function bdbTaskConversationBinding(repoAlias, tabId) {
+  if (typeof repoAlias !== "string" || !Number.isInteger(tabId) || tabId < 0) {
+    return null;
+  }
+  const stored = await chrome.storage.local.get(BDB_TASK_CONVERSATION_BINDINGS_KEY);
+  const raw = stored[BDB_TASK_CONVERSATION_BINDINGS_KEY];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const candidates = Object.values(raw)
+    .filter((binding) => (
+      binding &&
+      typeof binding === "object" &&
+      typeof binding.conversation_id === "string" &&
+      binding.repo_alias === repoAlias &&
+      binding.tab_id === tabId &&
+      Number.isFinite(binding.updated_at)
+    ))
+    .sort((left, right) => right.updated_at - left.updated_at);
+  return candidates.length > 0 ? bdbTaskClone(candidates[0]) : null;
 }
 
 async function bdbTaskLedger() {
@@ -1319,10 +1342,15 @@ considerAuto = async function considerAutoWithTaskController(action, tabId) {
         decision.executed === true &&
         bdbTaskNeedsVisualFeedback(decision.response)
       );
+      const taskConversationBinding = await bdbTaskConversationBinding(effective.repo_alias, tabId);
       const taskPatch = {
         title: bdbTaskSafeText(effective.task && effective.task.title, 120),
         phase: bdbTaskSafeText(effective.task && effective.task.phase, 64) || (BDB_TASK_READ_OPERATIONS.has(operation) ? "analysis" : "implementation"),
         repo_alias: effective.repo_alias,
+        ...(taskConversationBinding ? {
+          conversation_id: taskConversationBinding.conversation_id,
+          conversation_tab_id: taskConversationBinding.tab_id
+        } : {}),
         status: decision && decision.executed
           ? ((decision.state && decision.state.status) || (decision.shouldContinue ? "running" : "stopped"))
           : ((decision && decision.reason) || "stopped"),
@@ -1555,7 +1583,27 @@ async function bdbResumeTask(loopId, tabId) {
     throw new Error("Task is not present in the durable ledger");
   }
   if (!Number.isInteger(tabId) || tabId < 0) {
-    throw new Error("Task resume requires the active ChatGPT tab");
+    throw new Error("Task resume requires a concrete ChatGPT tab");
+  }
+  const conversationId = typeof task.conversation_id === "string" ? task.conversation_id : null;
+  const conversationTabId = Number.isInteger(task.conversation_tab_id)
+    ? task.conversation_tab_id
+    : null;
+  if (conversationId && conversationTabId !== null && tabId !== conversationTabId) {
+    await bdbTaskRecordDiagnostic({
+      event: "task_resume_conversation_mismatch",
+      loopId,
+      status: "conversation_mismatch",
+      tabId
+    });
+    return {
+      schema: "bdb-task-control-v1",
+      loop_id: loopId,
+      status: "conversation_mismatch",
+      expected_tab_id: conversationTabId,
+      conversation_id: conversationId,
+      instruction: "Wznów zadanie w rozmowie ChatGPT przypisanej do tego zadania."
+    };
   }
   const pendingCheckpoint = await bdbTaskLatestPendingCheckpoint(loopId);
   if (pendingCheckpoint) {
