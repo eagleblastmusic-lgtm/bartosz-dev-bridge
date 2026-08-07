@@ -10,6 +10,11 @@ from .models import BridgeErrorCode
 from .protocol import BridgeError
 
 
+# Bump this once when adding the newest supported Journal migration. Tests and
+# future-schema fixtures derive their boundary from this single contract value.
+LATEST_SCHEMA_VERSION = 12
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 

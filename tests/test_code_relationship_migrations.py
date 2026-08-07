@@ -7,14 +7,21 @@ import pytest
 
 from bdb_bridge import BridgeError, Journal
 from bdb_bridge.code_relationship_migration import MIGRATION_V8, MIGRATION_V8_STATEMENTS
-from bdb_bridge.migrations import JOURNAL_TABLES, MIGRATIONS, Migration, apply_migrations
+from bdb_bridge.migrations import (
+    JOURNAL_TABLES,
+    LATEST_SCHEMA_VERSION,
+    MIGRATIONS,
+    Migration,
+    apply_migrations,
+)
 
 NOW = "2026-07-16T01:30:00Z"
 V8_CHECKSUM = "cbc8c9c6b5907c1f4d82cc9f95b095d8cceff4ef4aaca454f883cd3bb2ad55b6"
 
 
 def test_v8_registry_checksum_and_tables() -> None:
-    assert [item.version for item in MIGRATIONS] == list(range(1, 13))
+    assert MIGRATIONS[-1].version == LATEST_SCHEMA_VERSION
+    assert [item.version for item in MIGRATIONS] == list(range(1, LATEST_SCHEMA_VERSION + 1))
     assert MIGRATIONS[7].name == "journal_v8_code_relationships"
     assert MIGRATION_V8.statements == MIGRATION_V8_STATEMENTS
     assert MIGRATION_V8.checksum() == V8_CHECKSUM
@@ -62,7 +69,10 @@ def test_v8_failure_rolls_back_and_future_version_is_rejected(tmp_path: Path) ->
     conn.close()
     future = tmp_path / "future.db"
     journal = Journal.open(future, now_fn=lambda: NOW)
-    journal._connection.execute("INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(13,'future','x',?)", (NOW,))
+    journal._connection.execute(
+        "INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(?,'future','x',?)",
+        (LATEST_SCHEMA_VERSION + 1, NOW),
+    )
     journal.close()
     with pytest.raises(BridgeError) as exc:
         Journal.open(future, now_fn=lambda: NOW)

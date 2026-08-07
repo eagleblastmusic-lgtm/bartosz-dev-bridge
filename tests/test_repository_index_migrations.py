@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 
 from bdb_bridge import BridgeError, Journal
-from bdb_bridge.migrations import JOURNAL_TABLES, MIGRATIONS, Migration, apply_migrations
+from bdb_bridge.migrations import (
+    JOURNAL_TABLES,
+    LATEST_SCHEMA_VERSION,
+    MIGRATIONS,
+    Migration,
+    apply_migrations,
+)
 from bdb_bridge.repository_index_migration import MIGRATION_V7, MIGRATION_V7_STATEMENTS
 
 NOW = "2026-07-16T00:00:00Z"
@@ -14,7 +20,8 @@ V7_CHECKSUM = "639b9d4eaa0e142fc958c9fa0a1a03a2421802a75ba963b84c3b835d28e30cf8"
 
 
 def test_v7_registry_and_literal_checksum() -> None:
-    assert [m.version for m in MIGRATIONS] == list(range(1, 13))
+    assert MIGRATIONS[-1].version == LATEST_SCHEMA_VERSION
+    assert [m.version for m in MIGRATIONS] == list(range(1, LATEST_SCHEMA_VERSION + 1))
     assert MIGRATIONS[6].name == "journal_v7_repository_index"
     assert MIGRATION_V7.checksum() == V7_CHECKSUM
     assert MIGRATION_V7.statements == MIGRATION_V7_STATEMENTS
@@ -97,8 +104,8 @@ def test_future_version_rejected_after_v8(tmp_path: Path) -> None:
     path = tmp_path / "future.db"
     journal = Journal.open(path, now_fn=lambda: NOW)
     journal._connection.execute(
-        "INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(13,'future','x',?)",
-        (NOW,),
+        "INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(?,'future','x',?)",
+        (LATEST_SCHEMA_VERSION + 1, NOW),
     )
     journal._connection.commit()
     journal.close()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bdb_bridge.migrations import MIGRATIONS
+from bdb_bridge.migrations import LATEST_SCHEMA_VERSION, MIGRATIONS
 from bdb_bridge.multi_file_patch_runtime_migration import (
     MIGRATION_V10,
     MIGRATION_V10_STATEMENTS,
@@ -11,7 +11,10 @@ V10_CHECKSUM = "6ba6a3338f95ff66679025a177c7a2d95adb75901c22f724d3bddf89ce5fd0fe
 
 
 def test_v10_registry_name_statements_and_literal_checksum() -> None:
-    assert tuple(migration.version for migration in MIGRATIONS) == tuple(range(1, 13))
+    assert MIGRATIONS[-1].version == LATEST_SCHEMA_VERSION
+    assert tuple(migration.version for migration in MIGRATIONS) == tuple(
+        range(1, LATEST_SCHEMA_VERSION + 1)
+    )
     assert MIGRATIONS[9] is MIGRATION_V10
     assert MIGRATION_V10.name == "journal_v10_multi_file_patch_runtime"
     assert MIGRATION_V10.statements == MIGRATION_V10_STATEMENTS
