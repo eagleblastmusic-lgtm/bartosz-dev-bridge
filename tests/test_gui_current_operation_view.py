@@ -113,6 +113,29 @@ def test_active_snapshot_renders_journal_projection_fields() -> None:
     widget.close()
 
 
+def test_current_operation_reserves_vertical_space_for_windows_dpi() -> None:
+    app = application()
+    widget = CurrentOperationWidget()
+    widget.set_project("alpha", "C:/workspaces/alpha")
+    widget.apply_snapshot(active_snapshot())
+    app.processEvents()
+
+    for row in widget._flow_rows.values():
+        assert row.minimumHeight() >= 48
+        assert row.status_label.minimumWidth() >= 96
+        assert row.status_label.minimumHeight() >= 28
+        assert row.title_label.minimumHeight() >= 28
+        assert row.detail_label.minimumHeight() >= 28
+
+    assert set(widget._field_labels) == set(widget._values)
+    for label in widget._field_labels.values():
+        assert label.minimumHeight() >= 28
+    for value in widget._values.values():
+        assert value.minimumHeight() >= 28
+
+    widget.close()
+
+
 def test_terminal_snapshot_remains_visible_as_completed() -> None:
     app = application()
     widget = CurrentOperationWidget()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -22,17 +22,24 @@ class FlowStepRow(QFrame):
         super().__init__()
         self.setObjectName("OperationFlowStep")
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 9, 12, 9)
+        layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(12)
+        self.setMinimumHeight(48)
 
         self.status_label = QLabel()
         self.status_label.setObjectName("OperationFlowStepStatus")
-        self.status_label.setFixedWidth(86)
+        self.status_label.setFixedWidth(96)
+        self.status_label.setMinimumHeight(28)
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.title_label = QLabel(step.label)
         self.title_label.setObjectName("OperationFlowStepTitle")
+        self.title_label.setMinimumHeight(28)
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.detail_label = QLabel()
         self.detail_label.setObjectName("OperationFlowStepDetail")
         self.detail_label.setWordWrap(True)
+        self.detail_label.setMinimumHeight(28)
+        self.detail_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         layout.addWidget(self.status_label)
         layout.addWidget(self.title_label)
@@ -235,7 +242,9 @@ class CurrentOperationWidget(QWidget):
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(10)
+        grid.setVerticalSpacing(8)
+        grid.setColumnMinimumWidth(0, 180)
+        grid.setColumnStretch(1, 1)
         fields = (
             ("command", "Command ID"),
             ("session", "Session ID"),
@@ -253,16 +262,23 @@ class CurrentOperationWidget(QWidget):
             ("updated", "Zaktualizowano"),
             ("generated", "Odczyt wygenerowano"),
         )
+        self._field_labels: dict[str, QLabel] = {}
         self._values: dict[str, QLabel] = {}
         for row, (key, label_text) in enumerate(fields):
             label = QLabel(label_text)
             label.setObjectName("OperationFieldLabel")
+            label.setMinimumHeight(28)
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             value = QLabel("—")
             value.setObjectName("OperationFieldValue")
             value.setTextInteractionFlags(value.textInteractionFlags())
             value.setWordWrap(True)
+            value.setMinimumHeight(28)
+            value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            grid.setRowMinimumHeight(row, 28)
             grid.addWidget(label, row, 0)
             grid.addWidget(value, row, 1)
+            self._field_labels[key] = label
             self._values[key] = value
         self.generated_value = self._values["generated"]
         panel_layout.addLayout(grid)
