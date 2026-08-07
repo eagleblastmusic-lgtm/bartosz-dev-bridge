@@ -399,6 +399,12 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               assert.equal(visualDecision.state.status, "needs_user");
               assert.equal(visualDecision.shouldContinue, false);
 
+              const pendingSnapshot = await context.bdbTaskSnapshot();
+              const pendingVisualTask = pendingSnapshot.tasks.find((task) => task.loop_id === "visual-loop");
+              assert.ok(pendingVisualTask, JSON.stringify(pendingSnapshot));
+              assert.equal(pendingVisualTask.recovery_pending, true);
+              assert.equal(pendingVisualTask.recovery_iteration, 1);
+
               const visualRecovery = await context.bdbResumeTask("visual-loop", 7);
               assert.equal(visualRecovery.status, "recovering_result");
               assert.equal(visualRecovery.task_status, "needs_user");

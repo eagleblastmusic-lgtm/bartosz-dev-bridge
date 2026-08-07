@@ -53,6 +53,9 @@ def test_popup_exposes_health_tasks_shadow_and_explicit_self_test() -> None:
     assert "window.confirm" in script
     assert 'type: "BDB_CONTENT_SELF_TEST"' in script
     assert 'type: "BDB_AUTO_DIAGNOSTICS"' in script
+    assert "task.recovery_pending === true" in script
+    assert "task.recovery_pending !== true" in script
+    assert "Wznowienie wyniku nieudane" in script
 
 
 def test_content_build_version_detects_stale_chatgpt_tab() -> None:

@@ -77,9 +77,13 @@ async function loadTasks() {
       `Status: ${task.status || "nieznany"}`,
       `Ostatnia iteracja: ${task.last_iteration || 0}`,
       `Następna iteracja: ${task.expected_iteration || ((task.last_iteration || 0) + 1)}`,
+      `Odzyskanie wyniku: ${task.recovery_pending === true ? `oczekuje (iteracja ${task.recovery_iteration})` : "brak"}`,
       `Złożoność: ${(task.complexity && task.complexity.class) || "nieznana"}`
     ].join("\n");
-    resumeTaskButton.disabled = task.status === "running";
+    resumeTaskButton.disabled = (
+      task.status === "cancelled" ||
+      (task.status === "running" && task.recovery_pending !== true)
+    );
     cancelTaskButton.disabled = task.status === "cancelled";
   } catch (error) {
     taskState.textContent = `Rejestr zadań niedostępny: ${String(error && error.message ? error.message : error)}`;
@@ -171,12 +175,16 @@ resumeTaskButton.addEventListener("click", async () => {
     const result = await run({ type: "BDB_RESUME_TASK", loopId: latestTaskLoopId, tabId });
     if (result && result.ok === true && Number.isInteger(tabId)) {
       try {
-        await chrome.tabs.sendMessage(tabId, {
+        const contentResult = await chrome.tabs.sendMessage(tabId, {
           type: "BDB_CONTENT_RESUME_TASK",
           loopId: latestTaskLoopId,
           expectedIteration: result.response && result.response.expected_iteration
         });
-      } catch (_error) {
+        if (contentResult && contentResult.retried === false) {
+          output.textContent = `Wznowienie wyniku nieudane: ${contentResult.reason || "nieznany_powod"}`;
+        }
+      } catch (error) {
+        output.textContent = `Wznowienie wyniku nieudane: ${String(error && error.message ? error.message : error)}`;
       }
     }
     await loadTasks();

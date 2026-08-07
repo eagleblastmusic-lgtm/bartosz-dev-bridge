@@ -1408,7 +1408,45 @@ markAutoResultDelivered = async function markAutoResultDeliveredWithTaskCheckpoi
 
 async function bdbTaskSnapshot() {
   const ledger = await bdbTaskLedger();
+  const stored = await chrome.storage.local.get(BDB_TASK_CHECKPOINTS_KEY);
+  const checkpoints = stored[BDB_TASK_CHECKPOINTS_KEY] && typeof stored[BDB_TASK_CHECKPOINTS_KEY] === "object"
+    ? stored[BDB_TASK_CHECKPOINTS_KEY]
+    : {};
+  const now = Date.now();
+  const pendingByLoop = new Map();
+  for (const checkpoint of Object.values(checkpoints)) {
+    if (
+      !checkpoint ||
+      checkpoint.delivered === true ||
+      !checkpoint.response ||
+      typeof checkpoint.loop_id !== "string" ||
+      !Number.isInteger(checkpoint.iteration) ||
+      !Number.isFinite(checkpoint.created_at) ||
+      now - checkpoint.created_at > BDB_TASK_CHECKPOINT_MS
+    ) {
+      continue;
+    }
+    const current = pendingByLoop.get(checkpoint.loop_id);
+    if (
+      !current ||
+      checkpoint.iteration > current.iteration ||
+      (
+        checkpoint.iteration === current.iteration &&
+        checkpoint.created_at > current.created_at
+      )
+    ) {
+      pendingByLoop.set(checkpoint.loop_id, checkpoint);
+    }
+  }
   const tasks = Object.values(ledger.tasks)
+    .map((task) => {
+      const pending = pendingByLoop.get(task.loop_id);
+      return {
+        ...task,
+        recovery_pending: Boolean(pending),
+        recovery_iteration: pending ? pending.iteration : null
+      };
+    })
     .sort((left, right) => (right.updated_at || 0) - (left.updated_at || 0));
   return {
     schema: "bdb-task-snapshot-v1",
