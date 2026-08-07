@@ -25,6 +25,37 @@ def test_targeted_tests_include_changed_test_and_matching_bridge_module(tmp_path
     assert selected == ("tests/test_alpha.py", "tests/test_other.py")
 
 
+def test_migration_changes_preflight_all_migration_contract_tests(tmp_path: Path) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    migration_contract_tests = (
+        "test_code_relationship_migrations.py",
+        "test_direct_checkout_workspace_migration.py",
+        "test_durable_ingestion_additional.py",
+        "test_journal_migrations.py",
+        "test_multi_file_patch_v10_contracts.py",
+        "test_repository_index_migrations.py",
+        "test_result_outbox_migrations.py",
+        "test_service_lifecycle_migrations.py",
+        "test_workspace_recovery_migrations.py",
+    )
+    for name in migration_contract_tests:
+        (tests / name).write_text("def test_contract():\n    assert True\n", encoding="utf-8")
+
+    expected = tuple(f"tests/{name}" for name in sorted(migration_contract_tests))
+    selected_for_migration_module = _targeted_test_paths(
+        tmp_path,
+        ("bdb_bridge/direct_checkout_workspace_migration.py",),
+    )
+    selected_for_registry = _targeted_test_paths(
+        tmp_path,
+        ("bdb_bridge/migrations.py",),
+    )
+
+    assert selected_for_migration_module == expected
+    assert selected_for_registry == expected
+
+
 def test_staged_profile_runs_targeted_before_one_full_pytest(
     tmp_path: Path,
     monkeypatch,

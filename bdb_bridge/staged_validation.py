@@ -30,8 +30,20 @@ def _targeted_test_paths(workspace_path: Path, changed_paths: Sequence[str]) -> 
             add_glob("test_browser*.py")
             continue
 
+        changed_path = Path(relative)
+        migration_contract_changed = (
+            relative == "bdb_bridge/migrations.py"
+            or (
+                relative.startswith("bdb_bridge/")
+                and changed_path.stem.endswith("_migration")
+            )
+        )
+        if migration_contract_changed:
+            add_glob("test_*migration*.py")
+            add_path(tests_root / "test_durable_ingestion_additional.py")
+            add_path(tests_root / "test_multi_file_patch_v10_contracts.py")
+
         if relative.endswith(".py"):
-            changed_path = Path(relative)
             stem = changed_path.stem
             add_glob(f"test_{stem}.py")
             add_glob(f"test_{stem}_*.py")
