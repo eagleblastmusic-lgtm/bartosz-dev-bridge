@@ -70,6 +70,24 @@ def _migration_contract_changed(changed_paths: Sequence[str]) -> bool:
     return False
 
 
+def _requires_full_pytest(changed_paths: Sequence[str]) -> bool:
+    """Use FAST validation only for a narrowly proven browser-extension scope.
+
+    Unknown, empty, core bridge, migration, configuration, and mixed scopes remain
+    conservative and require the full suite. This allowlist can be widened only
+    when an explicit impact mapping is covered by tests.
+    """
+    if not changed_paths:
+        return True
+    for relative in changed_paths:
+        if relative.startswith("browser_extension/"):
+            continue
+        if relative.startswith("tests/test_browser") and relative.endswith(".py"):
+            continue
+        return True
+    return False
+
+
 def _migration_schema_literal_issue(
     workspace_path: Path,
     changed_paths: Sequence[str],
@@ -277,6 +295,16 @@ def run_staged_pytest_profile(
     else:
         stdout_parts.append("[targeted] skipped=no_related_tests\n")
 
+    if not _requires_full_pytest(changed_paths):
+        stdout_parts.append("[full] skipped=adaptive_low_risk_browser_scope\n")
+        return ProfileRunOutcome(
+            "success",
+            0,
+            "".join(stdout_parts),
+            "".join(stderr_parts),
+            int((time.monotonic() - started) * 1000),
+        )
+
     full_outcome = _run_pytest(
         workspace_path=workspace_path,
         python_executable=python_executable,
@@ -441,6 +469,14 @@ def run_durable_staged_pytest_profile(
         )
 
     def full_runner() -> ProfileRunOutcome:
+        if not _requires_full_pytest(changed_paths):
+            return ProfileRunOutcome(
+                "success",
+                0,
+                "[full] skipped=adaptive_low_risk_browser_scope\n",
+                "",
+                0,
+            )
         outcome = _run_pytest(
             workspace_path=workspace_path,
             python_executable=python_executable,

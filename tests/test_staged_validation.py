@@ -8,6 +8,7 @@ from bdb_bridge.models import ProfileRunOutcome
 from bdb_bridge.staged_validation import (
     VALIDATION_PLAN_ID,
     _migration_schema_literal_issue,
+    _requires_full_pytest,
     _targeted_test_paths,
     run_durable_staged_pytest_profile,
     run_staged_pytest_profile,
@@ -156,6 +157,51 @@ def test_staged_profile_runs_targeted_before_one_full_pytest(
     assert calls[1] == [sys.executable, "-m", "pytest", "-q"]
     assert "[targeted] status=success" in outcome.stdout
     assert "[full] status=success" in outcome.stdout
+
+
+def test_adaptive_full_policy_is_conservative_except_browser_scope() -> None:
+    assert _requires_full_pytest(()) is True
+    assert _requires_full_pytest(("bdb_bridge/execution.py",)) is True
+    assert _requires_full_pytest(("bdb_bridge/migrations.py",)) is True
+    assert _requires_full_pytest(("browser_extension/content.js", "README.md")) is True
+    assert _requires_full_pytest(("browser_extension/content.js",)) is False
+    assert _requires_full_pytest(
+        ("browser_extension/content.js", "tests/test_browser_auto_loop_runtime.py")
+    ) is False
+
+
+def test_staged_profile_skips_full_for_low_risk_browser_scope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    extension = tmp_path / "browser_extension"
+    tests = tmp_path / "tests"
+    extension.mkdir()
+    tests.mkdir()
+    (extension / "content.js").write_text("const VALUE = 1;\n", encoding="utf-8")
+    (tests / "test_browser_runtime.py").write_text(
+        "def test_browser_runtime():\n    assert True\n",
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(list(command))
+        return SimpleNamespace(returncode=0, stdout="browser ok\n", stderr="")
+
+    monkeypatch.setattr("bdb_bridge.staged_validation.subprocess.run", fake_run)
+    outcome = run_staged_pytest_profile(
+        workspace_path=tmp_path,
+        python_executable=sys.executable,
+        timeout_seconds=30,
+        environment={},
+        changed_paths=("browser_extension/content.js",),
+    )
+
+    assert outcome.status == "success"
+    assert calls == [[sys.executable, "-m", "pytest", "-q", "tests/test_browser_runtime.py"]]
+    assert "[targeted] status=success" in outcome.stdout
+    assert "[full] skipped=adaptive_low_risk_browser_scope" in outcome.stdout
 
 
 def test_staged_profile_stops_before_full_pytest_when_targeted_tests_fail(
