@@ -15,6 +15,7 @@ INSPECT_BUNDLE_OPERATION = "inspect_bundle"
 _MAX_SEARCHES = 8
 _MAX_READS = 20
 _MAX_READ_LINES = 1_000
+_MAX_TOP_MATCHES = 12
 _DEFAULT_READ_LINES = 400
 _MAX_READ_BYTES = 64 * 1024
 _MAX_TOTAL_CONTENT_BYTES = 512 * 1024
@@ -73,9 +74,14 @@ def _top_match_limit(payload: dict[str, Any]) -> int:
         return 4
     if value is False:
         return 0
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 12:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= _MAX_TOP_MATCHES
+    ):
         raise BridgeError(
-            "invalid_payload", "inspect_bundle read_top_matches must be boolean or 0-12"
+            "invalid_payload",
+            f"inspect_bundle read_top_matches must be boolean or 0-{_MAX_TOP_MATCHES}",
         )
     return value
 

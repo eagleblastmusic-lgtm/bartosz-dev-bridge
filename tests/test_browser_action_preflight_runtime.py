@@ -7,9 +7,38 @@ from pathlib import Path
 
 import pytest
 
+from bdb_bridge.repository_inspection import (
+    _MAX_READ_LINES,
+    _MAX_READS,
+    _MAX_SEARCHES,
+    _MAX_TOP_MATCHES,
+)
+from bdb_bridge.repository_search import (
+    _MAX_EXTENSIONS,
+    _MAX_PATH_PREFIXES,
+    _MAX_QUERY_CHARS,
+    _MAX_RESULTS,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 EXTENSION = ROOT / "browser_extension"
+
+
+def test_inspect_preflight_limits_match_backend_contract() -> None:
+    content = (EXTENSION / "background.js").read_text(encoding="utf-8")
+    expected = {
+        "INSPECT_MAX_SEARCHES": _MAX_SEARCHES,
+        "INSPECT_MAX_READS": _MAX_READS,
+        "INSPECT_MAX_READ_LINES": _MAX_READ_LINES,
+        "INSPECT_MAX_TOP_MATCHES": _MAX_TOP_MATCHES,
+        "SEARCH_MAX_QUERY_CHARS": _MAX_QUERY_CHARS,
+        "SEARCH_MAX_RESULTS": _MAX_RESULTS,
+        "SEARCH_MAX_PATH_PREFIXES": _MAX_PATH_PREFIXES,
+        "SEARCH_MAX_EXTENSIONS": _MAX_EXTENSIONS,
+    }
+    for name, value in expected.items():
+        assert f"const {name} = {value};" in content
 
 
 def test_action_preflight_hash_scope_and_success_runtime(tmp_path: Path) -> None:

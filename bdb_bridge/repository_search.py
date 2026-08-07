@@ -17,6 +17,8 @@ from .protocol import BridgeError, path_matches, validate_repo_relative_path
 SEARCH_TEXT_OPERATION = "search_text"
 _MAX_QUERY_CHARS = 200
 _MAX_RESULTS = 20
+_MAX_PATH_PREFIXES = 8
+_MAX_EXTENSIONS = 12
 _DEFAULT_RESULTS = 12
 _MAX_FILE_BYTES = 1024 * 1024
 _MAX_TRACKED_FILES = 10_000
@@ -112,8 +114,15 @@ def _require_limit(payload: dict[str, Any]) -> int:
 
 def _prefixes(payload: dict[str, Any]) -> tuple[str, ...]:
     raw = payload.get("path_prefixes", [])
-    if not isinstance(raw, list) or len(raw) > 8 or not all(isinstance(item, str) for item in raw):
-        raise BridgeError("invalid_payload", "search_text payload.path_prefixes must be a list of at most 8 strings")
+    if (
+        not isinstance(raw, list)
+        or len(raw) > _MAX_PATH_PREFIXES
+        or not all(isinstance(item, str) for item in raw)
+    ):
+        raise BridgeError(
+            "invalid_payload",
+            f"search_text payload.path_prefixes must be a list of at most {_MAX_PATH_PREFIXES} strings",
+        )
     values: list[str] = []
     for item in raw:
         normalized = item.strip().replace("\\", "/").rstrip("/")
@@ -125,8 +134,15 @@ def _prefixes(payload: dict[str, Any]) -> tuple[str, ...]:
 
 def _extensions(payload: dict[str, Any]) -> tuple[str, ...]:
     raw = payload.get("extensions", [])
-    if not isinstance(raw, list) or len(raw) > 12 or not all(isinstance(item, str) for item in raw):
-        raise BridgeError("invalid_payload", "search_text payload.extensions must be a list of at most 12 strings")
+    if (
+        not isinstance(raw, list)
+        or len(raw) > _MAX_EXTENSIONS
+        or not all(isinstance(item, str) for item in raw)
+    ):
+        raise BridgeError(
+            "invalid_payload",
+            f"search_text payload.extensions must be a list of at most {_MAX_EXTENSIONS} strings",
+        )
     values: list[str] = []
     for item in raw:
         normalized = item.lower()

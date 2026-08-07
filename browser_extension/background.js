@@ -8,6 +8,14 @@ const SEARCH_TEXT_OPERATION = "search_text";
 const INSPECT_BUNDLE_OPERATION = "inspect_bundle";
 const BDB_EXTENSION_VERSION = "0.4.7";
 const MAX_SERIALIZED_BYTES = 1024 * 1024;
+const INSPECT_MAX_SEARCHES = 8;
+const INSPECT_MAX_READS = 20;
+const INSPECT_MAX_READ_LINES = 1000;
+const INSPECT_MAX_TOP_MATCHES = 12;
+const SEARCH_MAX_QUERY_CHARS = 200;
+const SEARCH_MAX_RESULTS = 20;
+const SEARCH_MAX_PATH_PREFIXES = 8;
+const SEARCH_MAX_EXTENSIONS = 12;
 const DEFAULT_WAIT_SECONDS = 30;
 const PROMOTION_WAIT_ATTEMPTS = 300;
 const PROMOTION_WAIT_MILLISECONDS = 100;
@@ -278,8 +286,8 @@ function inspectBundlePreflight(action) {
   }
 
   const searches = payload.searches === undefined ? [] : payload.searches;
-  if (!Array.isArray(searches) || searches.length > 8) {
-    return "inspect_bundle searches must contain at most 8 items";
+  if (!Array.isArray(searches) || searches.length > INSPECT_MAX_SEARCHES) {
+    return `inspect_bundle searches must contain at most ${INSPECT_MAX_SEARCHES} items`;
   }
   for (const item of searches) {
     if (!item || typeof item !== "object" || Array.isArray(item)) {
@@ -289,29 +297,29 @@ function inspectBundlePreflight(action) {
     if (
       typeof query !== "string" ||
       !query.trim() ||
-      query.length > 200 ||
+      query.length > SEARCH_MAX_QUERY_CHARS ||
       query.includes("\0") ||
       query.includes("\r") ||
       query.includes("\n")
     ) {
-      return "search_text payload.query must contain 1-200 characters on one line";
+      return `search_text payload.query must contain 1-${SEARCH_MAX_QUERY_CHARS} characters on one line`;
     }
     if (item.case_sensitive !== undefined && typeof item.case_sensitive !== "boolean") {
       return "search_text payload.case_sensitive must be boolean";
     }
     if (
       item.max_results !== undefined &&
-      (!Number.isInteger(item.max_results) || item.max_results < 1 || item.max_results > 20)
+      (!Number.isInteger(item.max_results) || item.max_results < 1 || item.max_results > SEARCH_MAX_RESULTS)
     ) {
-      return "search_text payload.max_results must be between 1 and 20";
+      return `search_text payload.max_results must be between 1 and ${SEARCH_MAX_RESULTS}`;
     }
     const pathPrefixes = item.path_prefixes === undefined ? [] : item.path_prefixes;
     if (
       !Array.isArray(pathPrefixes) ||
-      pathPrefixes.length > 8 ||
+      pathPrefixes.length > SEARCH_MAX_PATH_PREFIXES ||
       !pathPrefixes.every((value) => typeof value === "string")
     ) {
-      return "search_text payload.path_prefixes must be a list of at most 8 strings";
+      return `search_text payload.path_prefixes must be a list of at most ${SEARCH_MAX_PATH_PREFIXES} strings`;
     }
     if (
       pathPrefixes.some(
@@ -323,10 +331,10 @@ function inspectBundlePreflight(action) {
     const extensions = item.extensions === undefined ? [] : item.extensions;
     if (
       !Array.isArray(extensions) ||
-      extensions.length > 12 ||
+      extensions.length > SEARCH_MAX_EXTENSIONS ||
       !extensions.every((value) => typeof value === "string")
     ) {
-      return "search_text payload.extensions must be a list of at most 12 strings";
+      return `search_text payload.extensions must be a list of at most ${SEARCH_MAX_EXTENSIONS} strings`;
     }
     for (const extension of extensions) {
       if (!/^\.[a-z0-9]{1,12}$/i.test(extension)) {
@@ -336,8 +344,8 @@ function inspectBundlePreflight(action) {
   }
 
   const reads = payload.reads === undefined ? [] : payload.reads;
-  if (!Array.isArray(reads) || reads.length > 20) {
-    return "inspect_bundle reads must contain at most 20 items";
+  if (!Array.isArray(reads) || reads.length > INSPECT_MAX_READS) {
+    return `inspect_bundle reads must contain at most ${INSPECT_MAX_READS} items`;
   }
   for (const item of reads) {
     if (!item || typeof item !== "object" || Array.isArray(item)) {
@@ -355,9 +363,9 @@ function inspectBundlePreflight(action) {
       !Number.isInteger(end) ||
       start < 1 ||
       end < start ||
-      end - start + 1 > 1000
+      end - start + 1 > INSPECT_MAX_READ_LINES
     ) {
-      return "inspect_bundle read ranges may contain at most 1000 lines";
+      return `inspect_bundle read ranges may contain at most ${INSPECT_MAX_READ_LINES} lines`;
     }
   }
 
@@ -374,9 +382,13 @@ function inspectBundlePreflight(action) {
   if (
     readTopMatches !== undefined &&
     typeof readTopMatches !== "boolean" &&
-    !(Number.isInteger(readTopMatches) && readTopMatches >= 0 && readTopMatches <= 12)
+    !(
+      Number.isInteger(readTopMatches) &&
+      readTopMatches >= 0 &&
+      readTopMatches <= INSPECT_MAX_TOP_MATCHES
+    )
   ) {
-    return "inspect_bundle read_top_matches must be boolean or 0-12";
+    return `inspect_bundle read_top_matches must be boolean or 0-${INSPECT_MAX_TOP_MATCHES}`;
   }
   return null;
 }
