@@ -39,6 +39,143 @@ def test_executing_operation_marks_editing_active_without_inventing_result() -> 
     assert "executing" in flow.summary
 
 
+def test_canonical_running_operation_is_shown_as_executing() -> None:
+    flow = build_operation_flow(
+        operation(
+            status={
+                "schema": "bdb-operation-status-v1",
+                "execution": "running",
+                "result": "none",
+                "promotion": "pending",
+                "delivery": "pending",
+                "session": "active",
+                "terminal": False,
+            }
+        )
+    )
+
+    assert flow.overall_status == "active"
+    assert flow.status_for("editing") == "active"
+    assert flow.status_for("testing") == "pending"
+    assert flow.status_for("promotion") == "pending"
+    assert "wykonywanie" in flow.summary.lower()
+
+
+def test_canonical_testing_state_is_shown_as_testing() -> None:
+    flow = build_operation_flow(
+        operation(
+            state="effect_recorded",
+            status={
+                "schema": "bdb-operation-status-v1",
+                "execution": "running",
+                "result": "none",
+                "promotion": "pending",
+                "delivery": "pending",
+                "session": "active",
+                "terminal": False,
+            },
+        )
+    )
+
+    assert flow.overall_status == "active"
+    assert flow.status_for("editing") == "success"
+    assert flow.status_for("testing") == "active"
+    assert "testowanie" in flow.summary.lower()
+
+
+def test_canonical_promotion_pending_is_shown_as_promoting() -> None:
+    flow = build_operation_flow(
+        operation(
+            state="result_published",
+            result_status="success",
+            status={
+                "schema": "bdb-operation-status-v1",
+                "execution": "succeeded",
+                "result": "published",
+                "promotion": "pending",
+                "delivery": "delivered",
+                "session": "active",
+                "terminal": False,
+            },
+        )
+    )
+
+    assert flow.overall_status == "active"
+    assert flow.status_for("testing") == "success"
+    assert flow.status_for("result") == "success"
+    assert flow.status_for("promotion") == "active"
+    assert "promowanie" in flow.summary.lower()
+
+
+def test_canonical_promotion_blocked_is_a_visible_failure() -> None:
+    flow = build_operation_flow(
+        operation(
+            state="result_published",
+            result_status="success",
+            status={
+                "schema": "bdb-operation-status-v1",
+                "execution": "succeeded",
+                "result": "published",
+                "promotion": "blocked",
+                "delivery": "delivered",
+                "session": "active",
+                "terminal": True,
+            },
+        )
+    )
+
+    assert flow.overall_status == "failed"
+    assert flow.status_for("promotion") == "failed"
+    assert flow.status_for("completion") == "failed"
+    assert "zablokowana" in flow.summary.lower()
+
+
+def test_canonical_promoted_operation_is_shown_as_completed() -> None:
+    flow = build_operation_flow(
+        operation(
+            state="acknowledged",
+            result_status="success",
+            status={
+                "schema": "bdb-operation-status-v1",
+                "execution": "succeeded",
+                "result": "published",
+                "promotion": "promoted",
+                "delivery": "delivered",
+                "session": "active",
+                "terminal": True,
+            },
+        )
+    )
+
+    assert flow.overall_status == "success"
+    assert flow.status_for("promotion") == "success"
+    assert flow.status_for("completion") == "success"
+    assert "zakończona" in flow.summary.lower()
+
+
+def test_canonical_execution_failure_is_shown_as_error() -> None:
+    flow = build_operation_flow(
+        operation(
+            state="policy_denied",
+            error_code="policy_denied",
+            status={
+                "schema": "bdb-operation-status-v1",
+                "execution": "failed",
+                "result": "none",
+                "promotion": "pending",
+                "delivery": "pending",
+                "session": "active",
+                "terminal": True,
+            },
+        )
+    )
+
+    assert flow.overall_status == "failed"
+    assert flow.status_for("editing") == "failed"
+    assert flow.status_for("completion") == "failed"
+    assert "błąd" in flow.summary.lower()
+
+
 def test_successful_published_result_marks_flow_complete() -> None:
     flow = build_operation_flow(
         operation(

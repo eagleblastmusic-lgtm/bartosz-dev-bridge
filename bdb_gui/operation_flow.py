@@ -37,6 +37,9 @@ def build_operation_flow(operation: OperationDetails) -> OperationFlow:
     that is not present in the supplied projection.
     """
 
+    if operation.status is not None:
+        return _build_canonical_operation_flow(operation)
+
     state = operation.state.strip().lower()
     result = (operation.result_status or "").strip().lower()
     has_error = bool(operation.error_code) or result in {"failed", "error"}
@@ -84,6 +87,126 @@ def build_operation_flow(operation: OperationDetails) -> OperationFlow:
 
     overall = _overall_status(state, result, has_error)
     return OperationFlow(overall, _summary(overall, operation), steps)
+
+
+def _build_canonical_operation_flow(operation: OperationDetails) -> OperationFlow:
+    status = operation.status or {}
+    execution = str(status.get("execution", "")).strip().lower()
+    result = str(status.get("result", "")).strip().lower()
+    promotion = str(status.get("promotion", "")).strip().lower()
+    delivery = str(status.get("delivery", "")).strip().lower()
+    session = str(status.get("session", "")).strip().lower()
+    terminal = status.get("terminal") is True
+    state = operation.state.strip().lower()
+
+    failed = execution == "failed"
+    promotion_blocked = promotion == "blocked"
+
+    if failed:
+        overall: FlowStatus = "failed"
+        summary = f"Błąd operacji — {operation.error_code or operation.state}."
+    elif promotion_blocked:
+        overall = "failed"
+        summary = "Promocja zmian jest zablokowana. Wynik istnieje, ale nie ma prawidłowego potwierdzenia promocji."
+    elif terminal:
+        overall = "success"
+        summary = "Operacja zakończona. Wynik został dostarczony i promocja jest zakończona."
+    elif promotion == "pending" and result == "published":
+        overall = "active"
+        summary = "Promowanie zmian — wykonanie i testy są zakończone, oczekujemy na potwierdzenie promocji."
+    elif execution == "running" and state in {"effect_recorded", "result_staged"}:
+        overall = "active"
+        summary = "Trwa testowanie i utrwalanie wyniku operacji."
+    elif execution == "running":
+        overall = "active"
+        summary = "Trwa wykonywanie operacji."
+    elif execution == "queued":
+        overall = "active"
+        summary = "Operacja oczekuje na rozpoczęcie wykonania."
+    else:
+        overall = "active"
+        summary = "Operacja oczekuje na zakończenie pozostałych etapów."
+
+    if failed:
+        editing: FlowStatus = "failed"
+    elif execution == "running" and state == "executing":
+        editing = "active"
+    elif execution == "succeeded" or state in {"effect_recorded", "result_staged", "result_published", "acknowledged"}:
+        editing = "success"
+    else:
+        editing = "pending"
+
+    if failed:
+        testing: FlowStatus = "failed" if result != "published" else "success"
+    elif result in {"staged", "published"} or execution == "succeeded":
+        testing = "success"
+    elif execution == "running" and state in {"effect_recorded", "result_staged"}:
+        testing = "active"
+    else:
+        testing = "pending"
+
+    if failed:
+        result_step: FlowStatus = "failed"
+    elif result == "published":
+        result_step = "success"
+    elif result == "staged":
+        result_step = "active"
+    else:
+        result_step = "pending"
+
+    if promotion_blocked:
+        promotion_step: FlowStatus = "failed"
+    elif promotion in {"promoted", "not_required"}:
+        promotion_step = "success"
+    elif promotion == "pending" and result == "published":
+        promotion_step = "active"
+    else:
+        promotion_step = "pending"
+
+    if failed or promotion_blocked:
+        completion: FlowStatus = "failed"
+    elif terminal:
+        completion = "success"
+    elif session == "completing":
+        completion = "active"
+    else:
+        completion = "pending"
+
+    steps = (
+        OperationFlowStep("accepted", "Zadanie przyjęte", "success", operation.command_id),
+        OperationFlowStep(
+            "workspace",
+            "Izolowany workspace",
+            "active" if execution == "queued" else "success",
+            _workspace_detail(operation),
+        ),
+        OperationFlowStep("editing", "Wykonywanie zmiany", editing, operation.state),
+        OperationFlowStep(
+            "testing",
+            "Testy",
+            testing,
+            f"execution={execution}, result={result}",
+        ),
+        OperationFlowStep(
+            "result",
+            "Wynik",
+            result_step,
+            operation.result_status or result or "brak wyniku",
+        ),
+        OperationFlowStep(
+            "promotion",
+            "Promocja",
+            promotion_step,
+            f"promotion={promotion}, delivery={delivery}",
+        ),
+        OperationFlowStep(
+            "completion",
+            "Zakończenie",
+            completion,
+            f"session={session}, terminal={str(terminal).lower()}",
+        ),
+    )
+    return OperationFlow(overall, summary, steps)
 
 
 def empty_operation_flow() -> OperationFlow:

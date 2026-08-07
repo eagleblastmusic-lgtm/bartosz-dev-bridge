@@ -59,6 +59,15 @@ def active_response() -> OperatorResponse:
                 "workspace_state_hash": "sha256:" + "a" * 64,
                 "result_status": None,
                 "error_code": None,
+                "status": {
+                    "schema": "bdb-operation-status-v1",
+                    "execution": "running",
+                    "result": "none",
+                    "promotion": "pending",
+                    "delivery": "pending",
+                    "session": "active",
+                    "terminal": False,
+                },
                 "created_at": "2026-07-18T21:00:30Z",
                 "updated_at": "2026-07-18T21:00:45Z",
             },
@@ -99,10 +108,20 @@ def test_active_projection_preserves_operation_fields(tmp_path: Path) -> None:
     assert operation.profile_id == "poc_pytest"
     assert operation.workspace_revision == 2
     assert operation.result_status is None
+    assert operation.status == {
+        "schema": "bdb-operation-status-v1",
+        "execution": "running",
+        "result": "none",
+        "promotion": "pending",
+        "delivery": "pending",
+        "session": "active",
+        "terminal": False,
+    }
     document = snapshot.to_dict()
     assert document["read_only"] is True
     assert document["mutation_operations_invoked"] == 0
     assert document["operation"]["schema"] == GUI_OPERATION_DETAILS_SCHEMA
+    assert document["operation"]["status"]["execution"] == "running"
 
 
 def test_operator_error_is_preserved(tmp_path: Path) -> None:

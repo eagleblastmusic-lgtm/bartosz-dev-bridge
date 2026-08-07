@@ -33,6 +33,7 @@ class OperationDetails:
     error_code: str | None
     created_at: str | None
     updated_at: str | None
+    status: dict[str, Any] | None = None
     schema: str = GUI_OPERATION_DETAILS_SCHEMA
 
     @classmethod
@@ -52,6 +53,7 @@ class OperationDetails:
                 document.get("workspace_state_hash"), "workspace_state_hash"
             ),
             result_status=_optional_string(document.get("result_status"), "result_status"),
+            status=dict(document["status"]) if isinstance(document.get("status"), dict) else None,
             error_code=_optional_string(document.get("error_code"), "error_code"),
             created_at=_optional_string(document.get("created_at"), "created_at"),
             updated_at=_optional_string(document.get("updated_at"), "updated_at"),
@@ -75,6 +77,7 @@ class OperationDetails:
             "error_code": self.error_code,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "status": dict(self.status) if self.status is not None else None,
         }
 
 

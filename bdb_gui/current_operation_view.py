@@ -105,7 +105,7 @@ class CurrentOperationWidget(QWidget):
             self._apply_flow(empty_operation_flow())
             return
 
-        if not snapshot.active or snapshot.operation is None:
+        if snapshot.operation is None:
             self.state_label.setText("BRAK AKTYWNEJ OPERACJI")
             self.feedback_label.setText(
                 "Journal nie zawiera aktywnej komendy. Odczyt był tylko do odczytu."
