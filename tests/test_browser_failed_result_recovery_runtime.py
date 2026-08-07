@@ -272,6 +272,30 @@ def test_auto_read_failure_continues_when_continue_on_failure_is_enabled(tmp_pat
                 "inspect_bundle read_top_matches must be boolean or 0-12"
               );
 
+              const invalidSearchAction = {
+                ...action,
+                payload: {
+                  searches: [{ query: "bad\nquery" }],
+                  reads: [],
+                  read_top_matches: 1
+                },
+                automation: {
+                  ...action.automation,
+                  loop_id: "recover-invalid-search"
+                }
+              };
+              const invalidSearchDecision = await context.considerAuto(invalidSearchAction, 8);
+              assert.equal(invalidSearchDecision.executed, true, JSON.stringify(invalidSearchDecision));
+              assert.equal(invalidSearchDecision.recoverableReadFailure, true, JSON.stringify(invalidSearchDecision));
+              assert.equal(invalidSearchDecision.shouldContinue, true, JSON.stringify(invalidSearchDecision));
+              assert.equal(invalidSearchDecision.response.error.code, "invalid_payload");
+              assert.equal(invalidSearchDecision.response.client_preflight, true);
+              assert.equal(inspectNativeCalls, 0, "invalid inspect_bundle search must stop before Native Host");
+              assert.equal(
+                invalidSearchDecision.response.error.message,
+                "search_text payload.query must contain 1-200 characters on one line"
+              );
+
               const policyAction = {
                 ...action,
                 payload: {
@@ -284,7 +308,7 @@ def test_auto_read_failure_continues_when_continue_on_failure_is_enabled(tmp_pat
                   loop_id: "recover-policy-read"
                 }
               };
-              const policyDecision = await context.considerAuto(policyAction, 8);
+              const policyDecision = await context.considerAuto(policyAction, 9);
               assert.equal(policyDecision.executed, true, JSON.stringify(policyDecision));
               assert.equal(policyDecision.recoverableReadFailure, true, JSON.stringify(policyDecision));
               assert.equal(policyDecision.shouldContinue, true, JSON.stringify(policyDecision));

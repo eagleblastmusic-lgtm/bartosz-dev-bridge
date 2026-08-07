@@ -281,8 +281,58 @@ function inspectBundlePreflight(action) {
   if (!Array.isArray(searches) || searches.length > 8) {
     return "inspect_bundle searches must contain at most 8 items";
   }
-  if (!searches.every((item) => item && typeof item === "object" && !Array.isArray(item))) {
-    return "inspect_bundle search items must be objects";
+  for (const item of searches) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return "inspect_bundle search items must be objects";
+    }
+    const query = item.query;
+    if (
+      typeof query !== "string" ||
+      !query.trim() ||
+      query.length > 200 ||
+      query.includes("\0") ||
+      query.includes("\r") ||
+      query.includes("\n")
+    ) {
+      return "search_text payload.query must contain 1-200 characters on one line";
+    }
+    if (item.case_sensitive !== undefined && typeof item.case_sensitive !== "boolean") {
+      return "search_text payload.case_sensitive must be boolean";
+    }
+    if (
+      item.max_results !== undefined &&
+      (!Number.isInteger(item.max_results) || item.max_results < 1 || item.max_results > 20)
+    ) {
+      return "search_text payload.max_results must be between 1 and 20";
+    }
+    const pathPrefixes = item.path_prefixes === undefined ? [] : item.path_prefixes;
+    if (
+      !Array.isArray(pathPrefixes) ||
+      pathPrefixes.length > 8 ||
+      !pathPrefixes.every((value) => typeof value === "string")
+    ) {
+      return "search_text payload.path_prefixes must be a list of at most 8 strings";
+    }
+    if (
+      pathPrefixes.some(
+        (value) => !value.trim().replace(/\\/g, "/").replace(/\/+$/, "")
+      )
+    ) {
+      return "search_text path prefixes must not be empty";
+    }
+    const extensions = item.extensions === undefined ? [] : item.extensions;
+    if (
+      !Array.isArray(extensions) ||
+      extensions.length > 12 ||
+      !extensions.every((value) => typeof value === "string")
+    ) {
+      return "search_text payload.extensions must be a list of at most 12 strings";
+    }
+    for (const extension of extensions) {
+      if (!/^\.[a-z0-9]{1,12}$/i.test(extension)) {
+        return `Unsafe search_text extension: ${extension}`;
+      }
+    }
   }
 
   const reads = payload.reads === undefined ? [] : payload.reads;
