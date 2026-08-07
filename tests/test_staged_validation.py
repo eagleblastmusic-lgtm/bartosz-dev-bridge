@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from bdb_bridge.models import ProfileRunOutcome
 from bdb_bridge.staged_validation import (
     VALIDATION_PLAN_ID,
+    _browser_regression_test_paths,
     _migration_schema_literal_issue,
     _requires_full_pytest,
     _targeted_test_paths,
@@ -25,6 +26,49 @@ def test_targeted_tests_include_changed_test_and_matching_bridge_module(tmp_path
         ("bdb_bridge/alpha.py", "tests/test_other.py"),
     )
     assert selected == ("tests/test_alpha.py", "tests/test_other.py")
+
+
+def test_browser_fast_mapping_is_narrow_and_multi_file_scope_escalates_to_regression(
+    tmp_path: Path,
+) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    for name in (
+        "test_browser_auto_decision_retry_runtime.py",
+        "test_browser_conversation_tab_binding_runtime.py",
+        "test_browser_auto_contract.py",
+        "test_browser_task_controller_contract.py",
+        "test_browser_unrelated_runtime.py",
+    ):
+        (tests / name).write_text("def test_placeholder():\n    assert True\n", encoding="utf-8")
+
+    fast = _targeted_test_paths(
+        tmp_path,
+        ("browser_extension/content_auto_retry.js",),
+    )
+    assert fast == (
+        "tests/test_browser_auto_decision_retry_runtime.py",
+        "tests/test_browser_conversation_tab_binding_runtime.py",
+    )
+    assert _browser_regression_test_paths(
+        tmp_path,
+        ("browser_extension/content_auto_retry.js",),
+    ) == ()
+
+    regression = _browser_regression_test_paths(
+        tmp_path,
+        (
+            "browser_extension/content_auto_retry.js",
+            "browser_extension/popup.js",
+        ),
+    )
+    assert regression == (
+        "tests/test_browser_auto_contract.py",
+        "tests/test_browser_auto_decision_retry_runtime.py",
+        "tests/test_browser_conversation_tab_binding_runtime.py",
+        "tests/test_browser_task_controller_contract.py",
+        "tests/test_browser_unrelated_runtime.py",
+    )
 
 
 def test_migration_changes_preflight_all_migration_contract_tests(tmp_path: Path) -> None:
@@ -303,7 +347,7 @@ class _FakeValidationJournal:
         started_at: str,
         finished_at: str,
     ):
-        assert stage_name in {"structural", "targeted", "full"}
+        assert stage_name in {"structural", "targeted", "regression", "full"}
         record = _FakeValidationRecord(outcome)
         self.records[(command_id, plan_id, stage_index)] = record
         return record
@@ -351,8 +395,10 @@ def test_durable_stages_reuse_completed_structural_and_targeted_after_restart(
     assert calls == [[sys.executable, "-m", "pytest", "-q"]]
     assert "[structural] persisted" in outcome.stdout
     assert "[targeted] persisted" in outcome.stdout
+    assert "[regression] skipped=not_required" in outcome.stdout
     assert "[full] status=success" in outcome.stdout
     assert (command_id, VALIDATION_PLAN_ID, 3) in journal.records
+    assert (command_id, VALIDATION_PLAN_ID, 4) in journal.records
 
 
 def test_durable_targeted_failure_is_reused_without_running_full_pytest(

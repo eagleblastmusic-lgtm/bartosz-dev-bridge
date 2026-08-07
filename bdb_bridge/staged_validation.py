@@ -10,6 +10,54 @@ from typing import Any, Mapping, Sequence
 from .models import ProfileRunOutcome
 
 
+_BROWSER_FAST_TEST_PATTERNS: dict[str, tuple[str, ...]] = {
+    "content_auto_retry.js": (
+        "test_browser_auto_decision_retry_runtime.py",
+        "test_browser_conversation_tab_binding_runtime.py",
+    ),
+    "content_auto_send.js": (
+        "test_browser_auto_send_confirmation_runtime.py",
+        "test_browser_auto_composer_fast_path_runtime.py",
+    ),
+    "background_task_controller.js": (
+        "test_browser_task_controller_runtime.py",
+        "test_browser_failed_result_recovery_runtime.py",
+    ),
+    "popup.js": (
+        "test_browser_auto_contract.py",
+        "test_browser_task_controller_contract.py",
+    ),
+}
+
+
+def _browser_regression_test_paths(
+    workspace_path: Path,
+    changed_paths: Sequence[str],
+) -> tuple[str, ...]:
+    browser_sources: set[str] = set()
+    for relative in changed_paths:
+        if relative.startswith("tests/test_browser") and relative.endswith(".py"):
+            continue
+        if not relative.startswith("browser_extension/"):
+            return ()
+        filename = Path(relative).name
+        if filename not in _BROWSER_FAST_TEST_PATTERNS:
+            return ()
+        browser_sources.add(filename)
+    if len(browser_sources) <= 1:
+        return ()
+    tests_root = workspace_path / "tests"
+    if not tests_root.is_dir():
+        return ()
+    return tuple(
+        sorted(
+            path.relative_to(workspace_path).as_posix()
+            for path in tests_root.glob("test_browser*.py")
+            if path.is_file()
+        )
+    )
+
+
 def _targeted_test_paths(workspace_path: Path, changed_paths: Sequence[str]) -> tuple[str, ...]:
     tests_root = workspace_path / "tests"
     selected: set[str] = set()
@@ -29,7 +77,12 @@ def _targeted_test_paths(workspace_path: Path, changed_paths: Sequence[str]) -> 
             continue
 
         if relative.startswith("browser_extension/"):
-            add_glob("test_browser*.py")
+            patterns = _BROWSER_FAST_TEST_PATTERNS.get(Path(relative).name)
+            if patterns is None:
+                add_glob("test_browser*.py")
+            else:
+                for pattern in patterns:
+                    add_glob(pattern)
             continue
 
         changed_path = Path(relative)
@@ -295,6 +348,33 @@ def run_staged_pytest_profile(
     else:
         stdout_parts.append("[targeted] skipped=no_related_tests\n")
 
+    regression = _browser_regression_test_paths(workspace_path, changed_paths)
+    if regression:
+        regression_outcome = _run_pytest(
+            workspace_path=workspace_path,
+            python_executable=python_executable,
+            timeout_seconds=timeout_seconds,
+            environment=environment,
+            test_paths=regression,
+        )
+        stdout_parts.append(
+            f"[regression] status={regression_outcome.status} duration_ms={regression_outcome.duration_ms} "
+            f"tests={','.join(regression)}\n"
+        )
+        stdout_parts.append(regression_outcome.stdout)
+        if regression_outcome.stderr:
+            stderr_parts.append(regression_outcome.stderr)
+        if regression_outcome.status != "success":
+            return ProfileRunOutcome(
+                regression_outcome.status,
+                regression_outcome.exit_code,
+                "".join(stdout_parts),
+                "".join(stderr_parts),
+                int((time.monotonic() - started) * 1000),
+            )
+    else:
+        stdout_parts.append("[regression] skipped=not_required\n")
+
     if not _requires_full_pytest(changed_paths):
         stdout_parts.append("[full] skipped=adaptive_low_risk_browser_scope\n")
         return ProfileRunOutcome(
@@ -327,7 +407,7 @@ def run_staged_pytest_profile(
     )
 
 
-VALIDATION_PLAN_ID = "bdb-pytest-staged-v1"
+VALIDATION_PLAN_ID = "bdb-pytest-staged-v2"
 
 
 def _durable_stage(
@@ -468,6 +548,50 @@ def run_durable_staged_pytest_profile(
             duration_ms,
         )
 
+    regression_paths = _browser_regression_test_paths(workspace_path, changed_paths)
+
+    def regression_runner() -> ProfileRunOutcome:
+        if not regression_paths:
+            return ProfileRunOutcome("success", 0, "[regression] skipped=not_required\n", "", 0)
+        outcome = _run_pytest(
+            workspace_path=workspace_path,
+            python_executable=python_executable,
+            timeout_seconds=timeout_seconds,
+            environment=environment,
+            test_paths=regression_paths,
+        )
+        return ProfileRunOutcome(
+            outcome.status,
+            outcome.exit_code,
+            (
+                f"[regression] status={outcome.status} duration_ms={outcome.duration_ms} "
+                f"tests={','.join(regression_paths)}\n"
+                + outcome.stdout
+            ),
+            outcome.stderr,
+            outcome.duration_ms,
+        )
+
+    regression = _durable_stage(
+        journal=journal,
+        command_id=command_id,
+        stage_index=3,
+        stage_name="regression",
+        runner=regression_runner,
+    )
+    stdout_parts.append(regression.stdout)
+    if regression.stderr:
+        stderr_parts.append(regression.stderr)
+    duration_ms += regression.duration_ms
+    if regression.status != "success":
+        return ProfileRunOutcome(
+            regression.status,
+            regression.exit_code,
+            "".join(stdout_parts),
+            "".join(stderr_parts),
+            duration_ms,
+        )
+
     def full_runner() -> ProfileRunOutcome:
         if not _requires_full_pytest(changed_paths):
             return ProfileRunOutcome(
@@ -495,7 +619,7 @@ def run_durable_staged_pytest_profile(
     full = _durable_stage(
         journal=journal,
         command_id=command_id,
-        stage_index=3,
+        stage_index=4,
         stage_name="full",
         runner=full_runner,
     )
