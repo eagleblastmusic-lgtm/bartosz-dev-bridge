@@ -30,6 +30,15 @@ def test_session_projection_builds_verified_group_only_from_explicit_manifests(t
     assert attempt["result"]["rollback_performed"] is False
     assert attempt["receipt_file"]["valid"] is True
     assert attempt["receipt"]["source_commit"] == "b" * 40
+    assert attempt["status"] == {
+        "schema": "bdb-operation-status-v1",
+        "execution": "succeeded",
+        "result": "published",
+        "promotion": "promoted",
+        "delivery": "delivered",
+        "session": "completed",
+        "terminal": True,
+    }
     assert success["repair_group_id"] == CORRELATION_ID
     assert success["repair_correlation"]["role"] == "repair"
     assert success["repair_correlation"]["predecessor_session_id"] == FAILED_SESSION
@@ -39,6 +48,15 @@ def test_session_projection_builds_verified_group_only_from_explicit_manifests(t
     assert failed_attempt["result"]["checkpoint_state"] == "rolled_back"
     assert failed_attempt["result"]["rollback_performed"] is True
     assert failed_attempt["receipt"] is None
+    assert failed_attempt["status"] == {
+        "schema": "bdb-operation-status-v1",
+        "execution": "failed",
+        "result": "staged",
+        "promotion": "pending",
+        "delivery": "pending",
+        "session": "completed",
+        "terminal": True,
+    }
     assert failed["repair_group_id"] == CORRELATION_ID
     assert failed["repair_correlation"]["role"] == "initial"
 

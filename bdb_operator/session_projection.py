@@ -15,6 +15,7 @@ from .errors import OperatorApiError, OperatorErrorCode
 SESSION_HISTORY_SCHEMA = "bdb-session-history-v1"
 SESSION_SUMMARY_SCHEMA = "bdb-session-summary-v1"
 SESSION_ATTEMPT_SCHEMA = "bdb-session-attempt-v1"
+OPERATION_STATUS_SCHEMA = "bdb-operation-status-v1"
 REPAIR_GROUP_SCHEMA = "bdb-repair-group-v1"
 REPAIR_CORRELATION_SCHEMA = "bdb-repair-correlation-v1"
 PROMOTION_RECEIPT_SCHEMA = "bdb-workspace-promotion-v1"
@@ -26,6 +27,20 @@ MAX_RESULT_BYTES = 64 * 1024
 MAX_RECEIPT_BYTES = 2 * 1024 * 1024
 _SAFE_SESSION = re.compile(r"^[A-Za-z0-9-]{1,80}$")
 _SHA40 = re.compile(r"^[0-9a-fA-F]{40}$")
+_MUTATING_OPERATIONS = frozenset({"replace_exact_and_test", "multi_file_patch"})
+_QUEUED_COMMAND_STATES = frozenset({"discovered", "validated", "claimed"})
+_RUNNING_COMMAND_STATES = frozenset({"executing", "effect_recorded", "result_staged"})
+_FINAL_FAILURE_STATES = frozenset(
+    {
+        "rejected",
+        "expired",
+        "policy_denied",
+        "stale_revision",
+        "state_mismatch",
+        "manual_reconciliation_required",
+        "cancelled",
+    }
+)
 
 
 def utc_now_iso() -> str:
@@ -124,10 +139,12 @@ class SessionProjectionReader:
             SELECT c.command_id, c.sequence, c.state, c.created_at, c.updated_at,
                    p.operation, p.target_path, p.profile_id,
                    r.status AS result_status, r.error_code, r.result_sha256,
-                   r.result_json, r.remote_path, r.created_at AS result_created_at
+                   r.result_json, r.remote_path, r.created_at AS result_created_at,
+                   o.state AS outbox_state, o.published_at AS outbox_published_at
             FROM commands c
             LEFT JOIN operation_plans p ON p.command_id = c.command_id
             LEFT JOIN results r ON r.command_id = c.command_id
+            LEFT JOIN outbox o ON o.command_id = c.command_id
             WHERE c.session_id = ?
             ORDER BY c.sequence ASC
             LIMIT ?
@@ -136,7 +153,10 @@ class SessionProjectionReader:
         ).fetchall()
         truncated = len(command_rows) > MAX_ATTEMPTS_PER_SESSION
         selected = command_rows[:MAX_ATTEMPTS_PER_SESSION]
-        attempts = [self._attempt_document(session_id, command) for command in selected]
+        attempts = [
+            self._attempt_document(session_id, command, session_state=str(row["state"]))
+            for command in selected
+        ]
         return {
             "schema": SESSION_SUMMARY_SCHEMA,
             "session_id": session_id,
@@ -161,7 +181,13 @@ class SessionProjectionReader:
             "warnings": warnings,
         }
 
-    def _attempt_document(self, session_id: str, row: sqlite3.Row) -> dict[str, Any]:
+    def _attempt_document(
+        self,
+        session_id: str,
+        row: sqlite3.Row,
+        *,
+        session_state: str,
+    ) -> dict[str, Any]:
         sequence = int(row["sequence"])
         warnings: list[str] = []
         journal_result = _decode_result(row["result_json"], warnings)
@@ -239,6 +265,12 @@ class SessionProjectionReader:
             "receipt_path": receipt_path,
             "receipt_file": receipt_file,
             "receipt": receipt_summary,
+            "status": _canonical_attempt_status(
+                row,
+                session_state=session_state,
+                receipt_summary=receipt_summary,
+                receipt_file=receipt_file,
+            ),
             "warnings": warnings,
         }
 
@@ -495,6 +527,75 @@ def _decode_result(value: Any, warnings: list[str]) -> dict[str, Any] | None:
         warnings.append("Journal result JSON is not an object")
         return None
     return parsed
+
+
+def _canonical_attempt_status(
+    row: sqlite3.Row,
+    *,
+    session_state: str,
+    receipt_summary: dict[str, Any] | None,
+    receipt_file: dict[str, Any],
+) -> dict[str, Any]:
+    command_state = str(row["state"])
+    result_status = str(row["result_status"]).lower() if row["result_status"] is not None else None
+    outbox_state = str(row["outbox_state"]).lower() if row["outbox_state"] is not None else None
+    operation = row["operation"]
+    mutating = operation in _MUTATING_OPERATIONS
+
+    if command_state in _FINAL_FAILURE_STATES or result_status in {"failed", "error", "internal_error"}:
+        execution = "failed"
+    elif command_state in _QUEUED_COMMAND_STATES:
+        execution = "queued"
+    elif command_state in _RUNNING_COMMAND_STATES:
+        execution = "running"
+    else:
+        execution = "succeeded"
+
+    if command_state in {"result_published", "acknowledged"} or outbox_state == "published":
+        result = "published"
+    elif row["result_status"] is not None:
+        result = "staged"
+    else:
+        result = "none"
+
+    delivery = "delivered" if command_state == "acknowledged" or outbox_state == "published" else "pending"
+
+    if not mutating:
+        promotion = "not_required"
+    elif result != "published":
+        promotion = "pending"
+    elif receipt_summary is not None:
+        promotion = "promoted"
+    elif bool(receipt_file.get("exists")):
+        promotion = "blocked"
+    else:
+        promotion = "pending"
+
+    if session_state == "completing":
+        session = "completing"
+    elif session_state in {"completed", "aborted", "manual_reconciliation_required"}:
+        session = "completed"
+    else:
+        session = "active"
+
+    terminal = execution == "failed" or promotion == "blocked"
+    if not terminal:
+        terminal = bool(
+            execution == "succeeded"
+            and result == "published"
+            and delivery == "delivered"
+            and promotion in {"promoted", "not_required"}
+        )
+
+    return {
+        "schema": OPERATION_STATUS_SCHEMA,
+        "execution": execution,
+        "result": result,
+        "promotion": promotion,
+        "delivery": delivery,
+        "session": session,
+        "terminal": terminal,
+    }
 
 
 def _result_summary(document: dict[str, Any] | None, row: sqlite3.Row) -> dict[str, Any]:

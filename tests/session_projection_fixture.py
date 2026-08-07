@@ -101,6 +101,13 @@ def create_journal(journal: Path, results: Path, promotions: Path) -> None:
           status TEXT NOT NULL, error_code TEXT, result_sha256 TEXT NOT NULL,
           result_json TEXT NOT NULL, remote_path TEXT NOT NULL, created_at TEXT NOT NULL
         );
+        CREATE TABLE outbox (
+          command_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+          result_sha256 TEXT NOT NULL, remote_path TEXT NOT NULL, state TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL, next_attempt_at TEXT, last_error TEXT,
+          published_commit_sha TEXT, published_at TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
         CREATE TABLE operation_plans (
           command_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, operation TEXT NOT NULL,
           target_path TEXT NOT NULL, profile_id TEXT NOT NULL, expected_revision INTEGER NOT NULL,
