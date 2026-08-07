@@ -69,7 +69,7 @@ async function loadTasks() {
       cancelTaskButton.disabled = true;
       return;
     }
-    const task = tasks[0];
+    const task = tasks.find((candidate) => candidate.recovery_pending === true) || tasks[0];
     latestTaskLoopId = task.loop_id;
     taskState.textContent = [
       `Zadanie: ${task.title || task.loop_id}`,
