@@ -116,7 +116,25 @@ class CurrentOperationWidget(QWidget):
             return
 
         operation = snapshot.operation
-        self.state_label.setText(operation.state.upper())
+        canonical = operation.status or {}
+        execution = str(canonical.get("execution", "")).lower()
+        promotion = str(canonical.get("promotion", "")).lower()
+        result_state = str(canonical.get("result", "")).lower()
+        if execution == "failed":
+            visible_state = "BŁĄD"
+        elif promotion == "blocked":
+            visible_state = "PROMOCJA ZABLOKOWANA"
+        elif canonical.get("terminal") is True:
+            visible_state = "ZAKOŃCZONA"
+        elif promotion == "pending" and result_state == "published":
+            visible_state = "PROMOWANIE"
+        elif execution == "running" and operation.state.lower() in {"effect_recorded", "result_staged"}:
+            visible_state = "TESTOWANIE"
+        elif execution == "running":
+            visible_state = "WYKONYWANIE"
+        else:
+            visible_state = operation.state.upper()
+        self.state_label.setText(visible_state)
         values = {
             "command": operation.command_id,
             "session": operation.session_id,
@@ -141,6 +159,8 @@ class CurrentOperationWidget(QWidget):
         self._apply_flow(build_operation_flow(operation))
         self.feedback_label.setText(
             "Aktywna operacja została odczytana z read-only projekcji Journalu."
+            if snapshot.active
+            else "Pokazano ostatnią zakończoną operację z read-only projekcji Journalu."
         )
 
     def smoke_report(self) -> dict[str, Any]:
@@ -151,7 +171,7 @@ class CurrentOperationWidget(QWidget):
             "current_operation_refresh_present": self.refresh_button is not None,
             "current_operation_loaded": snapshot is not None,
             "current_operation_active": snapshot.active if snapshot is not None and snapshot.ok else None,
-            "operation_flow_present": len(self._flow_rows) == 6,
+            "operation_flow_present": len(self._flow_rows) == 7,
             "operation_flow_status": self._flow.overall_status,
         }
 

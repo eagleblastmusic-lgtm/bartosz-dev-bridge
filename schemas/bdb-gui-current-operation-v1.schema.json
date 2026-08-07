@@ -49,7 +49,8 @@
             "result_status",
             "error_code",
             "created_at",
-            "updated_at"
+            "updated_at",
+            "status"
           ],
           "properties": {
             "schema": { "const": "bdb-gui-operation-details-v1" },
@@ -67,7 +68,26 @@
             "result_status": { "type": ["string", "null"] },
             "error_code": { "type": ["string", "null"] },
             "created_at": { "type": ["string", "null"] },
-            "updated_at": { "type": ["string", "null"] }
+            "updated_at": { "type": ["string", "null"] },
+            "status": {
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["schema", "execution", "result", "promotion", "delivery", "session", "terminal"],
+                  "properties": {
+                    "schema": { "const": "bdb-operation-status-v1" },
+                    "execution": { "enum": ["queued", "running", "succeeded", "failed"] },
+                    "result": { "enum": ["none", "staged", "published"] },
+                    "promotion": { "enum": ["not_required", "pending", "promoted", "blocked"] },
+                    "delivery": { "enum": ["pending", "delivered"] },
+                    "session": { "enum": ["active", "completing", "completed"] },
+                    "terminal": { "type": "boolean" }
+                  }
+                }
+              ]
+            }
           }
         }
       ]

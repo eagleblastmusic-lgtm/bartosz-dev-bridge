@@ -46,6 +46,15 @@ def active_snapshot() -> CurrentOperationSnapshot:
             workspace_state_hash="sha256:" + "a" * 64,
             result_status=None,
             error_code=None,
+            status={
+                "schema": "bdb-operation-status-v1",
+                "execution": "running",
+                "result": "none",
+                "promotion": "pending",
+                "delivery": "pending",
+                "session": "active",
+                "terminal": False,
+            },
             created_at="2026-07-18T21:00:30Z",
             updated_at="2026-07-18T21:00:45Z",
         ),
@@ -92,7 +101,7 @@ def test_active_snapshot_renders_journal_projection_fields() -> None:
     widget.apply_snapshot(active_snapshot())
     app.processEvents()
 
-    assert widget.state_label.text() == "EXECUTING"
+    assert widget.state_label.text() == "WYKONYWANIE"
     assert widget._values["command"].text() == "session-1:000003"
     assert widget._values["session"].text() == "session-1"
     assert widget._values["sequence"].text() == "3"
@@ -101,6 +110,100 @@ def test_active_snapshot_renders_journal_projection_fields() -> None:
     assert widget._values["profile"].text() == "poc_pytest"
     assert widget._values["revision"].text() == "2"
     assert widget.smoke_report()["current_operation_active"] is True
+    widget.close()
+
+
+def test_terminal_snapshot_remains_visible_as_completed() -> None:
+    app = application()
+    widget = CurrentOperationWidget()
+    widget.set_project("alpha", "C:/workspaces/alpha")
+    snapshot = CurrentOperationSnapshot(
+        workspace_root="C:/workspaces/alpha",
+        project_alias="alpha",
+        generated_at="2026-07-18T21:03:00Z",
+        active=False,
+        operation=OperationDetails(
+            command_id="session-1:000004",
+            session_id="session-1",
+            sequence=4,
+            state="acknowledged",
+            operation="multi_file_patch",
+            target_path="README.md",
+            profile_id="poc_pytest",
+            repository_id="repo-alpha",
+            session_state="active",
+            workspace_revision=3,
+            workspace_state_hash="sha256:" + "b" * 64,
+            result_status="success",
+            error_code=None,
+            created_at="2026-07-18T21:02:30Z",
+            updated_at="2026-07-18T21:02:55Z",
+            status={
+                "schema": "bdb-operation-status-v1",
+                "execution": "succeeded",
+                "result": "published",
+                "promotion": "promoted",
+                "delivery": "delivered",
+                "session": "active",
+                "terminal": True,
+            },
+        ),
+        operator_operation_id="terminal-op",
+    )
+
+    widget.apply_snapshot(snapshot)
+    app.processEvents()
+
+    assert widget.state_label.text() == "ZAKOŃCZONA"
+    assert widget._values["command"].text() == "session-1:000004"
+    assert "ostatnią zakończoną" in widget.feedback_label.text().lower()
+    assert widget.smoke_report()["current_operation_active"] is False
+    widget.close()
+
+
+def test_promotion_blocked_snapshot_is_explicit() -> None:
+    app = application()
+    widget = CurrentOperationWidget()
+    widget.set_project("alpha", "C:/workspaces/alpha")
+    snapshot = CurrentOperationSnapshot(
+        workspace_root="C:/workspaces/alpha",
+        project_alias="alpha",
+        generated_at="2026-07-18T21:04:00Z",
+        active=False,
+        operation=OperationDetails(
+            command_id="session-1:000005",
+            session_id="session-1",
+            sequence=5,
+            state="result_published",
+            operation="multi_file_patch",
+            target_path="README.md",
+            profile_id="poc_pytest",
+            repository_id="repo-alpha",
+            session_state="active",
+            workspace_revision=4,
+            workspace_state_hash="sha256:" + "c" * 64,
+            result_status="success",
+            error_code=None,
+            created_at="2026-07-18T21:03:30Z",
+            updated_at="2026-07-18T21:03:55Z",
+            status={
+                "schema": "bdb-operation-status-v1",
+                "execution": "succeeded",
+                "result": "published",
+                "promotion": "blocked",
+                "delivery": "delivered",
+                "session": "active",
+                "terminal": True,
+            },
+        ),
+        operator_operation_id="blocked-op",
+    )
+
+    widget.apply_snapshot(snapshot)
+    app.processEvents()
+
+    assert widget.state_label.text() == "PROMOCJA ZABLOKOWANA"
+    assert "zablokowana" in widget.flow_summary_label.text().lower()
     widget.close()
 
 

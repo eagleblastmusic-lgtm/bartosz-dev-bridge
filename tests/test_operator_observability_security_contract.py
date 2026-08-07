@@ -69,3 +69,7 @@ def test_projection_schemas_are_versioned_and_closed() -> None:
         source = read(ROOT / "schemas" / name)
         assert f'"$id": "{schema_id}"' in source
         assert '"additionalProperties": false' in source
+    current_operation = read(ROOT / "schemas" / "bdb-current-operation-v1.schema.json")
+    assert '"status"' in current_operation
+    assert '"const": "bdb-operation-status-v1"' in current_operation
+    assert '"promotion": { "enum": ["not_required", "pending", "promoted", "blocked"] }' in current_operation

@@ -221,6 +221,7 @@ def empty_operation_flow() -> OperationFlow:
                 ("editing", "Zmiana kodu"),
                 ("testing", "Testy"),
                 ("result", "Wynik i checkpoint"),
+                ("promotion", "Promocja zmian"),
                 ("completion", "Zakończenie sesji"),
             )
         ),

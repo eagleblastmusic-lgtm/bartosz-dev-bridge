@@ -66,7 +66,12 @@ def test_completed_snapshot_marks_every_flow_step_ready() -> None:
     app.processEvents()
 
     assert widget.smoke_report()["operation_flow_status"] == "success"
-    assert all(row.status_label.text() == "GOTOWE" for row in widget._flow_rows.values())
+    assert all(
+        row.status_label.text() == "GOTOWE"
+        for key, row in widget._flow_rows.items()
+        if key != "promotion"
+    )
+    assert widget._flow_rows["promotion"].status_label.text() == "OCZEKUJE"
     widget.close()
 
 

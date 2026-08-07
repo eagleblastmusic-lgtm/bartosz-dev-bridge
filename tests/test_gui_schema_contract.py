@@ -44,6 +44,12 @@ def test_current_operation_schema_is_closed_and_read_only() -> None:
     assert schema["additionalProperties"] is False
     assert properties["read_only"] == {"const": True}
     assert properties["mutation_operations_invoked"] == {"const": 0}
+    operation = properties["operation"]["oneOf"][1]
+    assert "status" in operation["required"]
+    status = operation["properties"]["status"]["oneOf"][1]
+    assert status["additionalProperties"] is False
+    assert status["properties"]["execution"]["enum"] == ["queued", "running", "succeeded", "failed"]
+    assert status["properties"]["promotion"]["enum"] == ["not_required", "pending", "promoted", "blocked"]
 
 
 def test_history_schema_is_closed_bounded_and_read_only() -> None:

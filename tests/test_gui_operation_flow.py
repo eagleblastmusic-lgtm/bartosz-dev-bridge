@@ -215,5 +215,6 @@ def test_empty_flow_is_explicitly_pending() -> None:
     flow = empty_operation_flow()
 
     assert flow.overall_status == "pending"
-    assert len(flow.steps) == 6
+    assert len(flow.steps) == 7
+    assert flow.status_for("promotion") == "pending"
     assert all(step.status == "pending" for step in flow.steps)
