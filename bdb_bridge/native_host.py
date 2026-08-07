@@ -693,6 +693,9 @@ def _error_response(request_id: str, exc: Exception) -> dict[str, Any]:
             "Wersje rozszerzenia i Native Host różnią się. Przeładuj rozszerzenie BDB."
         ),
     }
+    message = public_messages.get(code, f"Native request failed: {code}")
+    if code == "invalid_payload" and isinstance(exc, BridgeError):
+        message = str(exc)
     return {
         "schema": NATIVE_RESPONSE_SCHEMA,
         "host_version": NATIVE_HOST_VERSION,
@@ -700,7 +703,7 @@ def _error_response(request_id: str, exc: Exception) -> dict[str, Any]:
         "status": "failed",
         "error": {
             "code": code,
-            "message": public_messages.get(code, f"Native request failed: {code}"),
+            "message": message,
         },
     }
 

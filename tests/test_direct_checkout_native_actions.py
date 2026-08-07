@@ -214,3 +214,19 @@ def test_dirty_source_checkout_is_safe_native_client_error() -> None:
     assert response["error"]["message"] == (
         "Native request failed: dirty_source_checkout"
     )
+
+
+def test_invalid_payload_native_error_preserves_actionable_validation_message() -> None:
+    response = _error_response(
+        "inspect-test",
+        BridgeError(
+            "invalid_payload",
+            "inspect_bundle read_top_matches must be boolean or 0-12",
+        ),
+    )
+
+    assert response["status"] == "failed"
+    assert response["error"] == {
+        "code": "invalid_payload",
+        "message": "inspect_bundle read_top_matches must be boolean or 0-12",
+    }
