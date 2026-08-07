@@ -270,8 +270,72 @@ async function repositorySearch(action) {
   });
 }
 
+function inspectBundlePreflight(action) {
+  const payload = action && action.payload !== undefined ? action.payload : {};
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return "inspect_bundle payload must be an object";
+  }
+
+  const searches = payload.searches === undefined ? [] : payload.searches;
+  if (!Array.isArray(searches) || searches.length > 8) {
+    return "inspect_bundle searches must contain at most 8 items";
+  }
+  if (!searches.every((item) => item && typeof item === "object" && !Array.isArray(item))) {
+    return "inspect_bundle search items must be objects";
+  }
+
+  const reads = payload.reads === undefined ? [] : payload.reads;
+  if (!Array.isArray(reads) || reads.length > 20) {
+    return "inspect_bundle reads must contain at most 20 items";
+  }
+  for (const item of reads) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return "inspect_bundle read items must be objects";
+    }
+    if (typeof item.path !== "string") {
+      return "inspect_bundle read.path must be a string";
+    }
+    const start = item.start_line === undefined ? 1 : item.start_line;
+    const end = item.end_line === undefined
+      ? (Number.isInteger(start) ? start + 399 : 0)
+      : item.end_line;
+    if (
+      !Number.isInteger(start) ||
+      !Number.isInteger(end) ||
+      start < 1 ||
+      end < start ||
+      end - start + 1 > 1000
+    ) {
+      return "inspect_bundle read ranges may contain at most 1000 lines";
+    }
+  }
+
+  const readTopMatches = payload.read_top_matches;
+  if (
+    readTopMatches !== undefined &&
+    typeof readTopMatches !== "boolean" &&
+    !(Number.isInteger(readTopMatches) && readTopMatches >= 0 && readTopMatches <= 12)
+  ) {
+    return "inspect_bundle read_top_matches must be boolean or 0-12";
+  }
+  return null;
+}
+
 async function repositoryInspection(action) {
   const repoAlias = validateRepoAlias(action.repo_alias);
+  const preflightError = inspectBundlePreflight(action);
+  if (preflightError) {
+    return {
+      schema: "bdb-native-response-v1",
+      host_version: currentExtensionVersion() || BDB_EXTENSION_VERSION,
+      request_id: requestId("inspect-bundle-preflight"),
+      status: "failed",
+      error: {
+        code: "invalid_payload",
+        message: preflightError
+      }
+    };
+  }
   return sendNative({
     schema: REQUEST_SCHEMA,
     request_id: requestId("inspect-bundle"),

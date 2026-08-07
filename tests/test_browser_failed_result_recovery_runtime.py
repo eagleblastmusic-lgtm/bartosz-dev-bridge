@@ -263,6 +263,10 @@ def test_auto_read_failure_continues_when_continue_on_failure_is_enabled(tmp_pat
               assert.equal(decision.stopReason, null, JSON.stringify(decision));
               assert.equal(decision.state.status, "running", JSON.stringify(decision));
               assert.equal(decision.response.error.code, "invalid_payload");
+              assert.equal(
+                decision.response.error.message,
+                "inspect_bundle read_top_matches must be boolean or 0-12"
+              );
             }).catch((error) => { console.error(error); process.exitCode = 1; });
             '''
         ),
