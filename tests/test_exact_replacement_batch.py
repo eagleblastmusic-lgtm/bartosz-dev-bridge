@@ -98,3 +98,17 @@ def test_exact_terminal_outcome_persists_specific_error_code(tmp_path: Path) -> 
         }
     finally:
         journal.close()
+
+
+def test_multi_file_runtime_classifies_replace_mismatch_as_pre_mutation_terminal() -> None:
+    runtime_path = (
+        Path(__file__).resolve().parents[1]
+        / "bdb_bridge"
+        / "multi_file_patch_runtime.py"
+    )
+    source = runtime_path.read_text(encoding="utf-8")
+    anchor = "BridgeErrorCode.UNSUPPORTED_OPERATION.value,"
+    anchor_index = source.index(anchor)
+    classification_block = source[max(0, anchor_index - 600):anchor_index + len(anchor)]
+
+    assert "BridgeErrorCode.REPLACE_MISMATCH.value" in classification_block

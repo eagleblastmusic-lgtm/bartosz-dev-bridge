@@ -410,6 +410,7 @@ class MultiFilePatchRuntimeCoordinator:
                         BridgeErrorCode.SCOPE_VIOLATION.value,
                         BridgeErrorCode.UNSAFE_PATH.value,
                         BridgeErrorCode.INVALID_PAYLOAD.value,
+                        BridgeErrorCode.REPLACE_MISMATCH.value,
                         BridgeErrorCode.UNSUPPORTED_SCHEMA.value,
                         BridgeErrorCode.UNSUPPORTED_OPERATION.value,
                     }:
