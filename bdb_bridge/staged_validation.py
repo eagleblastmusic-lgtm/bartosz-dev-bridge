@@ -596,13 +596,20 @@ def run_durable_staged_pytest_profile(
 
     def full_runner() -> ProfileRunOutcome:
         if not _requires_full_pytest(changed_paths):
-            return ProfileRunOutcome(
-                "success",
-                0,
-                "[full] skipped=adaptive_low_risk_browser_scope\n",
-                "",
-                0,
+            debt_counter = getattr(journal, "count_consecutive_adaptive_full_skips", None)
+            debt = (
+                debt_counter(command_id, VALIDATION_PLAN_ID, limit=4)
+                if callable(debt_counter)
+                else 4
             )
+            if debt < 4:
+                return ProfileRunOutcome(
+                    "success",
+                    0,
+                    f"[full] skipped=adaptive_low_risk_browser_scope debt={debt + 1}/4\n",
+                    "",
+                    0,
+                )
         outcome = _run_pytest(
             workspace_path=workspace_path,
             python_executable=python_executable,

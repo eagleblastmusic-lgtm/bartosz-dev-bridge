@@ -535,10 +535,57 @@ def record_validation_run(
     return recorded
 
 
+def count_consecutive_adaptive_full_skips(
+    self: Any,
+    command_id: str,
+    plan_id: str,
+    *,
+    limit: int = 4,
+) -> int:
+    self._ensure_open()
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 30:
+        raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "adaptive validation debt limit is not bounded")
+    plan_id = _strict_text(plan_id, "plan_id")
+    if not plan_id or len(plan_id) > 80:
+        raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "validation plan_id is not bounded")
+    command = self.get_command(command_id)
+    if command is None:
+        raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Unknown command for adaptive validation debt")
+    try:
+        rows = self._connection.execute(
+            """SELECT vr.stdout_tail
+FROM validation_runs AS vr
+JOIN commands AS c ON c.command_id = vr.command_id
+WHERE c.session_id = ?
+  AND c.sequence < ?
+  AND vr.plan_id = ?
+  AND vr.stage_name = 'full'
+  AND vr.status = 'success'
+ORDER BY c.sequence DESC
+LIMIT ?""",
+            (command.session_id, command.sequence, plan_id, limit + 1),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise map_sqlite_error(exc, context="adaptive validation debt read") from exc
+
+    debt = 0
+    for row in rows:
+        stdout_tail = str(row[0])
+        if "[full] status=success" in stdout_tail:
+            break
+        if "[full] skipped=adaptive_low_risk_browser_scope" not in stdout_tail:
+            break
+        debt += 1
+        if debt >= limit:
+            break
+    return debt
+
+
 def install_journal_multi_file_patch_runtime_api(journal_cls: Type[object]) -> None:
     setattr(journal_cls, "get_multi_file_patch_profile_run", get_multi_file_patch_profile_run)
     setattr(journal_cls, "record_multi_file_patch_profile_run", record_multi_file_patch_profile_run)
     setattr(journal_cls, "get_validation_run", get_validation_run)
     setattr(journal_cls, "record_validation_run", record_validation_run)
+    setattr(journal_cls, "count_consecutive_adaptive_full_skips", count_consecutive_adaptive_full_skips)
     setattr(journal_cls, "mark_multi_file_patch_command_executing", mark_multi_file_patch_command_executing)
     setattr(journal_cls, "finalize_multi_file_patch_execution", finalize_multi_file_patch_execution)

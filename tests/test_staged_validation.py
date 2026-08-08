@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 from bdb_bridge.models import ProfileRunOutcome
+from bdb_bridge.multi_file_patch_runtime_journal import count_consecutive_adaptive_full_skips
 from bdb_bridge.staged_validation import (
     VALIDATION_PLAN_ID,
     _browser_regression_test_paths,
@@ -329,6 +331,7 @@ class _FakeValidationJournal:
     def __init__(self) -> None:
         self.records: dict[tuple[str, str, int], _FakeValidationRecord] = {}
         self.clock = 0
+        self.adaptive_skip_debt = 0
 
     def _now_fn(self) -> str:
         self.clock += 1
@@ -336,6 +339,17 @@ class _FakeValidationJournal:
 
     def get_validation_run(self, command_id: str, plan_id: str, stage_index: int):
         return self.records.get((command_id, plan_id, stage_index))
+
+    def count_consecutive_adaptive_full_skips(
+        self,
+        command_id: str,
+        plan_id: str,
+        *,
+        limit: int = 4,
+    ) -> int:
+        assert command_id
+        assert plan_id == VALIDATION_PLAN_ID
+        return min(self.adaptive_skip_debt, limit)
 
     def record_validation_run(
         self,
@@ -400,6 +414,100 @@ def test_durable_stages_reuse_completed_structural_and_targeted_after_restart(
     assert "[full] status=success" in outcome.stdout
     assert (command_id, VALIDATION_PLAN_ID, 3) in journal.records
     assert (command_id, VALIDATION_PLAN_ID, 4) in journal.records
+
+
+def test_adaptive_debt_counter_stops_at_last_real_full() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.execute(
+        "CREATE TABLE commands (command_id TEXT PRIMARY KEY, session_id TEXT, sequence INTEGER)"
+    )
+    connection.execute(
+        "CREATE TABLE validation_runs (command_id TEXT, plan_id TEXT, stage_name TEXT, status TEXT, stdout_tail TEXT)"
+    )
+    for sequence in range(1, 6):
+        connection.execute(
+            "INSERT INTO commands (command_id, session_id, sequence) VALUES (?, 'session:1', ?)",
+            (f"command:{sequence}", sequence),
+        )
+    connection.execute(
+        "INSERT INTO validation_runs VALUES ('command:1', ?, 'full', 'success', '[full] status=success duration_ms=1')",
+        (VALIDATION_PLAN_ID,),
+    )
+    for sequence in (2, 3, 4):
+        connection.execute(
+            "INSERT INTO validation_runs VALUES (?, ?, 'full', 'success', '[full] skipped=adaptive_low_risk_browser_scope debt=1/4')",
+            (f"command:{sequence}", VALIDATION_PLAN_ID),
+        )
+
+    class DebtJournal:
+        _connection = connection
+
+        def _ensure_open(self) -> None:
+            return None
+
+        def get_command(self, command_id: str):
+            assert command_id == "command:5"
+            return SimpleNamespace(session_id="session:1", sequence=5)
+
+    journal = DebtJournal()
+    assert count_consecutive_adaptive_full_skips(
+        journal,
+        "command:5",
+        VALIDATION_PLAN_ID,
+        limit=4,
+    ) == 3
+
+    connection.execute(
+        "UPDATE validation_runs SET stdout_tail='[full] skipped=adaptive_low_risk_browser_scope debt=1/4' WHERE command_id='command:1'"
+    )
+    assert count_consecutive_adaptive_full_skips(
+        journal,
+        "command:5",
+        VALIDATION_PLAN_ID,
+        limit=4,
+    ) == 4
+    connection.close()
+
+
+def test_durable_browser_scope_forces_full_when_adaptive_debt_reaches_limit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    extension = tmp_path / "browser_extension"
+    tests = tmp_path / "tests"
+    extension.mkdir()
+    tests.mkdir()
+    (extension / "content_auto_retry.js").write_text("const VALUE = 1;\n", encoding="utf-8")
+    for name in (
+        "test_browser_auto_decision_retry_runtime.py",
+        "test_browser_conversation_tab_binding_runtime.py",
+    ):
+        (tests / name).write_text("def test_placeholder():\n    assert True\n", encoding="utf-8")
+
+    journal = _FakeValidationJournal()
+    journal.adaptive_skip_debt = 4
+    calls: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(list(command))
+        return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr("bdb_bridge.staged_validation.subprocess.run", fake_run)
+    outcome = run_durable_staged_pytest_profile(
+        journal=journal,
+        command_id="command:debt",
+        workspace_path=tmp_path,
+        python_executable=sys.executable,
+        timeout_seconds=30,
+        environment={},
+        changed_paths=("browser_extension/content_auto_retry.js",),
+    )
+
+    assert outcome.status == "success"
+    assert len(calls) == 2
+    assert "--durations=20" not in calls[0]
+    assert calls[1] == [sys.executable, "-m", "pytest", "-q", "--durations=20"]
+    assert "[full] status=success" in outcome.stdout
 
 
 def test_durable_targeted_failure_is_reused_without_running_full_pytest(
