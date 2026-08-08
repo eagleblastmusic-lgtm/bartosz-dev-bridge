@@ -342,12 +342,176 @@ async function bdbPreflightReplaceExact(action, allowedPaths) {
   return null;
 }
 
+function bdbAcceptanceTouchedPaths(action) {
+  const touched = new Set();
+  if (action.operation === "multi_file_patch") {
+    const patch = action && action.payload && action.payload.patch;
+    const operations = patch && Array.isArray(patch.operations) ? patch.operations : [];
+    for (let index = 0; index < operations.length; index += 1) {
+      const operation = bdbRequireObject(operations[index], `operations[${index}]`);
+      for (const item of bdbOperationPaths(operation, index)) {
+        touched.add(item.path);
+      }
+    }
+  } else if (action.operation === "replace_exact_and_test") {
+    const payload = bdbRequireObject(action.payload, "action.payload");
+    touched.add(bdbRequirePath(payload.path, "action.payload.path"));
+  }
+  return touched;
+}
+
+function bdbPreflightAcceptance(action, allowedPaths) {
+  if (action.acceptance === undefined) {
+    return;
+  }
+  const acceptance = bdbRequireObject(action.acceptance, "action.acceptance");
+  const allowedKeys = new Set([
+    "schema",
+    "result_status",
+    "changed_files_include",
+    "promotion_required",
+    "tests_required",
+    "search_assertions",
+    "manual_visual_confirmation_required"
+  ]);
+  for (const key of Object.keys(acceptance)) {
+    if (!allowedKeys.has(key)) {
+      throw bdbPreflightError("invalid_payload", `action.acceptance contains unsupported key: ${key}`);
+    }
+  }
+  if (acceptance.schema !== "bdb-acceptance-v1") {
+    throw bdbPreflightError("invalid_payload", "action.acceptance must use bdb-acceptance-v1");
+  }
+  if (acceptance.result_status !== undefined && acceptance.result_status !== "success") {
+    throw bdbPreflightError("invalid_payload", "action.acceptance.result_status must be success");
+  }
+  for (const key of ["promotion_required", "tests_required", "manual_visual_confirmation_required"]) {
+    if (acceptance[key] !== undefined && typeof acceptance[key] !== "boolean") {
+      throw bdbPreflightError("invalid_payload", `action.acceptance.${key} must be boolean`);
+    }
+  }
+
+  const touched = bdbAcceptanceTouchedPaths(action);
+  const changed = acceptance.changed_files_include === undefined
+    ? []
+    : acceptance.changed_files_include;
+  if (
+    !Array.isArray(changed) ||
+    changed.length > 32 ||
+    !changed.every((value) => typeof value === "string")
+  ) {
+    throw bdbPreflightError(
+      "invalid_payload",
+      "action.acceptance.changed_files_include must contain at most 32 path strings"
+    );
+  }
+  for (let index = 0; index < changed.length; index += 1) {
+    const path = bdbRequirePath(changed[index], `action.acceptance.changed_files_include[${index}]`);
+    if (!bdbPathMatches(path, allowedPaths)) {
+      throw bdbPreflightError("policy_denied", `Acceptance path is not allowed by local policy: ${path}`);
+    }
+    if (!touched.has(path)) {
+      throw bdbPreflightError(
+        "invalid_payload",
+        `action.acceptance.changed_files_include cannot be satisfied by this mutation: ${path}`
+      );
+    }
+  }
+
+  const assertions = acceptance.search_assertions === undefined
+    ? []
+    : acceptance.search_assertions;
+  if (!Array.isArray(assertions) || assertions.length > 8) {
+    throw bdbPreflightError(
+      "invalid_payload",
+      "action.acceptance.search_assertions must contain at most 8 items"
+    );
+  }
+  for (let index = 0; index < assertions.length; index += 1) {
+    const assertion = bdbRequireObject(
+      assertions[index],
+      `action.acceptance.search_assertions[${index}]`
+    );
+    const assertionKeys = new Set(["query", "path", "min_matches", "max_matches", "case_sensitive"]);
+    for (const key of Object.keys(assertion)) {
+      if (!assertionKeys.has(key)) {
+        throw bdbPreflightError(
+          "invalid_payload",
+          `action.acceptance.search_assertions[${index}] contains unsupported key: ${key}`
+        );
+      }
+    }
+    if (
+      typeof assertion.query !== "string" ||
+      !assertion.query.trim() ||
+      assertion.query.length > 200 ||
+      assertion.query.includes("\0") ||
+      assertion.query.includes("\r") ||
+      assertion.query.includes("\n")
+    ) {
+      throw bdbPreflightError(
+        "invalid_payload",
+        `action.acceptance.search_assertions[${index}].query must contain 1-200 characters on one line`
+      );
+    }
+    if (assertion.path !== undefined) {
+      const path = bdbRequirePath(
+        assertion.path,
+        `action.acceptance.search_assertions[${index}].path`
+      );
+      if (!bdbPathMatches(path, allowedPaths)) {
+        throw bdbPreflightError("policy_denied", `Acceptance search path is not allowed by local policy: ${path}`);
+      }
+    }
+    if (assertion.case_sensitive !== undefined && typeof assertion.case_sensitive !== "boolean") {
+      throw bdbPreflightError(
+        "invalid_payload",
+        `action.acceptance.search_assertions[${index}].case_sensitive must be boolean`
+      );
+    }
+    for (const key of ["min_matches", "max_matches"]) {
+      if (
+        assertion[key] !== undefined &&
+        (!Number.isSafeInteger(assertion[key]) || assertion[key] < 0)
+      ) {
+        throw bdbPreflightError(
+          "invalid_payload",
+          `action.acceptance.search_assertions[${index}].${key} must be a non-negative safe integer`
+        );
+      }
+    }
+    const minimum = assertion.min_matches === undefined ? 0 : assertion.min_matches;
+    const maximum = assertion.max_matches === undefined ? Number.MAX_SAFE_INTEGER : assertion.max_matches;
+    if (minimum > maximum) {
+      throw bdbPreflightError(
+        "invalid_payload",
+        `action.acceptance.search_assertions[${index}] has min_matches greater than max_matches`
+      );
+    }
+  }
+
+  const hasMachineCheck = (
+    acceptance.result_status !== undefined ||
+    changed.length > 0 ||
+    acceptance.promotion_required === true ||
+    acceptance.tests_required === true ||
+    assertions.length > 0
+  );
+  if (!hasMachineCheck) {
+    throw bdbPreflightError(
+      "invalid_payload",
+      "action.acceptance must contain at least one machine-checkable completion criterion"
+    );
+  }
+}
+
 async function bdbPreflightAction(action) {
   if (!action || !BDB_PREFLIGHT_MUTATING_OPERATIONS.has(action.operation)) {
     return;
   }
   const repoAlias = validateRepoAlias(action.repo_alias);
   const allowedPaths = await bdbAllowedPaths(repoAlias);
+  bdbPreflightAcceptance(action, allowedPaths);
   if (action.operation === "multi_file_patch") {
     await bdbPreflightMultiFilePatch(action, allowedPaths);
   } else if (action.operation === "replace_exact_and_test") {

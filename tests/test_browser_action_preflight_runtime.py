@@ -336,6 +336,62 @@ def test_action_preflight_hash_scope_and_success_runtime(tmp_path: Path) -> None
                 /at most 64 exact text replacements/
               );
 
+              const invalidAcceptanceSchema = action(textReplacement("src/app.py", [
+                { old: "unique old text", new: "unique new text" }
+              ]));
+              invalidAcceptanceSchema.acceptance = {
+                schema: "bdb-acceptance-v0",
+                result_status: "success"
+              };
+              await expectFailure(
+                invalidAcceptanceSchema,
+                "invalid_payload",
+                /acceptance must use bdb-acceptance-v1/
+              );
+
+              const impossibleChangedPath = action(textReplacement("src/app.py", [
+                { old: "unique old text", new: "unique new text" }
+              ]));
+              impossibleChangedPath.acceptance = {
+                schema: "bdb-acceptance-v1",
+                result_status: "success",
+                changed_files_include: ["src/other.py"]
+              };
+              await expectFailure(
+                impossibleChangedPath,
+                "invalid_payload",
+                /cannot be satisfied by this mutation: src\/other\.py/
+              );
+
+              const impossibleSearchRange = action(textReplacement("src/app.py", [
+                { old: "unique old text", new: "unique new text" }
+              ]));
+              impossibleSearchRange.acceptance = {
+                schema: "bdb-acceptance-v1",
+                result_status: "success",
+                search_assertions: [
+                  { query: "needle", path: "src/app.py", min_matches: 2, max_matches: 1 }
+                ]
+              };
+              await expectFailure(
+                impossibleSearchRange,
+                "invalid_payload",
+                /min_matches greater than max_matches/
+              );
+
+              const visualOnlyAcceptance = action(textReplacement("src/app.py", [
+                { old: "unique old text", new: "unique new text" }
+              ]));
+              visualOnlyAcceptance.acceptance = {
+                schema: "bdb-acceptance-v1",
+                manual_visual_confirmation_required: true
+              };
+              await expectFailure(
+                visualOnlyAcceptance,
+                "invalid_payload",
+                /at least one machine-checkable completion criterion/
+              );
+
               const content = "print('green')\n";
               const response = await context.__bdbSubmitAction(
                 action(replacement("src/app.py", content, await sha256(content))),
@@ -347,11 +403,22 @@ def test_action_preflight_hash_scope_and_success_runtime(tmp_path: Path) -> None
                 1
               );
 
+              const acceptedTextAction = action(textReplacement("src/app.py", [
+                { old: "unique old text", new: "unique new text" },
+                { old: "another old text", new: "another new text" }
+              ]));
+              acceptedTextAction.acceptance = {
+                schema: "bdb-acceptance-v1",
+                result_status: "success",
+                changed_files_include: ["src/app.py"],
+                promotion_required: true,
+                tests_required: true,
+                search_assertions: [
+                  { query: "unique new text", path: "src/app.py", min_matches: 1, case_sensitive: true }
+                ]
+              };
               const textResponse = await context.__bdbSubmitAction(
-                action(textReplacement("src/app.py", [
-                  { old: "unique old text", new: "unique new text" },
-                  { old: "another old text", new: "another new text" }
-                ])),
+                acceptedTextAction,
                 7
               );
               assert.equal(textResponse.status, "accepted");

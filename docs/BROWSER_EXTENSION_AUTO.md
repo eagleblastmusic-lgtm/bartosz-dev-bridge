@@ -111,6 +111,8 @@ A mutating action may include machine-checkable completion rules:
 
 The result contains `bdb-acceptance-result-v1` with `passed` or `unmet`. An unmet assertion is deliberately nonterminal so ChatGPT can prepare one focused repair in the same bounded AUTO loop. A passed result recommends `complete`.
 
+Before a mutating request reaches Native Host submission, the browser preflight validates the acceptance contract itself. It rejects unsupported schemas and keys, impossible `changed_files_include` paths, oversized assertion lists, malformed search bounds, policy-forbidden assertion paths and acceptance objects that contain no machine-checkable criterion. These failures use structured client-preflight details with `effect_started: false`, so impossible completion rules cannot consume a mutation attempt and fail only after execution.
+
 ## Adaptive AUTO result transport
 
 Version 0.4.7 uses one consistent set of composer budgets:
