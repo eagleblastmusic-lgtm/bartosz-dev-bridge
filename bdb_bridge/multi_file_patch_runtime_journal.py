@@ -427,6 +427,44 @@ def get_validation_run(
     return None if row is None else _row_to_validation_run(row)
 
 
+def validation_timing_summary(
+    self: Any,
+    command_id: str,
+    plan_id: str,
+) -> dict[str, Any]:
+    stage_spec = (
+        (1, "structural"),
+        (2, "targeted"),
+        (3, "regression"),
+        (4, "full"),
+    )
+    stages: dict[str, dict[str, Any]] = {}
+    total_ms = 0
+    for stage_index, stage_name in stage_spec:
+        record = self.get_validation_run(command_id, plan_id, stage_index)
+        if record is None:
+            continue
+        outcome = record.to_outcome()
+        duration_ms = outcome.duration_ms
+        total_ms += duration_ms
+        stages[stage_name] = {
+            "duration_ms": duration_ms,
+            "status": outcome.status,
+            "executed": "skipped=" not in outcome.stdout,
+        }
+    full = stages.get("full")
+    return {
+        "plan_id": plan_id,
+        "total_ms": total_ms,
+        "structural_ms": stages.get("structural", {}).get("duration_ms"),
+        "targeted_ms": stages.get("targeted", {}).get("duration_ms"),
+        "regression_ms": stages.get("regression", {}).get("duration_ms"),
+        "full_ms": stages.get("full", {}).get("duration_ms"),
+        "full_executed": None if full is None else bool(full["executed"]),
+        "stages": stages,
+    }
+
+
 def record_validation_run(
     self: Any,
     *,
@@ -591,6 +629,7 @@ def install_journal_multi_file_patch_runtime_api(journal_cls: Type[object]) -> N
     setattr(journal_cls, "get_multi_file_patch_profile_run", get_multi_file_patch_profile_run)
     setattr(journal_cls, "record_multi_file_patch_profile_run", record_multi_file_patch_profile_run)
     setattr(journal_cls, "get_validation_run", get_validation_run)
+    setattr(journal_cls, "validation_timing_summary", validation_timing_summary)
     setattr(journal_cls, "record_validation_run", record_validation_run)
     setattr(journal_cls, "count_consecutive_adaptive_full_skips", count_consecutive_adaptive_full_skips)
     setattr(journal_cls, "mark_multi_file_patch_command_executing", mark_multi_file_patch_command_executing)

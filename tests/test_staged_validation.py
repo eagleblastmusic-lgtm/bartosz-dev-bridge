@@ -6,7 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from bdb_bridge.models import ProfileRunOutcome
-from bdb_bridge.multi_file_patch_runtime_journal import count_consecutive_adaptive_full_skips
+from bdb_bridge.multi_file_patch_runtime_journal import (
+    count_consecutive_adaptive_full_skips,
+    validation_timing_summary,
+)
 from bdb_bridge.staged_validation import (
     VALIDATION_PLAN_ID,
     _browser_regression_test_paths,
@@ -366,6 +369,47 @@ class _FakeValidationJournal:
         record = _FakeValidationRecord(outcome)
         self.records[(command_id, plan_id, stage_index)] = record
         return record
+
+
+def test_validation_timing_summary_exposes_precise_full_duration_and_skip_state() -> None:
+    journal = _FakeValidationJournal()
+    command_id = "command:timing"
+    journal.records[(command_id, VALIDATION_PLAN_ID, 1)] = _FakeValidationRecord(
+        ProfileRunOutcome("success", 0, "[structural] status=success duration_ms=1\n", "", 1)
+    )
+    journal.records[(command_id, VALIDATION_PLAN_ID, 2)] = _FakeValidationRecord(
+        ProfileRunOutcome("success", 0, "[targeted] status=success duration_ms=2\n", "", 2)
+    )
+    journal.records[(command_id, VALIDATION_PLAN_ID, 3)] = _FakeValidationRecord(
+        ProfileRunOutcome("success", 0, "[regression] skipped=not_required\n", "", 0)
+    )
+    journal.records[(command_id, VALIDATION_PLAN_ID, 4)] = _FakeValidationRecord(
+        ProfileRunOutcome("success", 0, "[full] status=success duration_ms=37\n", "", 37)
+    )
+
+    summary = validation_timing_summary(journal, command_id, VALIDATION_PLAN_ID)
+
+    assert summary["structural_ms"] == 1
+    assert summary["targeted_ms"] == 2
+    assert summary["regression_ms"] == 0
+    assert summary["full_ms"] == 37
+    assert summary["total_ms"] == 40
+    assert summary["full_executed"] is True
+    assert summary["stages"]["regression"]["executed"] is False
+
+    skipped_command = "command:timing-skipped"
+    journal.records[(skipped_command, VALIDATION_PLAN_ID, 4)] = _FakeValidationRecord(
+        ProfileRunOutcome(
+            "success",
+            0,
+            "[full] skipped=adaptive_low_risk_browser_scope debt=1/4\n",
+            "",
+            0,
+        )
+    )
+    skipped = validation_timing_summary(journal, skipped_command, VALIDATION_PLAN_ID)
+    assert skipped["full_ms"] == 0
+    assert skipped["full_executed"] is False
 
 
 def test_durable_stages_reuse_completed_structural_and_targeted_after_restart(
