@@ -475,6 +475,19 @@ def test_adaptive_debt_counter_stops_at_last_real_full() -> None:
     ) == 3
 
     connection.execute(
+        "UPDATE validation_runs SET status='failed', stdout_tail='[full] status=failed duration_ms=1' WHERE command_id='command:4'"
+    )
+    assert count_consecutive_adaptive_full_skips(
+        journal,
+        "command:5",
+        VALIDATION_PLAN_ID,
+        limit=4,
+    ) == 4
+    connection.execute(
+        "UPDATE validation_runs SET status='success', stdout_tail='[full] skipped=adaptive_low_risk_browser_scope debt=1/4' WHERE command_id='command:4'"
+    )
+
+    connection.execute(
         "UPDATE validation_runs SET stdout_tail='[full] skipped=adaptive_low_risk_browser_scope debt=1/4' WHERE command_id='command:1'"
     )
     assert count_consecutive_adaptive_full_skips(

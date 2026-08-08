@@ -556,7 +556,7 @@ def count_consecutive_adaptive_full_skips(
         raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Adaptive validation command session disappeared")
     try:
         rows = self._connection.execute(
-            """SELECT vr.stdout_tail
+            """SELECT vr.status, vr.stdout_tail
 FROM validation_runs AS vr
 JOIN commands AS c ON c.command_id = vr.command_id
 JOIN sessions AS s ON s.session_id = c.session_id
@@ -564,7 +564,6 @@ WHERE s.repository_id = ?
   AND vr.command_id <> ?
   AND vr.plan_id = ?
   AND vr.stage_name = 'full'
-  AND vr.status = 'success'
 ORDER BY vr.created_at DESC, vr.command_id DESC
 LIMIT ?""",
             (session.repository_id, command_id, plan_id, limit + 1),
@@ -574,7 +573,10 @@ LIMIT ?""",
 
     debt = 0
     for row in rows:
-        stdout_tail = str(row[0])
+        status = str(row[0])
+        stdout_tail = str(row[1])
+        if status != "success":
+            return limit
         if "[full] status=success" in stdout_tail:
             break
         if "[full] skipped=adaptive_low_risk_browser_scope" not in stdout_tail:
