@@ -419,25 +419,38 @@ def test_durable_stages_reuse_completed_structural_and_targeted_after_restart(
 def test_adaptive_debt_counter_stops_at_last_real_full() -> None:
     connection = sqlite3.connect(":memory:")
     connection.execute(
+        "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, repository_id TEXT)"
+    )
+    connection.execute(
         "CREATE TABLE commands (command_id TEXT PRIMARY KEY, session_id TEXT, sequence INTEGER)"
     )
     connection.execute(
-        "CREATE TABLE validation_runs (command_id TEXT, plan_id TEXT, stage_name TEXT, status TEXT, stdout_tail TEXT)"
+        "CREATE TABLE validation_runs (command_id TEXT, plan_id TEXT, stage_name TEXT, status TEXT, stdout_tail TEXT, created_at TEXT)"
     )
     for sequence in range(1, 6):
         connection.execute(
-            "INSERT INTO commands (command_id, session_id, sequence) VALUES (?, 'session:1', ?)",
-            (f"command:{sequence}", sequence),
+            "INSERT INTO sessions (session_id, repository_id) VALUES (?, 'repo:1')",
+            (f"session:{sequence}",),
+        )
+        connection.execute(
+            "INSERT INTO commands (command_id, session_id, sequence) VALUES (?, ?, 1)",
+            (f"command:{sequence}", f"session:{sequence}"),
         )
     connection.execute(
-        "INSERT INTO validation_runs VALUES ('command:1', ?, 'full', 'success', '[full] status=success duration_ms=1')",
+        "INSERT INTO validation_runs VALUES ('command:1', ?, 'full', 'success', '[full] status=success duration_ms=1', '2026-08-08T00:00:01Z')",
         (VALIDATION_PLAN_ID,),
     )
     for sequence in (2, 3, 4):
         connection.execute(
-            "INSERT INTO validation_runs VALUES (?, ?, 'full', 'success', '[full] skipped=adaptive_low_risk_browser_scope debt=1/4')",
-            (f"command:{sequence}", VALIDATION_PLAN_ID),
+            "INSERT INTO validation_runs VALUES (?, ?, 'full', 'success', '[full] skipped=adaptive_low_risk_browser_scope debt=1/4', ?)",
+            (f"command:{sequence}", VALIDATION_PLAN_ID, f"2026-08-08T00:00:0{sequence}Z"),
         )
+    connection.execute("INSERT INTO sessions VALUES ('session:other', 'repo:other')")
+    connection.execute("INSERT INTO commands VALUES ('command:other', 'session:other', 1)")
+    connection.execute(
+        "INSERT INTO validation_runs VALUES ('command:other', ?, 'full', 'success', '[full] skipped=adaptive_low_risk_browser_scope debt=1/4', '2026-08-08T00:00:09Z')",
+        (VALIDATION_PLAN_ID,),
+    )
 
     class DebtJournal:
         _connection = connection
@@ -447,7 +460,11 @@ def test_adaptive_debt_counter_stops_at_last_real_full() -> None:
 
         def get_command(self, command_id: str):
             assert command_id == "command:5"
-            return SimpleNamespace(session_id="session:1", sequence=5)
+            return SimpleNamespace(session_id="session:5", sequence=1)
+
+        def get_session(self, session_id: str):
+            assert session_id == "session:5"
+            return SimpleNamespace(repository_id="repo:1")
 
     journal = DebtJournal()
     assert count_consecutive_adaptive_full_skips(

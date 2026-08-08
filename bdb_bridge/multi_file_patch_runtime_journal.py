@@ -551,19 +551,23 @@ def count_consecutive_adaptive_full_skips(
     command = self.get_command(command_id)
     if command is None:
         raise BridgeError(BridgeErrorCode.INVALID_PAYLOAD, "Unknown command for adaptive validation debt")
+    session = self.get_session(command.session_id)
+    if session is None:
+        raise BridgeError(BridgeErrorCode.JOURNAL_CORRUPT, "Adaptive validation command session disappeared")
     try:
         rows = self._connection.execute(
             """SELECT vr.stdout_tail
 FROM validation_runs AS vr
 JOIN commands AS c ON c.command_id = vr.command_id
-WHERE c.session_id = ?
-  AND c.sequence < ?
+JOIN sessions AS s ON s.session_id = c.session_id
+WHERE s.repository_id = ?
+  AND vr.command_id <> ?
   AND vr.plan_id = ?
   AND vr.stage_name = 'full'
   AND vr.status = 'success'
-ORDER BY c.sequence DESC
+ORDER BY vr.created_at DESC, vr.command_id DESC
 LIMIT ?""",
-            (command.session_id, command.sequence, plan_id, limit + 1),
+            (session.repository_id, command_id, plan_id, limit + 1),
         ).fetchall()
     except sqlite3.Error as exc:
         raise map_sqlite_error(exc, context="adaptive validation debt read") from exc
