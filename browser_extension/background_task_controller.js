@@ -302,7 +302,12 @@ async function bdbTaskRecordDiagnostic(event) {
     tab_id: Number.isInteger(event.tabId) ? event.tabId : null,
     trace_id: bdbTaskSafeText(event.traceId, 160),
     extension_version: currentExtensionVersion(),
-    cache: bdbTaskSafeText(event.cache, 32)
+    cache: bdbTaskSafeText(event.cache, 32),
+    stage: bdbTaskSafeText(event.stage, 64),
+    repo_alias: bdbTaskSafeText(event.repoAlias, 128),
+    command_id: bdbTaskSafeText(event.commandId, 160),
+    base_sha: bdbTaskSafeText(event.baseSha, 80),
+    result_sha: bdbTaskSafeText(event.resultSha, 80)
   };
   await bdbTaskWithStorageLock(async () => {
     const stored = await chrome.storage.local.get(BDB_TASK_DIAGNOSTICS_KEY);
@@ -359,6 +364,49 @@ async function bdbTaskMetric(name, amount = 1) {
     metrics.updated_at = Date.now();
     await chrome.storage.local.set({ [BDB_TASK_METRICS_KEY]: metrics });
   });
+}
+
+function bdbTaskPercentile(sortedValues, percentile) {
+  if (!Array.isArray(sortedValues) || sortedValues.length === 0) {
+    return null;
+  }
+  const rank = Math.ceil((percentile / 100) * sortedValues.length) - 1;
+  return sortedValues[Math.max(0, Math.min(sortedValues.length - 1, rank))];
+}
+
+function bdbTaskTimingSummary(events) {
+  const buckets = new Map();
+  for (const event of events) {
+    if (!event || !Number.isFinite(event.duration_ms)) {
+      continue;
+    }
+    const stage = bdbTaskSafeText(event.stage || event.event, 64) || "unknown";
+    const current = buckets.get(stage) || [];
+    current.push(Math.max(0, Math.round(event.duration_ms)));
+    buckets.set(stage, current);
+  }
+  const stages = {};
+  let sampleCount = 0;
+  for (const [stage, values] of buckets.entries()) {
+    const sorted = [...values].sort((left, right) => left - right);
+    sampleCount += sorted.length;
+    stages[stage] = {
+      count: sorted.length,
+      p50_ms: bdbTaskPercentile(sorted, 50),
+      p90_ms: bdbTaskPercentile(sorted, 90),
+      p99_ms: bdbTaskPercentile(sorted, 99),
+      max_ms: sorted[sorted.length - 1]
+    };
+  }
+  const criticalOrder = ["action", "auto", "delivery"];
+  return {
+    schema: "bdb-flight-recorder-v1",
+    sample_count: sampleCount,
+    stages,
+    critical_path: criticalOrder
+      .filter((stage) => stages[stage])
+      .map((stage) => ({ stage, ...stages[stage] }))
+  };
 }
 
 async function bdbTaskCompileAction(action) {
@@ -419,6 +467,26 @@ function bdbTaskResponseBaseSha(response) {
   }
   if (result.data && typeof result.data.base_sha === "string") {
     return result.data.base_sha;
+  }
+  if (result.promotion && typeof result.promotion.source_commit === "string") {
+    return result.promotion.source_commit;
+  }
+  if (result.verification && typeof result.verification.source_commit === "string") {
+    return result.verification.source_commit;
+  }
+  return null;
+}
+
+function bdbTaskResponseResultSha(response) {
+  const result = response && response.result;
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+  if (typeof result.result_sha === "string") {
+    return result.result_sha;
+  }
+  if (result.data && typeof result.data.result_sha === "string") {
+    return result.data.result_sha;
   }
   if (result.promotion && typeof result.promotion.source_commit === "string") {
     return result.promotion.source_commit;
@@ -1188,6 +1256,7 @@ submitAction = async function submitActionWithTaskController(action, tabId) {
   await bdbTaskMetric("actions_executed");
   await bdbTaskRecordDiagnostic({
     event: "action_completed",
+    stage: "action",
     operation: action.operation,
     status: response && response.status,
     errorCode: bdbTaskResponseError(response) && bdbTaskResponseError(response).error_code,
@@ -1195,6 +1264,10 @@ submitAction = async function submitActionWithTaskController(action, tabId) {
     durationMs: Date.now() - started,
     tabId,
     traceId: action.trace_id,
+    repoAlias: action.repo_alias,
+    commandId: bdbTaskMutationCommandId(response),
+    baseSha: bdbTaskResponseBaseSha(response),
+    resultSha: bdbTaskResponseResultSha(response),
     cache: "miss"
   });
   return response;
@@ -1378,6 +1451,7 @@ considerAuto = async function considerAutoWithTaskController(action, tabId) {
     if (!repeatedBenignStop) {
       await bdbTaskRecordDiagnostic({
         event: replayed ? "auto_result_replayed" : (decision && decision.executed ? "auto_executed" : "auto_stopped"),
+        stage: "auto",
         loopId,
         iteration,
         operation,
@@ -1387,7 +1461,11 @@ considerAuto = async function considerAutoWithTaskController(action, tabId) {
         detail: lastError && lastError.detail,
         durationMs: Date.now() - started,
         tabId,
-        traceId
+        traceId,
+        repoAlias: effective && effective.repo_alias,
+        commandId: bdbTaskMutationCommandId(decision && decision.response),
+        baseSha: bdbTaskResponseBaseSha(decision && decision.response),
+        resultSha: bdbTaskResponseResultSha(decision && decision.response)
       });
     }
     return { ...decision, compiler: compiled.compiler };
@@ -1488,15 +1566,17 @@ async function bdbDiagnosticsSnapshot() {
     BDB_TASK_DIAGNOSTICS_KEY,
     BDB_TASK_METRICS_KEY
   ]);
+  const events = Array.isArray(stored[BDB_TASK_DIAGNOSTICS_KEY])
+    ? stored[BDB_TASK_DIAGNOSTICS_KEY].slice(-100)
+    : [];
   return {
     schema: "bdb-sanitized-browser-diagnostics-v1",
     generated_at: Date.now(),
     extension_version: currentExtensionVersion(),
     release_channel: BDB_TASK_RELEASE_CHANNEL,
     metrics: stored[BDB_TASK_METRICS_KEY] || null,
-    events: Array.isArray(stored[BDB_TASK_DIAGNOSTICS_KEY])
-      ? stored[BDB_TASK_DIAGNOSTICS_KEY].slice(-100)
-      : [],
+    flight_recorder: bdbTaskTimingSummary(events),
+    events,
     tasks: (await bdbTaskSnapshot()).tasks.slice(0, 20),
     privacy: {
       source_code_included: false,

@@ -547,6 +547,20 @@ def test_task_controller_compiles_recovers_caches_accepts_and_gates_risk(tmp_pat
               assert.equal(diagnostics.privacy.source_code_included, false);
               assert.ok(diagnostics.events.length > 0);
               assert.ok(diagnostics.tasks.length > 0);
+              assert.equal(diagnostics.flight_recorder.schema, "bdb-flight-recorder-v1");
+              assert.ok(diagnostics.flight_recorder.sample_count > 0, JSON.stringify(diagnostics));
+              assert.ok(diagnostics.flight_recorder.stages.action, JSON.stringify(diagnostics));
+              assert.ok(diagnostics.flight_recorder.stages.auto, JSON.stringify(diagnostics));
+              assert.ok(Number.isInteger(diagnostics.flight_recorder.stages.action.p50_ms));
+              assert.ok(Number.isInteger(diagnostics.flight_recorder.stages.action.p90_ms));
+              assert.ok(Number.isInteger(diagnostics.flight_recorder.stages.action.p99_ms));
+              assert.ok(Array.isArray(diagnostics.flight_recorder.critical_path));
+              const recordedAction = diagnostics.events.find(
+                (event) => event.event === "action_completed" && event.repo_alias === "synthetic"
+              );
+              assert.ok(recordedAction, JSON.stringify(diagnostics));
+              assert.equal(recordedAction.stage, "action");
+              assert.ok(Number.isInteger(recordedAction.duration_ms));
             }
 
             run().catch((error) => {

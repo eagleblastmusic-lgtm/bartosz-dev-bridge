@@ -24,6 +24,11 @@ def test_task_controller_has_bounded_local_contracts() -> None:
     controller = read("background_task_controller.js")
     assert 'const BDB_TASK_MAX_LEDGER = 64' in controller
     assert 'const BDB_TASK_MAX_DIAGNOSTICS = 200' in controller
+    assert 'schema: "bdb-flight-recorder-v1"' in controller
+    assert "bdbTaskTimingSummary" in controller
+    assert "p50_ms" in controller
+    assert "p90_ms" in controller
+    assert "p99_ms" in controller
     assert 'const BDB_TASK_MAX_CHECKPOINTS = 16' in controller
     assert 'const BDB_TASK_MAX_CACHE_ENTRIES = 32' in controller
     assert "bdbTaskNormalizeLoopId" in controller

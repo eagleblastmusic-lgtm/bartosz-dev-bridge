@@ -82,6 +82,8 @@ Before `replace_exact_and_test`, the browser preflight searches the exact old te
 
 Terminal diagnostics retain the specific sanitized `error_code` and detail (for example `replace_mismatch`) in the diagnostic event and task ledger `last_error`; a replayed result is labelled separately instead of being counted as another executed mutation.
 
+Flight Recorder v1 derives bounded local timing evidence from the same sanitized diagnostic stream. Diagnostics expose `bdb-flight-recorder-v1` with per-stage sample counts plus p50/p90/p99/max timing summaries and a compact critical-path projection. Action/AUTO events also retain sanitized repository alias, command identity and base/result Git evidence when the runtime response provides them. Source code, action payloads and credentials remain excluded. This is the first measurable baseline; later protocol stages add task/attempt identity and finer native, queue, validation, promotion and delivery timings.
+
 AUTO does not weaken Native Host ARMED TTL, repository aliases, Direct Lane policy, fixed profiles, worktree isolation, checkpoint, rollback or recovery.
 
 ## Acceptance criteria
