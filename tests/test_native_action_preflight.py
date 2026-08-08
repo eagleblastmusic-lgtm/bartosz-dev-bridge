@@ -165,5 +165,6 @@ def test_native_preflight_allows_valid_patch_and_binds_session(tmp_path: Path) -
 
     assert envelope["command"]["session_id"] == SESSION
     assert envelope["command"]["task_id"] == SESSION
+    assert envelope["command"]["attempt_id"] == SESSION
     assert envelope["manifest"]["allowed_paths"] == ["src/**"]
     assert store.get(SESSION) is not None

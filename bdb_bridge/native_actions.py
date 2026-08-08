@@ -251,6 +251,18 @@ class NativeActionComposer:
                 raise BridgeError("invalid_payload", "task_id must be UUID or ULID") from exc
             task_id = supplied_task_id
 
+        supplied_attempt_id = action.get("attempt_id")
+        if supplied_attempt_id is None:
+            attempt_id = session_id
+        else:
+            if not isinstance(supplied_attempt_id, str):
+                raise BridgeError("invalid_payload", "attempt_id must be a string or null")
+            try:
+                validate_session_id(supplied_attempt_id)
+            except BridgeError as exc:
+                raise BridgeError("invalid_payload", "attempt_id must be UUID or ULID") from exc
+            attempt_id = supplied_attempt_id
+
         supplied_correlation = action.get("repair_correlation", _MISSING)
         parsed_correlation = (
             None
@@ -349,6 +361,7 @@ class NativeActionComposer:
             "schema_version": SCHEMA_VERSION,
             "session_id": session_id,
             "task_id": task_id,
+            "attempt_id": attempt_id,
             "command_id": command_id_for(session_id, sequence),
             "sequence": sequence,
             "operation": operation,

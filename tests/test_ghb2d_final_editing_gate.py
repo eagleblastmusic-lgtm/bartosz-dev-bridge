@@ -269,6 +269,7 @@ def test_final_gate_accepts_only_strict_multi_file_payload() -> None:
     )
     assert parsed["operation"] == "multi_file_patch"
     assert "task_id" not in parsed
+    assert "attempt_id" not in parsed
 
     with_task = command_document("sha256:" + "1" * 64)
     with_task["task_id"] = SESSION_ID
@@ -277,6 +278,23 @@ def test_final_gate_accepts_only_strict_multi_file_payload() -> None:
         source_path=f"sessions/{SESSION_ID}/commands/000001.json",
     )
     assert parsed_with_task["task_id"] == SESSION_ID
+
+    with_attempt = command_document("sha256:" + "1" * 64)
+    with_attempt["attempt_id"] = SESSION_ID
+    parsed_with_attempt = parse_command_envelope(
+        json.dumps(with_attempt),
+        source_path=f"sessions/{SESSION_ID}/commands/000001.json",
+    )
+    assert parsed_with_attempt["attempt_id"] == SESSION_ID
+
+    invalid_attempt = command_document("sha256:" + "1" * 64)
+    invalid_attempt["attempt_id"] = "not-an-attempt-id"
+    with pytest.raises(BridgeError) as attempt_error:
+        parse_command_envelope(
+            json.dumps(invalid_attempt),
+            source_path=f"sessions/{SESSION_ID}/commands/000001.json",
+        )
+    assert attempt_error.value.code == BridgeErrorCode.INVALID_PAYLOAD
 
     invalid_task = command_document("sha256:" + "1" * 64)
     invalid_task["task_id"] = "not-a-task-id"
