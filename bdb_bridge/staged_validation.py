@@ -10,6 +10,59 @@ from typing import Any, Mapping, Sequence
 from .models import ProfileRunOutcome
 
 
+TEST_ISOLATION_CLASSES = (
+    "parallel_safe",
+    "workspace_exclusive",
+    "repository_exclusive",
+    "process_sensitive",
+)
+_EXPLICIT_TEST_ISOLATION = re.compile(
+    r"^\s*#\s*bdb-isolation:\s*"
+    r"(parallel_safe|workspace_exclusive|repository_exclusive|process_sensitive)\s*$",
+    re.MULTILINE,
+)
+_WORKSPACE_EXCLUSIVE_TEST_MARKERS = (
+    "monkeypatch.chdir",
+    "os.chdir(",
+)
+_PROCESS_SENSITIVE_TEST_MARKERS = (
+    "subprocess.Popen(",
+    "InstanceLock(",
+    "time.sleep(",
+    "sys.modules[",
+)
+
+
+def classify_test_isolation(relative_path: str, source: str) -> str:
+    if not relative_path.startswith("tests/") or not relative_path.endswith(".py"):
+        raise ValueError("test isolation classification requires a tests/*.py path")
+
+    explicit = _EXPLICIT_TEST_ISOLATION.search(source)
+    if explicit is not None:
+        return explicit.group(1)
+    if any(marker in source for marker in _WORKSPACE_EXCLUSIVE_TEST_MARKERS):
+        return "workspace_exclusive"
+    if any(marker in source for marker in _PROCESS_SENSITIVE_TEST_MARKERS):
+        return "process_sensitive"
+    return "parallel_safe"
+
+
+def build_test_isolation_inventory(
+    workspace_path: Path,
+) -> dict[str, tuple[str, ...]]:
+    grouped: dict[str, list[str]] = {category: [] for category in TEST_ISOLATION_CLASSES}
+    tests_root = workspace_path / "tests"
+    if not tests_root.is_dir():
+        return {category: () for category in TEST_ISOLATION_CLASSES}
+
+    for path in sorted(tests_root.rglob("test_*.py")):
+        relative = path.relative_to(workspace_path).as_posix()
+        source = path.read_text(encoding="utf-8", errors="replace")
+        grouped[classify_test_isolation(relative, source)].append(relative)
+
+    return {category: tuple(grouped[category]) for category in TEST_ISOLATION_CLASSES}
+
+
 _BROWSER_FAST_TEST_PATTERNS: dict[str, tuple[str, ...]] = {
     "content_auto_retry.js": (
         "test_browser_auto_decision_retry_runtime.py",

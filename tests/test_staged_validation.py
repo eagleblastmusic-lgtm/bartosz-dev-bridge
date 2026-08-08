@@ -11,11 +11,14 @@ from bdb_bridge.multi_file_patch_runtime_journal import (
     validation_timing_summary,
 )
 from bdb_bridge.staged_validation import (
+    TEST_ISOLATION_CLASSES,
     VALIDATION_PLAN_ID,
     _browser_regression_test_paths,
     _migration_schema_literal_issue,
     _requires_full_pytest,
     _targeted_test_paths,
+    build_test_isolation_inventory,
+    classify_test_isolation,
     run_durable_staged_pytest_profile,
     run_staged_pytest_profile,
 )
@@ -31,6 +34,45 @@ def test_targeted_tests_include_changed_test_and_matching_bridge_module(tmp_path
         ("bdb_bridge/alpha.py", "tests/test_other.py"),
     )
     assert selected == ("tests/test_alpha.py", "tests/test_other.py")
+
+
+def test_isolation_inventory_classifies_parallel_and_exclusive_tests(tmp_path: Path) -> None:
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_parallel.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    (tests / "test_workspace.py").write_text(
+        "import os\ndef test_workspace():\n    os.chdir('.')\n",
+        encoding="utf-8",
+    )
+    (tests / "test_repository.py").write_text(
+        "# bdb-isolation: repository_exclusive\ndef test_repo():\n    assert True\n",
+        encoding="utf-8",
+    )
+    (tests / "test_process.py").write_text(
+        "import subprocess\ndef test_process():\n    subprocess.Popen([])\n",
+        encoding="utf-8",
+    )
+
+    inventory = build_test_isolation_inventory(tmp_path)
+
+    assert tuple(inventory) == TEST_ISOLATION_CLASSES
+    assert inventory["parallel_safe"] == ("tests/test_parallel.py",)
+    assert inventory["workspace_exclusive"] == ("tests/test_workspace.py",)
+    assert inventory["repository_exclusive"] == ("tests/test_repository.py",)
+    assert inventory["process_sensitive"] == ("tests/test_process.py",)
+
+
+def test_isolation_inventory_marks_known_process_sensitive_suite_files() -> None:
+    root = Path(__file__).resolve().parents[1]
+    inventory = build_test_isolation_inventory(root)
+
+    assert "tests/test_instance_lock.py" in inventory["process_sensitive"]
+    assert "tests/test_service_cli_lifecycle.py" in inventory["process_sensitive"]
+    assert "tests/test_local_browser_benchmark.py" in inventory["process_sensitive"]
+    assert classify_test_isolation(
+        "tests/test_explicit.py",
+        "# bdb-isolation: workspace_exclusive\ndef test_ok():\n    assert True\n",
+    ) == "workspace_exclusive"
 
 
 def test_browser_fast_mapping_is_narrow_and_multi_file_scope_escalates_to_regression(
