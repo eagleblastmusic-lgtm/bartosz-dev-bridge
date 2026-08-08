@@ -187,6 +187,14 @@ def test_auto_inspect_bundle_adapts_to_fast_and_legacy_composer_limits(tmp_path:
               status: "success",
               operation: "inspect_bundle",
               base_sha: "a".repeat(40),
+              request_fingerprint: `sha256:${"b".repeat(64)}`,
+              continuation: {
+                schema: "bdb-inspect-continuation-v1",
+                base_sha: "a".repeat(40),
+                request_fingerprint: `sha256:${"b".repeat(64)}`,
+                token: `sha256:${"c".repeat(64)}`,
+                reads: [{ path: "cursor-api/Komponenty/module-0/file.py", start_line: 401, end_line: 900 }]
+              },
               response_profile: "compact",
               result_bytes: 18000,
               performance: { parallel_searches: true, search_workers: 4 },
@@ -237,11 +245,15 @@ def test_auto_inspect_bundle_adapts_to_fast_and_legacy_composer_limits(tmp_path:
             const legacyPayload = JSON.parse(legacy.split("BDB_RESULT:\n", 2)[1]);
             assert.equal(fastPayload.operation, "inspect_bundle");
             assert.equal(fastPayload.base_sha, "a".repeat(40));
+            assert.equal(fastPayload.request_fingerprint, `sha256:${"b".repeat(64)}`);
+            assert.equal(fastPayload.continuation.token, `sha256:${"c".repeat(64)}`);
             assert.equal(fastPayload.searches.length, 8);
             assert.equal(fastPayload.searches[0].matches[0].path, "cursor-api/Komponenty/module-0/file-0.py");
             assert.ok(["rich", "compact", "tight", "minimal"].includes(fastPayload.auto_payload.profile));
             assert.equal(legacyPayload.operation, "inspect_bundle");
             assert.equal(legacyPayload.base_sha, "a".repeat(40));
+            assert.equal(legacyPayload.request_fingerprint, `sha256:${"b".repeat(64)}`);
+            assert.equal(legacyPayload.continuation.token, `sha256:${"c".repeat(64)}`);
             assert.equal(legacyPayload.searches.length, 8);
             assert.ok(["tight", "minimal"].includes(legacyPayload.auto_payload.profile));
             '''

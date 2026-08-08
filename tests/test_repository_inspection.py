@@ -5,6 +5,9 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from bdb_bridge.protocol import BridgeError
 from bdb_bridge.repository_inspection import inspect_repository
 
 
@@ -256,3 +259,62 @@ def test_compact_inspection_keeps_distant_explicit_ranges_separate(tmp_path: Pat
         "total_content_bytes": 12 * 1024,
         "result_bytes": 20 * 1024,
     }
+
+
+def test_compact_inspection_continuation_is_snapshot_and_request_bound(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+    runtime.mkdir()
+    git(repo, "init", "-b", "master")
+    git(repo, "config", "user.name", "Inspection Test")
+    git(repo, "config", "user.email", "inspection@example.invalid")
+    (repo / "src").mkdir()
+    (repo / "src" / "large.py").write_text(
+        "".join(f"line_{index} = '{'x' * 120}'\n" for index in range(1, 901)),
+        encoding="utf-8",
+    )
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "fixture")
+    config = SimpleNamespace(
+        fixture_repo_path=repo,
+        allowed_paths=("src/**",),
+        runtime_dir=runtime,
+        mirror_sync_enabled=False,
+    )
+    payload = {
+        "reads": [{"path": "src/large.py", "start_line": 1, "end_line": 900}],
+        "read_top_matches": 0,
+        "include_tree": False,
+        "include_symbols": False,
+    }
+
+    first = inspect_repository(config, payload, compact=True)
+    first_read = first["reads"][0]
+    continuation = first["continuation"]
+    assert first_read["range_complete"] is False
+    assert continuation["schema"] == "bdb-inspect-continuation-v1"
+    assert continuation["base_sha"] == first["base_sha"]
+    assert continuation["request_fingerprint"] == first["request_fingerprint"]
+    assert continuation["reads"][0]["start_line"] == first_read["end_line"] + 1
+
+    continued_payload = dict(payload)
+    continued_payload["continuation"] = continuation
+    second = inspect_repository(config, continued_payload, compact=True)
+    assert second["base_sha"] == first["base_sha"]
+    assert second["request_fingerprint"] == first["request_fingerprint"]
+    assert second["reads"][0]["start_line"] == first_read["end_line"] + 1
+    assert second["reads"][0]["content"]
+
+    mismatched_payload = dict(payload)
+    mismatched_payload["read_top_matches"] = 1
+    mismatched_payload["continuation"] = continuation
+    with pytest.raises(BridgeError, match="request fingerprint mismatch"):
+        inspect_repository(config, mismatched_payload, compact=True)
+
+    with (repo / "src" / "large.py").open("a", encoding="utf-8") as handle:
+        handle.write("new_head = True\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "advance head")
+    with pytest.raises(BridgeError, match="base_sha no longer matches HEAD"):
+        inspect_repository(config, continued_payload, compact=True)

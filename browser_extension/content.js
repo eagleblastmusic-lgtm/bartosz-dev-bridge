@@ -750,6 +750,8 @@ function bdbAutoInspectBundlePayload(payload, profile = "rich") {
       status: payload && payload.status,
       operation: "inspect_bundle",
       base_sha: payload && payload.base_sha,
+      request_fingerprint: payload && payload.request_fingerprint,
+      continuation: payload && payload.continuation,
       context: {
         source_clean: context.source_clean,
         controlled_clean: context.controlled_clean,
@@ -779,6 +781,8 @@ function bdbAutoInspectBundlePayload(payload, profile = "rich") {
     status: payload && payload.status,
     operation: "inspect_bundle",
     base_sha: payload && payload.base_sha,
+    request_fingerprint: payload && payload.request_fingerprint,
+    continuation: payload && payload.continuation,
     response_profile: payload && payload.response_profile,
     result_bytes: payload && payload.result_bytes,
     performance: payload && payload.performance,

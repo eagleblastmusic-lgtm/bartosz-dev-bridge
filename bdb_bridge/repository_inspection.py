@@ -358,11 +358,137 @@ def _parallel_searches(
         return list(pool.map(lambda item: search_repository(config, item, snapshot=snapshot), searches))
 
 
+def _inspect_request_fingerprint(payload: dict[str, Any]) -> str:
+    canonical = {key: value for key, value in payload.items() if key != "continuation"}
+    encoded = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _continuation_token(
+    base_sha: str,
+    request_fingerprint: str,
+    reads: list[dict[str, Any]],
+) -> str:
+    encoded = json.dumps(
+        {
+            "schema": "bdb-inspect-continuation-v1",
+            "base_sha": base_sha,
+            "request_fingerprint": request_fingerprint,
+            "reads": reads,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _continuation_specs(
+    payload: dict[str, Any],
+    snapshot: RepositorySnapshot,
+) -> list[dict[str, Any]] | None:
+    raw = payload.get("continuation")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or raw.get("schema") != "bdb-inspect-continuation-v1":
+        raise BridgeError(
+            "invalid_payload",
+            "inspect_bundle continuation must use bdb-inspect-continuation-v1",
+            details={
+                "rule_id": "inspect_bundle.continuation.schema",
+                "phase": "native_validation",
+                "effect_started": False,
+            },
+        )
+    request_fingerprint = _inspect_request_fingerprint(payload)
+    if raw.get("base_sha") != snapshot.head:
+        raise BridgeError(
+            "invalid_payload",
+            "inspect_bundle continuation base_sha no longer matches HEAD",
+            details={
+                "rule_id": "inspect_bundle.continuation.base_sha",
+                "phase": "native_validation",
+                "effect_started": False,
+            },
+        )
+    if raw.get("request_fingerprint") != request_fingerprint:
+        raise BridgeError(
+            "invalid_payload",
+            "inspect_bundle continuation request fingerprint mismatch",
+            details={
+                "rule_id": "inspect_bundle.continuation.request_fingerprint",
+                "phase": "native_validation",
+                "effect_started": False,
+            },
+        )
+    reads = raw.get("reads")
+    if not isinstance(reads, list) or not reads:
+        raise BridgeError(
+            "invalid_payload",
+            "inspect_bundle continuation reads must be a non-empty list",
+            details={
+                "rule_id": "inspect_bundle.continuation.reads",
+                "phase": "native_validation",
+                "effect_started": False,
+            },
+        )
+    expected_token = _continuation_token(snapshot.head, request_fingerprint, reads)
+    if raw.get("token") != expected_token:
+        raise BridgeError(
+            "invalid_payload",
+            "inspect_bundle continuation token mismatch",
+            details={
+                "rule_id": "inspect_bundle.continuation.token",
+                "phase": "native_validation",
+                "effect_started": False,
+            },
+        )
+    return _read_specs({"reads": reads})
+
+
+def _compact_continuation(result: dict[str, Any]) -> dict[str, Any] | None:
+    reads: list[dict[str, Any]] = []
+    for read in result.get("reads", []):
+        start_line = read.get("start_line")
+        end_line = read.get("end_line")
+        requested_end_line = read.get("requested_end_line")
+        if (
+            read.get("range_complete") is False
+            and isinstance(start_line, int)
+            and isinstance(end_line, int)
+            and isinstance(requested_end_line, int)
+            and end_line < requested_end_line
+        ):
+            reads.append(
+                {
+                    "path": read.get("path"),
+                    "start_line": max(start_line, end_line + 1),
+                    "end_line": requested_end_line,
+                }
+            )
+    if not reads:
+        return None
+    base_sha = str(result["base_sha"])
+    request_fingerprint = str(result["request_fingerprint"])
+    return {
+        "schema": "bdb-inspect-continuation-v1",
+        "base_sha": base_sha,
+        "request_fingerprint": request_fingerprint,
+        "token": _continuation_token(base_sha, request_fingerprint, reads),
+        "reads": reads,
+    }
+
+
 def _compact_bound(result: dict[str, Any]) -> dict[str, Any]:
     def size() -> int:
         return len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
-    while size() > _COMPACT_RESULT_BYTES:
+    def shrink_once() -> bool:
         candidates = [
             read for read in result["reads"] if isinstance(read.get("content"), str) and read["content"]
         ]
@@ -371,10 +497,19 @@ def _compact_bound(result: dict[str, Any]) -> dict[str, Any]:
             raw = largest["content"].encode("utf-8")
             if len(raw) > 768:
                 largest["content"] = raw[: max(768, len(raw) // 2)].decode("utf-8", errors="ignore")
-                largest["returned_bytes"] = len(largest["content"].encode("utf-8"))
+                encoded = largest["content"].encode("utf-8")
+                largest["returned_bytes"] = len(encoded)
+                largest["content_sha256"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+                returned_line_count = len(largest["content"].splitlines())
+                start_line = largest.get("start_line")
+                if isinstance(start_line, int):
+                    largest["end_line"] = (
+                        start_line + returned_line_count - 1 if returned_line_count else start_line - 1
+                    )
                 largest["truncated"] = True
+                largest["range_complete"] = False
                 result["reads_truncated"] = True
-                continue
+                return True
         removable = next(
             (search for search in reversed(result["searches"]) if search.get("matches")),
             None,
@@ -382,16 +517,27 @@ def _compact_bound(result: dict[str, Any]) -> dict[str, Any]:
         if removable is not None:
             removable["matches"].pop()
             removable["truncated"] = True
-            continue
+            return True
         if result["tree"]:
             result["tree"].pop()
             result["tree_truncated"] = True
-            continue
+            return True
         if result["context"]["symbols"]:
             result["context"]["symbols"].pop()
             result["context"]["symbols_truncated"] = True
-            continue
-        raise BridgeError("result_too_large", "Compact inspect_bundle result exceeds its limit")
+            return True
+        return False
+
+    while True:
+        result.pop("continuation", None)
+        continuation = _compact_continuation(result)
+        if continuation is not None:
+            result["continuation"] = continuation
+        if size() <= _COMPACT_RESULT_BYTES:
+            break
+        result.pop("continuation", None)
+        if not shrink_once():
+            raise BridgeError("result_too_large", "Compact inspect_bundle result exceeds its limit")
     result["result_bytes"] = size()
     return result
 
@@ -409,9 +555,14 @@ def inspect_repository(config: Any, payload: dict[str, Any], *, compact: bool = 
         raise BridgeError("invalid_payload", "inspect_bundle search items must be objects")
 
     snapshot = repository_snapshot(config)
-    searches = _parallel_searches(config, raw_searches, snapshot)
-    specs = _read_specs(payload)
-    specs.extend(_match_read_specs(searches, _top_match_limit(payload)))
+    continuation_specs = _continuation_specs(payload, snapshot)
+    if continuation_specs is None:
+        searches = _parallel_searches(config, raw_searches, snapshot)
+        specs = _read_specs(payload)
+        specs.extend(_match_read_specs(searches, _top_match_limit(payload)))
+    else:
+        searches = []
+        specs = continuation_specs
     reads, reads_truncated = _render_reads(
         config,
         snapshot,
@@ -473,6 +624,7 @@ def inspect_repository(config: Any, payload: dict[str, Any], *, compact: bool = 
         "status": "success",
         "operation": INSPECT_BUNDLE_OPERATION,
         "base_sha": snapshot.head,
+        "request_fingerprint": _inspect_request_fingerprint(payload),
         "changed_files": [],
         "context": {
             "source_clean": context["source_clean"],
@@ -509,8 +661,8 @@ def inspect_repository(config: Any, payload: dict[str, Any], *, compact: bool = 
         },
         "response_profile": "compact" if compact else "full",
         "performance": {
-            "parallel_searches": len(raw_searches) > 1,
-            "search_workers": min(4, len(raw_searches)),
+            "parallel_searches": len(searches) > 1,
+            "search_workers": min(4, len(searches)),
             "search_cache_hits": sum(
                 1 for item in searches if item.get("cache", {}).get("status") == "hit"
             ),
