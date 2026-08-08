@@ -405,7 +405,12 @@ async function repositoryInspection(action) {
       client_preflight: true,
       error: {
         code: "invalid_payload",
-        message: preflightError
+        message: preflightError,
+        details: {
+          rule_id: "inspect_bundle.client_preflight",
+          phase: "client_preflight",
+          effect_started: false
+        }
       }
     };
   }

@@ -252,6 +252,9 @@ def test_action_preflight_hash_scope_and_success_runtime(tmp_path: Path) -> None
                 () => context.__bdbSubmitAction(candidate, 7),
                 (error) => {
                   assert.equal(error.bdbCode, expectedCode);
+                  assert.equal(error.bdbDetails.rule_id, `action_preflight.${expectedCode}`);
+                  assert.equal(error.bdbDetails.phase, "client_preflight");
+                  assert.equal(error.bdbDetails.effect_started, false);
                   assert.match(error.message, expectedText);
                   return true;
                 }

@@ -694,17 +694,26 @@ def _error_response(request_id: str, exc: Exception) -> dict[str, Any]:
         ),
     }
     message = public_messages.get(code, f"Native request failed: {code}")
+    details = None
     if code == "invalid_payload" and isinstance(exc, BridgeError):
         message = str(exc)
+        details = exc.details or {
+            "rule_id": "invalid_payload",
+            "phase": "native_validation",
+            "effect_started": False,
+        }
+    error = {
+        "code": code,
+        "message": message,
+    }
+    if details is not None:
+        error["details"] = details
     return {
         "schema": NATIVE_RESPONSE_SCHEMA,
         "host_version": NATIVE_HOST_VERSION,
         "request_id": request_id,
         "status": "failed",
-        "error": {
-            "code": code,
-            "message": message,
-        },
+        "error": error,
     }
 
 

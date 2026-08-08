@@ -20,9 +20,15 @@ BASE_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 class BridgeError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.details = dict(details) if details is not None else None
 
 
 def validate_session_id(value: str) -> None:

@@ -266,6 +266,9 @@ def test_auto_read_failure_continues_when_continue_on_failure_is_enabled(tmp_pat
               assert.equal(decision.state.status, "running", JSON.stringify(decision));
               assert.equal(decision.response.error.code, "invalid_payload");
               assert.equal(decision.response.client_preflight, true);
+              assert.equal(decision.response.error.details.rule_id, "inspect_bundle.client_preflight");
+              assert.equal(decision.response.error.details.phase, "client_preflight");
+              assert.equal(decision.response.error.details.effect_started, false);
               assert.equal(inspectNativeCalls, 0, "invalid inspect_bundle must stop before Native Host");
               assert.equal(
                 decision.response.error.message,

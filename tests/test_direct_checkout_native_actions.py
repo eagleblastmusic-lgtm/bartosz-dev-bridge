@@ -229,4 +229,9 @@ def test_invalid_payload_native_error_preserves_actionable_validation_message() 
     assert response["error"] == {
         "code": "invalid_payload",
         "message": "inspect_bundle read_top_matches must be boolean or 0-12",
+        "details": {
+            "rule_id": "invalid_payload",
+            "phase": "native_validation",
+            "effect_started": False,
+        },
     }

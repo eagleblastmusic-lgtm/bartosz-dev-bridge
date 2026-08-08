@@ -9,6 +9,11 @@ const submitActionBeforePreflight = submitAction;
 function bdbPreflightError(code, detail) {
   const error = new Error(`${code}: ${detail}`);
   error.bdbCode = code;
+  error.bdbDetails = {
+    rule_id: `action_preflight.${code}`,
+    phase: "client_preflight",
+    effect_started: false
+  };
   return error;
 }
 
