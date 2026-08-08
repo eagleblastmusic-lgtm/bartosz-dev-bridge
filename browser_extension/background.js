@@ -943,6 +943,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         );
       case "BDB_CONSIDER_AUTO":
         return considerAuto(message.action, sender.tab && sender.tab.id);
+      case "BDB_AUTO_WAIT":
+        if (
+          !Number.isInteger(message.milliseconds) ||
+          message.milliseconds < 0 ||
+          message.milliseconds > 5000
+        ) {
+          throw new Error("AUTO wait milliseconds must be an integer between 0 and 5000");
+        }
+        await sleep(message.milliseconds);
+        return { waited: true, milliseconds: message.milliseconds };
       case "BDB_GET_AUTO_SETTINGS":
         return getAutoSettings();
       case "BDB_SET_AUTO_SETTINGS":

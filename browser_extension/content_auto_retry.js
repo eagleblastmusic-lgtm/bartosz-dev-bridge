@@ -96,7 +96,24 @@ function bdbSetAutoButtonText(button, text) {
 }
 
 
-function bdbAutoDecisionSleep(milliseconds) {
+async function bdbAutoDecisionSleep(milliseconds) {
+  if (
+    typeof chrome === "object" &&
+    chrome.runtime &&
+    typeof chrome.runtime.sendMessage === "function"
+  ) {
+    try {
+      const waited = await chrome.runtime.sendMessage({
+        type: "BDB_AUTO_WAIT",
+        milliseconds
+      });
+      if (waited && waited.ok === true) {
+        return;
+      }
+    } catch (_error) {
+      // Fall back only when the background wait broker is unavailable.
+    }
+  }
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 

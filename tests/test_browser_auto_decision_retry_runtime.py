@@ -42,6 +42,12 @@ class AutoDecisionRetryRuntimeTests(unittest.TestCase):
                         chrome: {
                           runtime: {
                             async sendMessage(message) {
+                              if (message.type === "BDB_AUTO_WAIT") {
+                                return {
+                                  ok: true,
+                                  response: { waited: true, milliseconds: message.milliseconds }
+                                };
+                              }
                               if (message.type === "BDB_MARK_AUTO_RESULT_DELIVERED") {
                                 delivered += 1;
                                 return { ok: true };
@@ -220,6 +226,24 @@ class AutoDecisionRetryRuntimeTests(unittest.TestCase):
                 timeout=30,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_background_tab_waits_are_brokered_by_extension_worker(self) -> None:
+        auto_send = (EXTENSION / "content_auto_send.js").read_text(encoding="utf-8")
+        auto_retry = (EXTENSION / "content_auto_retry.js").read_text(encoding="utf-8")
+        background = (EXTENSION / "background.js").read_text(encoding="utf-8")
+
+        self.assertIn('type: "BDB_AUTO_WAIT"', auto_send)
+        self.assertIn('type: "BDB_AUTO_WAIT"', auto_retry)
+        self.assertIn('case "BDB_AUTO_WAIT":', background)
+        self.assertIn("await sleep(message.milliseconds);", background)
+        self.assertNotIn(
+            "function bdbAutoSendSleep(milliseconds) {\n  return new Promise((resolve) => setTimeout(resolve, milliseconds));\n}",
+            auto_send,
+        )
+        self.assertNotIn(
+            "function bdbAutoDecisionSleep(milliseconds) {\n  return new Promise((resolve) => setTimeout(resolve, milliseconds));\n}",
+            auto_retry,
+        )
 
 
 if __name__ == "__main__":
