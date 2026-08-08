@@ -230,10 +230,12 @@ def _run_pytest(
     timeout_seconds: float,
     environment: Mapping[str, str],
     test_paths: Sequence[str],
+    exclude_paths: Sequence[str] = (),
 ) -> ProfileRunOutcome:
     command = [str(python_executable), "-m", "pytest", "-q", *test_paths]
     if not test_paths:
         command.append("--durations=20")
+        command.extend(f"--ignore={path}" for path in exclude_paths)
     started = time.monotonic()
     try:
         completed = subprocess.run(
@@ -393,6 +395,7 @@ def run_staged_pytest_profile(
         timeout_seconds=timeout_seconds,
         environment=environment,
         test_paths=(),
+        exclude_paths=targeted,
     )
     stdout_parts.append(
         f"[full] status={full_outcome.status} duration_ms={full_outcome.duration_ms}\n"
@@ -616,6 +619,7 @@ def run_durable_staged_pytest_profile(
             timeout_seconds=timeout_seconds,
             environment=environment,
             test_paths=(),
+            exclude_paths=targeted_paths,
         )
         return ProfileRunOutcome(
             outcome.status,

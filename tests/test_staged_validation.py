@@ -204,7 +204,14 @@ def test_staged_profile_runs_targeted_before_one_full_pytest(
     assert len(calls) == 2
     assert calls[0][-1] == "tests/test_alpha.py"
     assert "--durations=20" not in calls[0]
-    assert calls[1] == [sys.executable, "-m", "pytest", "-q", "--durations=20"]
+    assert calls[1] == [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "--durations=20",
+        "--ignore=tests/test_alpha.py",
+    ]
     assert "[targeted] status=success" in outcome.stdout
     assert "[full] status=success" in outcome.stdout
 
@@ -451,7 +458,14 @@ def test_durable_stages_reuse_completed_structural_and_targeted_after_restart(
     )
 
     assert outcome.status == "success"
-    assert calls == [[sys.executable, "-m", "pytest", "-q", "--durations=20"]]
+    assert calls == [[
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "--durations=20",
+        "--ignore=tests/test_alpha.py",
+    ]]
     assert "[structural] persisted" in outcome.stdout
     assert "[targeted] persisted" in outcome.stdout
     assert "[regression] skipped=not_required" in outcome.stdout
@@ -580,7 +594,15 @@ def test_durable_browser_scope_forces_full_when_adaptive_debt_reaches_limit(
     assert outcome.status == "success"
     assert len(calls) == 2
     assert "--durations=20" not in calls[0]
-    assert calls[1] == [sys.executable, "-m", "pytest", "-q", "--durations=20"]
+    assert calls[1] == [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "--durations=20",
+        "--ignore=tests/test_browser_auto_decision_retry_runtime.py",
+        "--ignore=tests/test_browser_conversation_tab_binding_runtime.py",
+    ]
     assert "[full] status=success" in outcome.stdout
 
 
