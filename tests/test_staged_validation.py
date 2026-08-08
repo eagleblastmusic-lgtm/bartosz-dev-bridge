@@ -198,7 +198,8 @@ def test_staged_profile_runs_targeted_before_one_full_pytest(
     assert outcome.status == "success"
     assert len(calls) == 2
     assert calls[0][-1] == "tests/test_alpha.py"
-    assert calls[1] == [sys.executable, "-m", "pytest", "-q"]
+    assert "--durations=20" not in calls[0]
+    assert calls[1] == [sys.executable, "-m", "pytest", "-q", "--durations=20"]
     assert "[targeted] status=success" in outcome.stdout
     assert "[full] status=success" in outcome.stdout
 
@@ -392,7 +393,7 @@ def test_durable_stages_reuse_completed_structural_and_targeted_after_restart(
     )
 
     assert outcome.status == "success"
-    assert calls == [[sys.executable, "-m", "pytest", "-q"]]
+    assert calls == [[sys.executable, "-m", "pytest", "-q", "--durations=20"]]
     assert "[structural] persisted" in outcome.stdout
     assert "[targeted] persisted" in outcome.stdout
     assert "[regression] skipped=not_required" in outcome.stdout

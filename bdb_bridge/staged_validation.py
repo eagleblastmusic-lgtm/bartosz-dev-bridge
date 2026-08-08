@@ -232,6 +232,8 @@ def _run_pytest(
     test_paths: Sequence[str],
 ) -> ProfileRunOutcome:
     command = [str(python_executable), "-m", "pytest", "-q", *test_paths]
+    if not test_paths:
+        command.append("--durations=20")
     started = time.monotonic()
     try:
         completed = subprocess.run(
