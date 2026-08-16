@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - bdb-vnext
-      - tmp-m7b-checkout-sync-build
   workflow_dispatch:
 
 permissions:
