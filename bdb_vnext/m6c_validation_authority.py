@@ -493,7 +493,11 @@ class CanonicalValidationAuthority:
                         not isinstance(current_applicability, Mapping)
                         or current_applicability.get("applicable") is not True
                     ):
-                        item_reasons.append("evidence_not_current")
+                        current_reason = current_applicability.get("reason")
+                        item_reasons.append(
+                            "evidence_not_current:"
+                            + (str(current_reason) if current_reason else "applicability_unknown")
+                        )
                     if assessment is not None:
                         expected_disposition = (
                             "PASS" if assessment.verdict == "PASS"
