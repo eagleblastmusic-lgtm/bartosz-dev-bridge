@@ -583,22 +583,31 @@ class PreparedGitCasAdapter:
         return self._row_record(row) if row else None
 
     def _observe_ref(self, repository: RepositoryResource, target_ref: str) -> str | None:
+        # ``show-ref --verify --hash`` uses different non-zero statuses for an
+        # absent ref across supported Git versions.  ``for-each-ref`` gives a
+        # stable zero-result representation and also lets us require the exact
+        # full ref name instead of inferring absence from an exit code.
         completed = self._git(
             repository.root,
-            ["show-ref", "--verify", "--hash", target_ref],
-            check=False,
+            ["for-each-ref", "--format=%(refname)\t%(objectname)", target_ref],
             operation="ref observation",
         )
-        if completed.returncode == 1:
-            return None
-        if completed.returncode != 0:
-            _fail(
-                "git_ref_observation_failed",
-                "Git ref could not be observed exactly",
-                details={"returncode": completed.returncode},
+        observed: str | None = None
+        for raw_line in completed.stdout.splitlines():
+            ref_bytes, separator, oid_bytes = raw_line.partition(b"\t")
+            if not separator:
+                _fail("git_ref_observation_failed", "Git ref observation output is malformed")
+            ref_name = ref_bytes.decode("utf-8", errors="strict")
+            if ref_name != target_ref:
+                continue
+            if observed is not None:
+                _fail("git_ref_observation_failed", "Git returned duplicate exact ref observations")
+            observed = _oid(
+                oid_bytes.decode("ascii", errors="strict").strip().lower(),
+                object_format=repository.object_format,
+                field="observed_ref_oid",
             )
-        raw = completed.stdout.decode("ascii", errors="strict").strip().lower()
-        return _oid(raw, object_format=repository.object_format, field="observed_ref_oid")
+        return observed
 
     def _expected_matches(self, record: PreparedGitEffect, observed: str | None) -> bool:
         null_oid = _zero_oid(record.object_format)
