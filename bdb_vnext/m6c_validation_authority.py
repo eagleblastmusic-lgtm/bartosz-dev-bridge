@@ -27,6 +27,7 @@ from bdb_vnext.control_store import (
     rollback_control_write,
 )
 from bdb_vnext.engineering_loop import ValidationCommand
+from bdb_vnext.m4c_evidence import EvidenceError
 from bdb_vnext.m6a_evidence_policy import EvidencePolicyGate, compute_subject_digest
 from bdb_vnext.m6b_check_plan import DeterministicCheckPlanSelector, M6bError
 
@@ -476,6 +477,34 @@ class CanonicalValidationAuthority:
                 expected_environment = obligation.evidence_contract.get("environment_fingerprint") if obligation else None
                 if actual_environment is None or actual_environment != expected_environment:
                     item_reasons.append("evidence_environment_mismatch")
+
+                # Authorization must re-observe current Evidence/Candidate truth.
+                # A previously PASS/FAIL Assessment is immutable history and
+                # cannot by itself authorize after the Candidate or raw Evidence
+                # has become stale.  This read-only query adds no new Assessment
+                # and never re-runs the checker.
+                try:
+                    current_evidence = self.evidence_store.query(evidence.evidence_id)
+                except EvidenceError as exc:
+                    item_reasons.append(f"evidence_current_query_failed:{exc.code}")
+                else:
+                    current_applicability = current_evidence.get("applicability")
+                    if (
+                        not isinstance(current_applicability, Mapping)
+                        or current_applicability.get("applicable") is not True
+                    ):
+                        item_reasons.append("evidence_not_current")
+                    if assessment is not None:
+                        expected_disposition = (
+                            "PASS" if assessment.verdict == "PASS"
+                            else "FAIL" if assessment.verdict == "FAIL"
+                            else None
+                        )
+                        if (
+                            expected_disposition is not None
+                            and current_evidence.get("effective_disposition") != expected_disposition
+                        ):
+                            item_reasons.append("evidence_disposition_changed")
 
             if assessment is None:
                 item_reasons.append("assessment_missing")
