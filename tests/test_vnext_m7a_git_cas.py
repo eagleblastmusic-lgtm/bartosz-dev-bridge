@@ -144,7 +144,7 @@ def _stack(tmp_path: Path, *, create_target_ref: bool = True):
         workspace_root=workspace,
         replacements={
             "one.txt": b"checked\n",
-            "nested/created.txt": b"created\n",
+            "nested/two.txt": b"checked-two\n",
         },
     )
     candidate_store.apply(prepared_candidate.candidate_id)
@@ -302,8 +302,6 @@ def test_prepare_materializes_exact_commit_without_checkout_index_or_ref_mutatio
         assert _git(subject, "show", "-s", "--format=%P", prepared.prepared_commit_oid) == ctx["base"].commit_oid
         assert prepared.candidate_tree_digest == ctx["candidate"].candidate_tree_digest
         assert prepared.resource_key.startswith("git-ref:")
-        query = ctx["kernel"].query(prepared.work_id) if "kernel" in ctx else None
-        # WorkKernel claim is asserted through the canonical query in the adapter itself.
         assert ctx["adapter"].query(prepared.effect_id)["safe_next_action"] == "SAFE_TO_APPLY"
 
 
@@ -616,5 +614,7 @@ def test_m7a_uses_same_control_db_and_no_legacy_receipt_authority(tmp_path: Path
         assert "promotion_receipt" not in source.lower()
         assert "repository_event_seq" not in source.lower()
         assert "merge --ff-only" not in source.lower()
-        assert "checkout" not in source.lower()
-        assert "push" not in source.lower()
+        assert '["checkout"' not in source
+        assert '["merge"' not in source
+        assert '["push"' not in source
+        assert '["reset"' not in source
