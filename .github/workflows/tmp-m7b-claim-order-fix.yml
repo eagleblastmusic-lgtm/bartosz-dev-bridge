@@ -1,0 +1,53 @@
+name: Temporary M7b Claim Order Repair
+
+on:
+  push:
+    branches:
+      - tmp-m7b-checkout-sync-build
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Apply exact mechanical repair
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('bdb_vnext/m7b_checkout_sync.py')
+          text = path.read_text(encoding='utf-8')
+          claim = "        self.work_kernel.claim_resource(work_id, resource_key, run.lease_id, run.fence)\n\n"
+          if text.count(claim) != 1:
+              raise SystemExit('expected exactly one M7b claim_resource statement')
+          text = text.replace(claim, '', 1)
+          anchor = "        identity = {\n"
+          if text.count(anchor) != 1:
+              raise SystemExit('expected exactly one M7b effect identity anchor')
+          text = text.replace(anchor, claim + anchor, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Verify exact delta
+        shell: bash
+        run: |
+          git diff --check
+          git diff -- bdb_vnext/m7b_checkout_sync.py
+
+      - name: Commit and push repair to staging branch
+        shell: bash
+        run: |
+          git config user.name "BDB vNext CI"
+          git config user.email "bdb-vnext-ci@localhost.invalid"
+          git add bdb_vnext/m7b_checkout_sync.py
+          git commit -m "bdb-vnext: fix M7b precondition claim ordering"
+          git push origin HEAD:tmp-m7b-checkout-sync-build
