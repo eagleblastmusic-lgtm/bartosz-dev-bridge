@@ -1,0 +1,44 @@
+name: Temporary M6c Reason Provenance Repair
+
+on:
+  push:
+    branches:
+      - tmp-m6c-validation-authority-build
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Preserve current applicability reason
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('bdb_vnext/m6c_validation_authority.py')
+          text = path.read_text(encoding='utf-8')
+          old = '                        item_reasons.append("evidence_not_current")\n'
+          new = '''                        current_reason = current_applicability.get("reason")\n                        item_reasons.append(\n                            "evidence_not_current:"\n                            + (str(current_reason) if current_reason else "applicability_unknown")\n                        )\n'''
+          if text.count(old) != 1:
+              raise SystemExit('expected exactly one evidence_not_current anchor')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+          python -m py_compile bdb_vnext/m6c_validation_authority.py
+          git diff --check
+
+      - name: Commit and push repair to staging branch
+        shell: bash
+        run: |
+          git config user.name "BDB vNext CI"
+          git config user.email "bdb-vnext-ci@localhost.invalid"
+          git add bdb_vnext/m6c_validation_authority.py
+          git commit -m "bdb-vnext: preserve M6c applicability failure reason"
+          git push origin HEAD:tmp-m6c-validation-authority-build
