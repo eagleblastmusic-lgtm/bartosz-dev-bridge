@@ -714,8 +714,6 @@ class CheckoutSyncAdapter:
 
         checkout_root = str(Path(repository.root).absolute())
         resource_key = _resource_key(repository.identity_digest, checkout_root)
-        self.work_kernel.claim_resource(work_id, resource_key, run.lease_id, run.fence)
-
         provisional = CheckoutSyncEffect(
             work_id=work_id,
             task_id=str(source.task_id),
@@ -756,6 +754,8 @@ class CheckoutSyncAdapter:
                 "local checkout contains state outside the exact old/new synchronization boundary",
                 details={"observation": observation.as_dict(), "effect_certainty": certainty},
             )
+
+        self.work_kernel.claim_resource(work_id, resource_key, run.lease_id, run.fence)
 
         identity = {
             "schema": M7B_EFFECT_SCHEMA,
