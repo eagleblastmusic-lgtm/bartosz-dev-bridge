@@ -1,0 +1,58 @@
+name: Temporary M6c Current Applicability Repair
+
+on:
+  push:
+    branches:
+      - tmp-m6c-validation-authority-build
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Apply exact mechanical repair
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('bdb_vnext/m6c_validation_authority.py')
+          text = path.read_text(encoding='utf-8')
+
+          import_anchor = 'from bdb_vnext.engineering_loop import ValidationCommand\n'
+          import_line = 'from bdb_vnext.m4c_evidence import EvidenceError\n'
+          if text.count(import_anchor) != 1 or import_line in text:
+              raise SystemExit('unexpected M6c import anchor state')
+          text = text.replace(import_anchor, import_anchor + import_line, 1)
+
+          anchor = '''                if actual_environment is None or actual_environment != expected_environment:\n                    item_reasons.append("evidence_environment_mismatch")\n\n            if assessment is None:\n'''
+          replacement = '''                if actual_environment is None or actual_environment != expected_environment:\n                    item_reasons.append("evidence_environment_mismatch")\n\n                # Authorization must re-observe current Evidence/Candidate truth.\n                # A previously PASS/FAIL Assessment is immutable history and\n                # cannot by itself authorize after the Candidate or raw Evidence\n                # has become stale.  This read-only query adds no new Assessment\n                # and never re-runs the checker.\n                try:\n                    current_evidence = self.evidence_store.query(evidence.evidence_id)\n                except EvidenceError as exc:\n                    item_reasons.append(f"evidence_current_query_failed:{exc.code}")\n                else:\n                    current_applicability = current_evidence.get("applicability")\n                    if (\n                        not isinstance(current_applicability, Mapping)\n                        or current_applicability.get("applicable") is not True\n                    ):\n                        item_reasons.append("evidence_not_current")\n                    if assessment is not None:\n                        expected_disposition = (\n                            "PASS" if assessment.verdict == "PASS"\n                            else "FAIL" if assessment.verdict == "FAIL"\n                            else None\n                        )\n                        if (\n                            expected_disposition is not None\n                            and current_evidence.get("effective_disposition") != expected_disposition\n                        ):\n                            item_reasons.append("evidence_disposition_changed")\n\n            if assessment is None:\n'''
+          if text.count(anchor) != 1:
+              raise SystemExit('expected exactly one M6c environment/assessment anchor')
+          text = text.replace(anchor, replacement, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Verify exact delta
+        shell: bash
+        run: |
+          python -m py_compile bdb_vnext/m6c_validation_authority.py
+          git diff --check
+          git diff -- bdb_vnext/m6c_validation_authority.py
+
+      - name: Commit and push repair to staging branch
+        shell: bash
+        run: |
+          git config user.name "BDB vNext CI"
+          git config user.email "bdb-vnext-ci@localhost.invalid"
+          git add bdb_vnext/m6c_validation_authority.py
+          git commit -m "bdb-vnext: recheck current evidence at M6c authorization"
+          git push origin HEAD:tmp-m6c-validation-authority-build
