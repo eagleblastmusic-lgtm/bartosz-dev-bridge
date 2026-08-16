@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - bdb-vnext
-      - tmp-m7a-git-cas-build
   workflow_dispatch:
 
 permissions:
