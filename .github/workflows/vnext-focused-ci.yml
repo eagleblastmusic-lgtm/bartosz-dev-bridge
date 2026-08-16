@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - bdb-vnext
-      - tmp-m6c-validation-authority-build
   workflow_dispatch:
 
 permissions:
