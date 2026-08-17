@@ -18,6 +18,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping, NoReturn
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
