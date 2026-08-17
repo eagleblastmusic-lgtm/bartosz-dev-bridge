@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - bdb-vnext
-      - tmp-m7c-promotion-closure-build
   workflow_dispatch:
 
 permissions:
