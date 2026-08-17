@@ -150,8 +150,25 @@ class CanonicalGitPromotionAuthority:
         connection = getattr(m7a_adapter, "_connection", None)
         if connection is None:
             _fail("m7c_dependencies_required", "M7c requires the unified vNext Control DB")
-        if validation_authority._connection is not connection or m7b_adapter._connection is not connection:
-            _fail("m7c_control_store_mismatch", "M6c/M7a/M7b must share one Control DB")
+
+        def main_db_path(db_connection: Any) -> str:
+            rows = db_connection.execute("PRAGMA database_list").fetchall()
+            for _sequence, name, filename in rows:
+                if str(name) == "main" and str(filename):
+                    return str(Path(str(filename)).resolve())
+            _fail("m7c_control_store_mismatch", "cannot establish exact main Control DB path")
+
+        control_paths = {
+            main_db_path(connection),
+            main_db_path(validation_authority._connection),
+            main_db_path(m7b_adapter._connection),
+        }
+        if len(control_paths) != 1:
+            _fail(
+                "m7c_control_store_mismatch",
+                "M6c/M7a/M7b must use the same physical Control DB",
+                details={"control_db_paths": sorted(control_paths)},
+            )
         self.validation_authority = validation_authority
         self.m7a_adapter = m7a_adapter
         self.m7b_adapter = m7b_adapter

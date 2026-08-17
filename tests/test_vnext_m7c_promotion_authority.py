@@ -533,9 +533,19 @@ def test_m7c_is_same_db_policy_binding_not_second_git_writer(tmp_path: Path) -> 
     import bdb_vnext.m7c_promotion_authority as module
 
     with _stack(tmp_path) as ctx:
+        def main_db_path(connection):
+            return next(
+                str(Path(str(row[2])).resolve())
+                for row in connection.execute("PRAGMA database_list").fetchall()
+                if str(row[1]) == "main"
+            )
+
         assert ctx["m7c"]._connection is ctx["m7a"]._connection
-        assert ctx["m7c"]._connection is ctx["m6c"]._connection
-        assert ctx["m7c"]._connection is ctx["m7b"]._connection
+        assert {
+            main_db_path(ctx["m7c"]._connection),
+            main_db_path(ctx["m6c"]._connection),
+            main_db_path(ctx["m7b"]._connection),
+        } == {main_db_path(ctx["m7a"]._connection)}
         query = ctx["m7c"].query(ctx["promotion"].effect_id)
         assert query["production_activation"] is False
         source = inspect.getsource(module)
