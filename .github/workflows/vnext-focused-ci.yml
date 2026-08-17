@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - bdb-vnext
-      - tmp-m8b-rebuildability-closure
   workflow_dispatch:
 
 permissions:
