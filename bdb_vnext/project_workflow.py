@@ -331,29 +331,41 @@ class ProjectWorkflow:
     def read_memory(self, project_id: str) -> ProjectMemoryState:
         return self.memory(project_id).read_state()
 
-    def set_gate_status(self, project_id: str, gate_id: str, status: str) -> str:
+    def set_gate_status(self, project_id: str, gate_id: str, status: str, *, expected_revision: int | None = None) -> str:
         try:
-            return self.memory(project_id).set_gate_status(gate_id, status)
+            return self.memory(project_id).set_gate_status(gate_id, status, expected_revision=expected_revision)
         except ProjectMemoryError as exc:
             raise ProjectWorkflowError(exc.code, str(exc)) from exc
 
-    def pass_gate(self, project_id: str, gate_id: str) -> str:
-        return self.set_gate_status(project_id, gate_id, "passed")
+    def pass_gate(self, project_id: str, gate_id: str, *, expected_revision: int | None = None) -> str:
+        return self.set_gate_status(project_id, gate_id, "passed", expected_revision=expected_revision)
 
-    def reopen_gate(self, project_id: str, gate_id: str) -> str:
-        return self.set_gate_status(project_id, gate_id, "pending")
+    def reopen_gate(self, project_id: str, gate_id: str, *, expected_revision: int | None = None) -> str:
+        return self.set_gate_status(project_id, gate_id, "pending", expected_revision=expected_revision)
 
-    def set_open_question_status(self, project_id: str, question_id: str, status: str) -> str:
+    def set_open_question_status(self, project_id: str, question_id: str, status: str, *, expected_revision: int | None = None) -> str:
         try:
-            return self.memory(project_id).set_open_question_status(question_id, status)
+            return self.memory(project_id).set_open_question_status(question_id, status, expected_revision=expected_revision)
         except ProjectMemoryError as exc:
             raise ProjectWorkflowError(exc.code, str(exc)) from exc
 
-    def resolve_open_question(self, project_id: str, question_id: str) -> str:
-        return self.set_open_question_status(project_id, question_id, "resolved")
+    def resolve_open_question(self, project_id: str, question_id: str, *, expected_revision: int | None = None) -> str:
+        return self.set_open_question_status(project_id, question_id, "resolved", expected_revision=expected_revision)
 
-    def reopen_open_question(self, project_id: str, question_id: str) -> str:
-        return self.set_open_question_status(project_id, question_id, "open")
+    def reopen_open_question(self, project_id: str, question_id: str, *, expected_revision: int | None = None) -> str:
+        return self.set_open_question_status(project_id, question_id, "open", expected_revision=expected_revision)
+
+    def set_milestone_gate_status(self, project_id: str, gate_id: str, status: str, *, expected_revision: int | None = None) -> str:
+        try:
+            return self.memory(project_id).set_milestone_gate_status(gate_id, status, expected_revision=expected_revision)
+        except ProjectMemoryError as exc:
+            raise ProjectWorkflowError(exc.code, str(exc)) from exc
+
+    def pass_milestone_gate(self, project_id: str, gate_id: str, *, expected_revision: int | None = None) -> str:
+        return self.set_milestone_gate_status(project_id, gate_id, "passed", expected_revision=expected_revision)
+
+    def reopen_milestone_gate(self, project_id: str, gate_id: str, *, expected_revision: int | None = None) -> str:
+        return self.set_milestone_gate_status(project_id, gate_id, "pending", expected_revision=expected_revision)
 
     def preview_plan_update(self, project_id: str, plan_path: str | Path) -> PlanUpdatePreview:
         project = self.catalog.get(project_id)

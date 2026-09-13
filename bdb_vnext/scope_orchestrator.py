@@ -888,6 +888,15 @@ class ScopeOrchestrator:
         # 5. Advance cursor state
         new_ms = decision.selected_milestone_id or cur_ms_id
         new_task = decision.selected_task_id or cursor.current_task_id
+        if decision.action == ScopeAction.WAIT_MILESTONE_GATE_PENDING:
+            # A completed milestone has no current task.  The gate decision is
+            # an operator prerequisite, not a task selection.
+            new_task = None
+        elif decision.action == ScopeAction.WAIT_DEPENDENCY_PENDING:
+            # Do not select a newly discovered task before its prerequisite
+            # is satisfied.  An already current task may remain visible while
+            # it waits for an external prerequisite.
+            new_task = cursor.current_task_id
         if decision.action in {
             ScopeAction.STOP_SCOPE_COMPLETE,
             ScopeAction.STOP_PROJECT_COMPLETE,
