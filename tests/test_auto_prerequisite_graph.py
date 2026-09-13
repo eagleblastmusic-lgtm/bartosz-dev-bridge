@@ -274,6 +274,70 @@ def test_auto_ambiguous_dependency_namespace_fails_closed() -> None:
         connection.close()
 
 
+@pytest.mark.parametrize(
+    "milestone",
+    [
+        PlanMilestoneNode("M1", "G1", task_ids=("MISSING",)),
+        PlanMilestoneNode("M1", "G1", dependencies=("MISSING",), task_ids=("T1",)),
+    ],
+)
+def test_auto_missing_milestone_reference_fails_closed(milestone: PlanMilestoneNode) -> None:
+    graph = CanonicalPlanGraph(
+        plan_identity="plan:missing-milestone-reference",
+        plan_version=1,
+        milestones=(milestone,),
+        tasks=(PlanTaskNode("T1", "M1"),),
+    )
+    valid, _ = graph.validate_graph()
+    assert valid is False
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    try:
+        orchestrator = ScopeOrchestrator(connection, "missing-milestone-reference")
+        cursor = orchestrator.get_or_create_cursor("run:missing-milestone-reference", scope=AutoScope.MILESTONE)
+        decision, _, updated = orchestrator.tick(
+            graph,
+            cursor,
+            {"T1": "NOT_STARTED"},
+            {"G1": "NOT_REACHED"},
+        )
+        assert decision.action == ScopeAction.HALT_BLOCKED
+        assert decision.reason_code == "AMBIGUOUS_PLAN_GRAPH"
+        assert updated.status == "BLOCKED"
+    finally:
+        connection.close()
+
+
+def test_auto_milestone_gate_namespace_collision_fails_closed() -> None:
+    graph = CanonicalPlanGraph(
+        plan_identity="plan:gate-collision",
+        plan_version=1,
+        milestones=(PlanMilestoneNode("M1", "T0", task_ids=("T0",)),),
+        tasks=(PlanTaskNode("T0", "M1"),),
+    )
+
+    valid, _ = graph.validate_graph()
+    assert valid is False
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    try:
+        orchestrator = ScopeOrchestrator(connection, "gate-collision")
+        cursor = orchestrator.get_or_create_cursor("run:gate-collision", scope=AutoScope.MILESTONE)
+        decision, _, updated = orchestrator.tick(
+            graph,
+            cursor,
+            {"T0": "NOT_STARTED"},
+            {"T0": "NOT_REACHED"},
+        )
+        assert decision.action == ScopeAction.HALT_BLOCKED
+        assert decision.reason_code == "AMBIGUOUS_PLAN_GRAPH"
+        assert updated.status == "BLOCKED"
+    finally:
+        connection.close()
+
+
 def test_auto_task_cycle_fails_closed() -> None:
     graph = CanonicalPlanGraph(
         plan_identity="plan:cycle",

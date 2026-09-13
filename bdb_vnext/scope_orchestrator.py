@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import time
 from dataclasses import asdict, dataclass, field, replace
@@ -40,6 +41,11 @@ def _now_iso() -> str:
 
 
 _TERMINAL_TASK_STATUSES = frozenset({"ACCEPTED", "COMPLETED", "SKIPPED"})
+_GRAPH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
+
+
+def _safe_graph_id(value: object) -> bool:
+    return isinstance(value, str) and _GRAPH_ID_RE.fullmatch(value) is not None
 
 
 @dataclass(frozen=True)
@@ -201,6 +207,21 @@ class CanonicalPlanGraph:
 
     def validate_graph(self) -> tuple[bool, str]:
         """Detects circular dependencies or broken references (fails closed)."""
+        if any(
+            not _safe_graph_id(identifier)
+            for identifier in (
+                *(task.task_id for task in self.tasks),
+                *(task.milestone_id for task in self.tasks),
+                *(milestone.milestone_id for milestone in self.milestones),
+                *(milestone.gate_id for milestone in self.milestones),
+                *(prerequisite.prerequisite_id for prerequisite in self.prerequisites),
+                *(task_id for milestone in self.milestones for task_id in milestone.task_ids),
+                *(dependency for task in self.tasks for dependency in task.dependencies),
+                *(dependency for milestone in self.milestones for dependency in milestone.dependencies),
+            )
+        ):
+            return False, "Plan graph contains an unsafe or empty identifier"
+
         task_ids = {t.task_id for t in self.tasks}
         ms_ids = {m.milestone_id for m in self.milestones}
 
@@ -213,6 +234,54 @@ class CanonicalPlanGraph:
             return False, "Plan graph contains an empty milestone gate ID"
         if len(set(gate_ids)) != len(gate_ids):
             return False, "Plan graph contains duplicate milestone gate IDs"
+        if set(task_ids) & set(gate_ids):
+            return False, "Plan graph contains a task/milestone-gate namespace collision"
+        if set(ms_ids) & set(gate_ids):
+            return False, "Plan graph contains a milestone/milestone-gate namespace collision"
+
+        for milestone in self.milestones:
+            if len(set(milestone.task_ids)) != len(milestone.task_ids):
+                return False, f"Milestone {milestone.milestone_id} lists a task more than once"
+            if len(set(milestone.dependencies)) != len(milestone.dependencies):
+                return False, f"Milestone {milestone.milestone_id} lists a dependency more than once"
+        for task in self.tasks:
+            if len(set(task.dependencies)) != len(task.dependencies):
+                return False, f"Task {task.task_id} lists a dependency more than once"
+
+        task_memberships: dict[str, list[str]] = {task_id: [] for task_id in task_ids}
+        for milestone in self.milestones:
+            for task_id in milestone.task_ids:
+                if task_id not in task_ids:
+                    return False, f"Milestone {milestone.milestone_id} references non-existent task {task_id}"
+                task_memberships[task_id].append(milestone.milestone_id)
+        for task in self.tasks:
+            memberships = task_memberships[task.task_id]
+            if memberships != [task.milestone_id]:
+                return False, f"Task {task.task_id} is not listed exactly once in its milestone"
+
+        milestone_graph: dict[str, set[str]] = {}
+        for milestone in self.milestones:
+            for dependency in milestone.dependencies:
+                if dependency not in ms_ids:
+                    return False, f"Milestone {milestone.milestone_id} references non-existent dependency {dependency}"
+            milestone_graph[milestone.milestone_id] = set(milestone.dependencies)
+
+        milestone_visited: dict[str, int] = {}
+
+        def has_milestone_cycle(milestone_id: str) -> bool:
+            milestone_visited[milestone_id] = 0
+            for dependency in milestone_graph[milestone_id]:
+                if dependency in milestone_visited:
+                    if milestone_visited[dependency] == 0:
+                        return True
+                elif has_milestone_cycle(dependency):
+                    return True
+            milestone_visited[milestone_id] = 1
+            return False
+
+        for milestone_id in ms_ids:
+            if milestone_id not in milestone_visited and has_milestone_cycle(milestone_id):
+                return False, f"Circular milestone dependency detected involving {milestone_id}"
 
         prerequisite_kinds: dict[str, str] = {}
         for prerequisite in self.prerequisites:
