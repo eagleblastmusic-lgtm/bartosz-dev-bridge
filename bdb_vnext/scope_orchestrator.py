@@ -15,7 +15,7 @@ import hashlib
 import json
 import sqlite3
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -37,6 +37,9 @@ SCOPE_CURSOR_SCHEMA_VERSION = "1.0.0"
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_TERMINAL_TASK_STATUSES = frozenset({"ACCEPTED", "COMPLETED", "SKIPPED"})
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,14 @@ class PlanTaskNode:
 
 
 @dataclass(frozen=True)
+class PlanPrerequisiteNode:
+    """A non-task dependency declared by the immutable project plan."""
+
+    prerequisite_id: str
+    kind: str
+
+
+@dataclass(frozen=True)
 class PlanMilestoneNode:
     milestone_id: str
     gate_id: str
@@ -109,10 +120,11 @@ class CanonicalPlanGraph:
     milestones: tuple[PlanMilestoneNode, ...]
     tasks: tuple[PlanTaskNode, ...]
     plan_digest: str | None = None
+    prerequisites: tuple[PlanPrerequisiteNode, ...] = ()
 
     def canonical_document(self) -> dict[str, Any]:
         """Return the bounded, deterministic representation of this plan graph."""
-        return {
+        document: dict[str, Any] = {
             "plan_identity": self.plan_identity,
             "plan_version": self.plan_version,
             "milestones": [
@@ -136,6 +148,15 @@ class CanonicalPlanGraph:
                 for task in self.tasks
             ],
         }
+        if self.prerequisites:
+            document["prerequisites"] = [
+                {
+                    "prerequisite_id": prerequisite.prerequisite_id,
+                    "kind": prerequisite.kind,
+                }
+                for prerequisite in self.prerequisites
+            ]
+        return document
 
     def computed_plan_digest(self) -> str:
         """Return a content digest for the exact graph and identity."""
@@ -166,17 +187,55 @@ class CanonicalPlanGraph:
                 return m
         return None
 
+    def get_prerequisite(self, prerequisite_id: str) -> PlanPrerequisiteNode | None:
+        for prerequisite in self.prerequisites:
+            if prerequisite.prerequisite_id == prerequisite_id:
+                return prerequisite
+        return None
+
+    def dependency_kind(self, dependency_id: str) -> str | None:
+        if self.get_task(dependency_id) is not None:
+            return "task"
+        prerequisite = self.get_prerequisite(dependency_id)
+        return prerequisite.kind if prerequisite is not None else None
+
     def validate_graph(self) -> tuple[bool, str]:
         """Detects circular dependencies or broken references (fails closed)."""
         task_ids = {t.task_id for t in self.tasks}
         ms_ids = {m.milestone_id for m in self.milestones}
+
+        if len(task_ids) != len(self.tasks):
+            return False, "Plan graph contains duplicate task IDs"
+        if len(ms_ids) != len(self.milestones):
+            return False, "Plan graph contains duplicate milestone IDs"
+        gate_ids = [milestone.gate_id for milestone in self.milestones]
+        if any(not gate_id for gate_id in gate_ids):
+            return False, "Plan graph contains an empty milestone gate ID"
+        if len(set(gate_ids)) != len(gate_ids):
+            return False, "Plan graph contains duplicate milestone gate IDs"
+
+        prerequisite_kinds: dict[str, str] = {}
+        for prerequisite in self.prerequisites:
+            if prerequisite.kind not in {"gate", "open_question"}:
+                return False, f"Prerequisite {prerequisite.prerequisite_id} has an unsupported namespace"
+            if not prerequisite.prerequisite_id:
+                return False, "Plan graph contains an empty prerequisite ID"
+            if prerequisite.prerequisite_id in task_ids:
+                return False, f"Dependency target {prerequisite.prerequisite_id} has multiple namespaces"
+            if prerequisite.prerequisite_id in gate_ids:
+                return False, f"Dependency target {prerequisite.prerequisite_id} collides with a milestone gate"
+            if prerequisite.prerequisite_id in prerequisite_kinds:
+                return False, f"Prerequisite {prerequisite.prerequisite_id} is declared more than once"
+            prerequisite_kinds[prerequisite.prerequisite_id] = prerequisite.kind
 
         # Check references
         for t in self.tasks:
             if t.milestone_id not in ms_ids:
                 return False, f"Task {t.task_id} references non-existent milestone {t.milestone_id}"
             for dep in t.dependencies:
-                if dep not in task_ids:
+                if dep in task_ids and dep in prerequisite_kinds:
+                    return False, f"Dependency target {dep} has multiple namespaces"
+                if dep not in task_ids and dep not in prerequisite_kinds:
                     return False, f"Task {t.task_id} references non-existent dependency {dep}"
 
         # Cycle detection
@@ -201,6 +260,80 @@ class CanonicalPlanGraph:
                     return False, f"Circular dependency detected involving task {tid}"
 
         return True, "valid"
+
+
+def _blocked_cursor(
+    cursor: ScopeCursor,
+    *,
+    plan: CanonicalPlanGraph,
+    explanation: NextActionExplanation,
+) -> ScopeCursor:
+    return replace(
+        cursor,
+        plan_identity=plan.plan_identity,
+        plan_version=plan.plan_version,
+        disposition=ScopeAction.HALT_BLOCKED.value,
+        status="BLOCKED",
+        explanation_json=json.dumps(asdict(explanation)),
+        updated_at=_now_iso(),
+    )
+
+
+def dependency_state(
+    plan: CanonicalPlanGraph,
+    dependency_id: str,
+    task_statuses: Mapping[str, str],
+    prerequisite_statuses: Mapping[str, str] | None = None,
+) -> tuple[str, str, bool]:
+    """Return ``(kind, canonical_status, satisfied)`` for one dependency.
+
+    Task statuses are the orchestrator's uppercase execution statuses.  Gate
+    and open-question statuses are the lowercase values owned by Project
+    Memory.  Missing external status entries intentionally resolve to their
+    canonical unsatisfied defaults.
+    """
+
+    kind = plan.dependency_kind(dependency_id)
+    if kind == "task":
+        status = str(task_statuses.get(dependency_id, "NOT_STARTED")).upper()
+        return kind, status, status in _TERMINAL_TASK_STATUSES
+
+    statuses = prerequisite_statuses or {}
+    if kind == "gate":
+        status = str(statuses.get(dependency_id, "pending")).lower()
+        return kind, status, status == "passed"
+    if kind == "open_question":
+        status = str(statuses.get(dependency_id, "open")).lower()
+        return kind, status, status == "resolved"
+    return "unknown", "UNKNOWN", False
+
+
+def canonical_milestone_gate_statuses(
+    plan: CanonicalPlanGraph,
+    statuses: Mapping[str, str],
+) -> dict[str, str]:
+    """Normalize milestone gate evidence to each node's canonical gate ID.
+
+    Older callers supplied milestone IDs as keys.  They are accepted only as
+    a read-compatibility input and are immediately converted to the emitted
+    ``PlanMilestoneNode.gate_id`` namespace.  Conflicting aliases fail closed.
+    """
+
+    normalized: dict[str, str] = {}
+    for milestone in plan.milestones:
+        canonical = statuses.get(milestone.gate_id)
+        legacy = statuses.get(milestone.milestone_id) if milestone.milestone_id != milestone.gate_id else None
+        canonical_value = str(canonical).upper() if canonical is not None else None
+        legacy_value = str(legacy).upper() if legacy is not None else None
+        if canonical_value is not None and legacy_value is not None and canonical_value != legacy_value:
+            raise ValueError(f"milestone {milestone.milestone_id} has conflicting gate status identities")
+        normalized[milestone.gate_id] = canonical_value or legacy_value or "NOT_REACHED"
+    return normalized
+
+
+def milestone_gate_key(plan: CanonicalPlanGraph, milestone_reference: str) -> str:
+    milestone = plan.get_milestone(milestone_reference)
+    return milestone.gate_id if milestone is not None else milestone_reference
 
 
 class ScopeOrchestrator:
@@ -397,6 +530,7 @@ class ScopeOrchestrator:
         plan: CanonicalPlanGraph,
         milestone_id: str,
         task_statuses: Mapping[str, str],
+        prerequisite_statuses: Mapping[str, str] | None = None,
     ) -> tuple[str | None, bool, list[str]]:
         """Resolves the next task in milestone, whether deps are met, and pending dep IDs."""
         ms = plan.get_milestone(milestone_id)
@@ -406,7 +540,7 @@ class ScopeOrchestrator:
         for tid in ms.task_ids:
             st = task_statuses.get(tid, "NOT_STARTED")
             # Invariant: An accepted task is NEVER runnable again!
-            if st == "ACCEPTED":
+            if str(st).upper() in _TERMINAL_TASK_STATUSES:
                 continue
 
             # Found candidate unaccepted task
@@ -414,7 +548,11 @@ class ScopeOrchestrator:
             if not task_node:
                 continue
 
-            pending_deps = [dep for dep in task_node.dependencies if task_statuses.get(dep) != "ACCEPTED"]
+            pending_deps = [
+                dep
+                for dep in task_node.dependencies
+                if not dependency_state(plan, dep, task_statuses, prerequisite_statuses)[2]
+            ]
             deps_ok = len(pending_deps) == 0
             return tid, deps_ok, pending_deps
 
@@ -427,6 +565,7 @@ class ScopeOrchestrator:
         task_statuses: Mapping[str, str],
         milestone_gate_statuses: Mapping[str, str],
         *,
+        prerequisite_statuses: Mapping[str, str] | None = None,
         manual_approvals: Mapping[str, bool] | None = None,
         policy_approvals: Mapping[str, bool] | None = None,
         stop_requested: bool = False,
@@ -465,7 +604,39 @@ class ScopeOrchestrator:
                 canonical_work_state=dec.canonical_work_state.value,
                 explanation=dec.explanation,
             )
-            return dec, expl, cursor
+            updated_cursor = _blocked_cursor(cursor, plan=plan, explanation=expl)
+            return dec, expl, updated_cursor
+
+        try:
+            canonical_gate_statuses = canonical_milestone_gate_statuses(plan, milestone_gate_statuses)
+        except ValueError as exc:
+            dec = ScopeDecision(
+                action=ScopeAction.HALT_BLOCKED,
+                canonical_work_state=CanonicalWorkState.BLOCKED,
+                reason_code="AMBIGUOUS_MILESTONE_GATE_STATUS",
+                explanation=f"Milestone gate status validation failed: {exc}",
+                is_terminal=True,
+            )
+            expl = NextActionExplanation(
+                action=dec.action.value,
+                reason_code=dec.reason_code,
+                project_id=self.project_id,
+                run_id=cursor.run_id,
+                scope=cursor.scope.value,
+                current_task_id=cursor.current_task_id,
+                selected_task_id=None,
+                selected_milestone_id=None,
+                dependency_evidence={},
+                gate_evidence={},
+                state_revision=cursor.state_revision,
+                cursor_revision=cursor.state_revision,
+                plan_identity=plan.plan_identity,
+                plan_version=plan.plan_version,
+                canonical_work_state=dec.canonical_work_state.value,
+                explanation=dec.explanation,
+            )
+            updated_cursor = _blocked_cursor(cursor, plan=plan, explanation=expl)
+            return dec, expl, updated_cursor
 
         # 2. Determine current milestone
         cur_ms_id = cursor.current_milestone_id or (plan.milestones[0].milestone_id if plan.milestones else None)
@@ -495,7 +666,7 @@ class ScopeOrchestrator:
                 canonical_work_state=dec.canonical_work_state.value,
                 explanation=dec.explanation,
             )
-            return dec, expl, cursor
+            return dec, expl, _blocked_cursor(cursor, plan=plan, explanation=expl)
 
         cur_ms = plan.get_milestone(cur_ms_id)
         assert cur_ms is not None
@@ -503,7 +674,7 @@ class ScopeOrchestrator:
         # Check milestone ordering / dependencies (fail closed on wrong milestone cursor)
         ms_index = [m.milestone_id for m in plan.milestones].index(cur_ms_id)
         for prev_ms in plan.milestones[:ms_index]:
-            if milestone_gate_statuses.get(prev_ms.milestone_id) != "ACCEPTED":
+            if canonical_gate_statuses.get(prev_ms.gate_id) != "ACCEPTED":
                 dec = ScopeDecision(
                     action=ScopeAction.HALT_BLOCKED,
                     canonical_work_state=CanonicalWorkState.BLOCKED,
@@ -521,7 +692,7 @@ class ScopeOrchestrator:
                     selected_task_id=None,
                     selected_milestone_id=None,
                     dependency_evidence={},
-                    gate_evidence=milestone_gate_statuses,
+                    gate_evidence=canonical_gate_statuses,
                     state_revision=cursor.state_revision,
                     cursor_revision=cursor.state_revision,
                     plan_identity=plan.plan_identity,
@@ -529,17 +700,25 @@ class ScopeOrchestrator:
                     canonical_work_state=dec.canonical_work_state.value,
                     explanation=dec.explanation,
                 )
-                return dec, expl, cursor
+                return dec, expl, _blocked_cursor(cursor, plan=plan, explanation=expl)
 
         # 3. Check milestone task completion and gates
         all_ms_tasks_accepted = (
             len(cur_ms.task_ids) > 0
-            and all(task_statuses.get(tid) == "ACCEPTED" for tid in cur_ms.task_ids)
+            and all(
+                str(task_statuses.get(tid, "NOT_STARTED")).upper() in _TERMINAL_TASK_STATUSES
+                for tid in cur_ms.task_ids
+            )
         )
-        cur_gate_status = milestone_gate_statuses.get(cur_ms_id, "NOT_REACHED")
+        cur_gate_status = canonical_gate_statuses.get(cur_ms.gate_id, "NOT_REACHED")
 
         # Next task in milestone
-        next_tid, deps_satisfied, pending_deps = self.resolve_next_runnable_task(plan, cur_ms_id, task_statuses)
+        next_tid, deps_satisfied, pending_deps = self.resolve_next_runnable_task(
+            plan,
+            cur_ms_id,
+            task_statuses,
+            prerequisite_statuses,
+        )
 
         # Check next milestone if current is done
         next_ms_id = plan.milestones[ms_index + 1].milestone_id if (ms_index + 1 < len(plan.milestones)) else None
@@ -548,8 +727,16 @@ class ScopeOrchestrator:
         if next_ms_id:
             next_ms = plan.get_milestone(next_ms_id)
             if next_ms:
-                next_ms_deps_ok = all(milestone_gate_statuses.get(dep) == "ACCEPTED" for dep in next_ms.dependencies)
-                first_task_in_next_ms, _, _ = self.resolve_next_runnable_task(plan, next_ms_id, task_statuses)
+                next_ms_deps_ok = all(
+                    canonical_gate_statuses.get(milestone_gate_key(plan, dep)) == "ACCEPTED"
+                    for dep in next_ms.dependencies
+                )
+                first_task_in_next_ms, _, _ = self.resolve_next_runnable_task(
+                    plan,
+                    next_ms_id,
+                    task_statuses,
+                    prerequisite_statuses,
+                )
 
         all_proj_done = (
             ms_index == len(plan.milestones) - 1
@@ -567,8 +754,9 @@ class ScopeOrchestrator:
         pol_ok = policy_app.get(next_tid or "", False) if pol_req else True
 
         # Build snapshot
-        cur_tid_status = task_statuses.get(cursor.current_task_id or "") if cursor.current_task_id else None
-        accepted_count = 1 if (cur_tid_status == "ACCEPTED") else 0
+        raw_cur_tid_status = task_statuses.get(cursor.current_task_id or "") if cursor.current_task_id else None
+        cur_tid_status = str(raw_cur_tid_status).upper() if raw_cur_tid_status is not None else None
+        accepted_count = 1 if (cur_tid_status in _TERMINAL_TASK_STATUSES) else 0
         effective_stop = (
             stop_requested
             or cursor.status == "STOPPED"
@@ -603,8 +791,11 @@ class ScopeOrchestrator:
         decision = evaluate_scope_transition(snapshot)
 
         # Build evidence
-        dep_evidence = {d: task_statuses.get(d, "UNKNOWN") for d in pending_deps}
-        gate_evidence = {cur_ms_id: cur_gate_status}
+        dep_evidence = {
+            d: dependency_state(plan, d, task_statuses, prerequisite_statuses)[1]
+            for d in pending_deps
+        }
+        gate_evidence = {cur_ms.gate_id: cur_gate_status}
 
         explanation = NextActionExplanation(
             action=decision.action.value,
@@ -627,9 +818,23 @@ class ScopeOrchestrator:
 
         # 5. Advance cursor state
         new_ms = decision.selected_milestone_id or cur_ms_id
-        new_task = decision.selected_task_id if decision.action == ScopeAction.LAUNCH_TASK else cursor.current_task_id
-        last_accepted_t = cursor.current_task_id if cur_tid_status == "ACCEPTED" else cursor.last_accepted_task_id
+        new_task = decision.selected_task_id or cursor.current_task_id
+        if decision.action in {
+            ScopeAction.STOP_SCOPE_COMPLETE,
+            ScopeAction.STOP_PROJECT_COMPLETE,
+            ScopeAction.HALT_WAITING_FOR_PLAN,
+        }:
+            new_task = None
+        last_accepted_t = cursor.current_task_id if cur_tid_status in _TERMINAL_TASK_STATUSES else cursor.last_accepted_task_id
         last_accepted_g = cur_ms.gate_id if cur_gate_status == "ACCEPTED" else cursor.last_accepted_gate
+
+        cursor_status = cursor.status
+        if decision.action == ScopeAction.HALT_BLOCKED:
+            cursor_status = "BLOCKED"
+        elif decision.action in {ScopeAction.STOP_SCOPE_COMPLETE, ScopeAction.STOP_PROJECT_COMPLETE}:
+            cursor_status = "COMPLETED"
+        elif decision.action == ScopeAction.HALT_WAITING_FOR_PLAN:
+            cursor_status = "WAITING_FOR_PLAN"
 
         updated_cursor = ScopeCursor(
             cursor_id=cursor.cursor_id,
@@ -645,7 +850,7 @@ class ScopeOrchestrator:
             plan_version=plan.plan_version,
             state_revision=cursor.state_revision,  # update_cursor_cas increments this
             disposition=decision.action.value,
-            status=cursor.status,
+            status=cursor_status,
             stop_requested_at=cursor.stop_requested_at,
             stop_reason=cursor.stop_reason,
             explanation_json=json.dumps(asdict(explanation)),
