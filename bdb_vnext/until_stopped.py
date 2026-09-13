@@ -26,9 +26,12 @@ from .auto_scope_contract import (
 from .scope_orchestrator import (
     CanonicalPlanGraph,
     PlanMilestoneNode,
+    PlanPrerequisiteNode,
     PlanTaskNode,
     ScopeCursor,
     ScopeOrchestrator,
+    canonical_milestone_gate_statuses,
+    dependency_state,
 )
 from .stop_fence import EffectBoundary, EffectBoundaryGuard, StopFenceViolationError
 
@@ -192,11 +195,19 @@ def _graph_from_document(document: Mapping[str, Any]) -> CanonicalPlanGraph:
             )
             for item in document["tasks"]
         )
+        prerequisites = tuple(
+            PlanPrerequisiteNode(
+                prerequisite_id=str(item["prerequisite_id"]),
+                kind=str(item["kind"]),
+            )
+            for item in document.get("prerequisites", ())
+        )
         return CanonicalPlanGraph(
             plan_identity=str(document["plan_identity"]),
             plan_version=int(document["plan_version"]),
             milestones=milestones,
             tasks=tasks,
+            prerequisites=prerequisites,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise UntilStoppedError("MALFORMED_PLAN", "persisted plan admission is malformed") from exc
@@ -627,7 +638,7 @@ class UntilStoppedController:
                 for task_id in milestone.task_ids
             ):
                 return False
-            if str(milestone_gate_statuses.get(milestone.milestone_id, "NOT_REACHED")).upper() not in _APPROVED_GATE_STATUSES:
+            if str(milestone_gate_statuses.get(milestone.gate_id, "NOT_REACHED")).upper() not in _APPROVED_GATE_STATUSES:
                 return False
         return True
 
@@ -638,7 +649,11 @@ class UntilStoppedController:
         milestone_gate_statuses: Mapping[str, str],
     ) -> bool:
         self._validate_plan(plan)
-        return self._plan_is_exhausted(plan, task_statuses, milestone_gate_statuses)
+        try:
+            gates = canonical_milestone_gate_statuses(plan, milestone_gate_statuses)
+        except ValueError:
+            return False
+        return self._plan_is_exhausted(plan, task_statuses, gates)
 
     @staticmethod
     def _task_status(task_statuses: Mapping[str, str], task_id: str) -> str:
@@ -750,6 +765,7 @@ class UntilStoppedController:
         task_statuses: Mapping[str, str] | None = None,
         milestone_gate_statuses: Mapping[str, str] | None = None,
         *,
+        prerequisite_statuses: Mapping[str, str] | None = None,
         manual_approvals: Mapping[str, bool] | None = None,
         policy_approvals: Mapping[str, bool] | None = None,
         manual_pause: bool = False,
@@ -765,6 +781,7 @@ class UntilStoppedController:
         """
         statuses = task_statuses or {}
         gates = milestone_gate_statuses or {}
+        prerequisites = prerequisite_statuses or {}
         cursor = self._cursor()
         if cursor is None:
             _fail("SCOPE_NOT_STARTED", "UNTIL_STOPPED scope has not started")
@@ -842,6 +859,18 @@ class UntilStoppedController:
             )
             updated = self._persist_decision(cursor, decision, plan=approved)
             return UntilStoppedResult(decision, "BLOCKED", updated, approved, tasks_outside_approved_plan=0)
+        try:
+            gates = canonical_milestone_gate_statuses(plan, gates)
+        except ValueError as exc:
+            decision = self._decision(
+                action=ScopeAction.HALT_BLOCKED,
+                state=CanonicalWorkState.BLOCKED,
+                reason="AMBIGUOUS_MILESTONE_GATE_STATUS",
+                explanation=f"Milestone gate status validation failed: {exc}",
+                terminal=True,
+            )
+            updated = self._persist_decision(cursor, decision, plan=approved)
+            return UntilStoppedResult(decision, "BLOCKED", updated, approved)
         if (
             approved.plan_identity != plan.plan_identity
             or approved.plan_version != plan.plan_version
@@ -916,7 +945,7 @@ class UntilStoppedController:
                 if self._task_status(statuses, task_id) not in _TERMINAL_TASK_STATUSES
             ]
             previous_gate_missing = any(
-                str(gates.get(previous.milestone_id, "NOT_REACHED")).upper() not in _APPROVED_GATE_STATUSES
+                str(gates.get(previous.gate_id, "NOT_REACHED")).upper() not in _APPROVED_GATE_STATUSES
                 for previous in plan.milestones[:index]
             )
             if previous_gate_missing:
@@ -949,7 +978,7 @@ class UntilStoppedController:
                 pending_dependencies = [
                     dependency
                     for dependency in task.dependencies
-                    if self._task_status(statuses, dependency) not in _TERMINAL_TASK_STATUSES
+                    if not dependency_state(plan, dependency, statuses, prerequisites)[2]
                 ]
                 if pending_dependencies:
                     decision = self._decision(
@@ -998,7 +1027,7 @@ class UntilStoppedController:
                 updated = self._persist_decision(cursor, decision, plan=approved)
                 return UntilStoppedResult(decision, "ACTIVE", updated, approved)
 
-            gate_status = str(gates.get(milestone.milestone_id, "NOT_REACHED")).upper()
+            gate_status = str(gates.get(milestone.gate_id, "NOT_REACHED")).upper()
             if gate_status not in _APPROVED_GATE_STATUSES:
                 if gate_status == "FAILED":
                     decision = self._decision(

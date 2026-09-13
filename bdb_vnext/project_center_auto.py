@@ -15,10 +15,17 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
 from .auto_scope_contract import AutoScope, DEFAULT_AUTO_SCOPE
+from .project_memory import (
+    GATE_STATUS_VALUES,
+    OPEN_QUESTION_STATUS_VALUES,
+    ProjectMemoryStore,
+)
+from .project_catalog import classify_dependency_targets
 from .project_memory_v2_store import ProjectMemoryStoreV2, ProjectMemoryV2Error
 from .scope_orchestrator import (
     CanonicalPlanGraph,
     PlanMilestoneNode,
+    PlanPrerequisiteNode,
     PlanTaskNode,
     ScopeOrchestrator,
 )
@@ -329,11 +336,13 @@ class CanonicalProjectCenterAutoCommands:
         *,
         project_provider: Callable[[], Any] | None = None,
         plan_provider: Callable[[], Any | None] | None = None,
+        memory_provider: Callable[[], Any] | None = None,
     ) -> None:
         self.runtime_root = Path(runtime_root).expanduser().absolute()
         self.project_id = project_id
         self._project_provider = project_provider
         self._plan_provider = plan_provider
+        self._memory_provider = memory_provider
 
     @property
     def db_path(self) -> Path:
@@ -431,6 +440,9 @@ class CanonicalProjectCenterAutoCommands:
             if stop_fenced:
                 status = "STOPPED"
                 reason_code = "STOPPED"
+            elif raw_status == "BLOCKED" or disposition in {"BLOCKED", "HALT_BLOCKED"}:
+                status = "BLOCKED"
+                reason_code = "BLOCKED"
             elif send_status == "UNCERTAIN":
                 status = "DELIVERY_UNCERTAIN"
                 reason_code = "DELIVERY_UNCERTAIN"
@@ -440,7 +452,7 @@ class CanonicalProjectCenterAutoCommands:
             elif disposition == "WAITING_FOR_PLAN":
                 status = "WAITING_FOR_PLAN"
                 reason_code = "WAITING_FOR_PLAN"
-            elif task_status == "BLOCKED" or disposition == "BLOCKED":
+            elif task_status == "BLOCKED":
                 status = "BLOCKED"
                 reason_code = "BLOCKED"
             elif disposition in {"PAUSED", "PAUSE_MANUAL_GATE_REQUIRED", "PAUSE_POLICY_APPROVAL_REQUIRED"}:
@@ -459,8 +471,25 @@ class CanonicalProjectCenterAutoCommands:
                 status = "ACTIVE"
                 reason_code = "ACTIVE"
 
+            persisted_reason_code: str | None = None
+            persisted_explanation: str | None = None
+            if status == "BLOCKED":
+                try:
+                    persisted = json.loads(cursor["explanation_json"] or "{}")
+                except (TypeError, ValueError):
+                    persisted = {}
+                if isinstance(persisted, Mapping):
+                    raw_reason_code = persisted.get("reason_code")
+                    raw_explanation = persisted.get("explanation")
+                    if raw_reason_code:
+                        persisted_reason_code = str(raw_reason_code)
+                    if raw_explanation:
+                        persisted_explanation = str(raw_explanation)
+            if persisted_reason_code:
+                reason_code = persisted_reason_code
+
             continuation_status = send_status or "NONE"
-            reason = AUTO_STATUS_REASON_TEXT.get(reason_code, f"Kanoniczny status: {reason_code}.")
+            reason = persisted_explanation or AUTO_STATUS_REASON_TEXT.get(reason_code, f"Kanoniczny status: {reason_code}.")
             return CanonicalAutoState(
                 project_id=self.project_id,
                 scope=scope,
@@ -521,11 +550,23 @@ class CanonicalProjectCenterAutoCommands:
             )
             for item in plan.tasks
         )
+        dependency_targets = classify_dependency_targets(plan)
+        referenced_prerequisites = {
+            dependency
+            for item in plan.tasks
+            for dependency in item.dependencies
+            if dependency_targets.get(dependency) in {"gate", "open_question"}
+        }
+        prerequisite_nodes = tuple(
+            PlanPrerequisiteNode(prerequisite_id=identifier, kind=dependency_targets[identifier])
+            for identifier in sorted(referenced_prerequisites)
+        )
         return CanonicalPlanGraph(
             plan_identity=f"{plan.project_id}:plan:v{plan.plan_version}",
             plan_version=int(str(plan.plan_version).split(".", 1)[0]),
             milestones=milestones,
             tasks=tasks,
+            prerequisites=prerequisite_nodes,
         )
 
     @staticmethod
@@ -539,6 +580,77 @@ class CanonicalProjectCenterAutoCommands:
             "pending": "NOT_STARTED",
         }
         return {item.task_id: mapping.get(item.status, "NOT_STARTED") for item in plan.tasks}
+
+    @staticmethod
+    def _orchestrator_task_status(value: object) -> str:
+        return {
+            "completed": "ACCEPTED",
+            "skipped": "ACCEPTED",
+            "active": "IN_PROGRESS",
+            "review": "IN_PROGRESS",
+            "blocked": "BLOCKED",
+            "pending": "NOT_STARTED",
+        }.get(str(value).lower(), str(value).upper())
+
+    def _canonical_prerequisite_inputs(
+        self,
+        plan: Any,
+        conn: sqlite3.Connection,
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """Read task and planning-context statuses from Project Memory authority."""
+
+        statuses = self._plan_statuses(plan)
+        prerequisite_statuses: dict[str, str] = {}
+
+        memory_value: Any = (
+            self._memory_provider()
+            if self._memory_provider is not None
+            else ProjectMemoryStore(self.runtime_root, self.project_id).read_state()
+        )
+        if hasattr(memory_value, "read_state"):
+            memory_value = memory_value.read_state()
+        if hasattr(memory_value, "execution"):
+            execution = memory_value.execution
+        elif isinstance(memory_value, Mapping):
+            execution = memory_value.get("execution", {})
+        else:
+            execution = {}
+        if not isinstance(execution, Mapping):
+            execution = {}
+
+        raw_task_statuses = execution.get("task_statuses", {})
+        if isinstance(raw_task_statuses, Mapping):
+            for task_id, raw_status in raw_task_statuses.items():
+                if str(task_id) in statuses:
+                    statuses[str(task_id)] = self._orchestrator_task_status(raw_status)
+
+        # V2 task rows are retained as a migration-compatible fallback for
+        # callers that have not yet projected the task into v1 Project Memory.
+        # A v1 status always wins because it is the existing logical authority.
+        v2_rows = conn.execute(
+            "SELECT task_id, status FROM task_execution_states WHERE project_id = ?",
+            (self.project_id,),
+        ).fetchall()
+        for task_id, raw_status in v2_rows:
+            if str(task_id) in statuses and (not isinstance(raw_task_statuses, Mapping) or task_id not in raw_task_statuses):
+                statuses[str(task_id)] = self._orchestrator_task_status(raw_status)
+
+        dependency_targets = classify_dependency_targets(plan)
+        raw_gates = execution.get("gate_statuses", {})
+        raw_questions = execution.get("open_question_statuses", {})
+        for identifier, kind in dependency_targets.items():
+            if kind == "gate":
+                raw_status = raw_gates.get(identifier, "pending") if isinstance(raw_gates, Mapping) else "pending"
+                prerequisite_statuses[identifier] = (
+                    str(raw_status) if str(raw_status) in GATE_STATUS_VALUES else "pending"
+                )
+            elif kind == "open_question":
+                raw_status = raw_questions.get(identifier, "open") if isinstance(raw_questions, Mapping) else "open"
+                prerequisite_statuses[identifier] = (
+                    str(raw_status) if str(raw_status) in OPEN_QUESTION_STATUS_VALUES else "open"
+                )
+
+        return statuses, prerequisite_statuses
 
     def _receipt_from_state(
         self,
@@ -596,6 +708,11 @@ class CanonicalProjectCenterAutoCommands:
                         "stopped_scope_requires_resume",
                         "the canonical STOP fence must be resumed with Wznów",
                     )
+                if status == "BLOCKED" or row["disposition"] in {"BLOCKED", "HALT_BLOCKED"}:
+                    raise ProjectCenterAutoCommandError(
+                        "auto_blocked",
+                        "canonical AUTO is durably blocked and cannot start again until its blocker is resolved",
+                    )
                 if AutoScope(row["scope"]) != requested_scope:
                     raise ProjectCenterAutoCommandError(
                         "active_scope_cannot_change",
@@ -651,6 +768,13 @@ class CanonicalProjectCenterAutoCommands:
             ).fetchone()
             if row is None:
                 raise ProjectCenterAutoCommandError("scope_not_started", "AUTO has not been started canonically")
+            raw_status = str(row["status"] if "status" in row.keys() else "ACTIVE")
+            disposition = str(row["disposition"] or "ACTIVE")
+            if raw_status == "BLOCKED" or disposition in {"BLOCKED", "HALT_BLOCKED"}:
+                raise ProjectCenterAutoCommandError(
+                    "auto_blocked",
+                    "canonical AUTO is durably blocked and cannot continue until its blocker is resolved",
+                )
             cursor = orchestrator.get_or_create_cursor(
                 run_id=row["run_id"],
                 scope=AutoScope(row["scope"]),
@@ -658,27 +782,14 @@ class CanonicalProjectCenterAutoCommands:
                 plan_version=int(row["plan_version"]),
                 scope_selection_explicit=bool(row["scope_selection_explicit"]),
             )
-            statuses = self._plan_statuses(plan)
-            if "task_execution_states" in {
-                item[0] for item in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            }:
-                for task_id, raw in conn.execute(
-                    "SELECT task_id, status FROM task_execution_states WHERE project_id = ?",
-                    (self.project_id,),
-                ).fetchall():
-                    statuses[str(task_id)] = {
-                        "completed": "ACCEPTED",
-                        "skipped": "ACCEPTED",
-                        "active": "IN_PROGRESS",
-                        "review": "IN_PROGRESS",
-                        "blocked": "BLOCKED",
-                    }.get(str(raw), str(raw).upper())
+            statuses, prerequisite_statuses = self._canonical_prerequisite_inputs(plan, conn)
             gates = {f"GATE:{item.milestone_id}": "NOT_REACHED" for item in plan.milestones}
             decision, explanation, updated = orchestrator.tick(
                 self._plan_graph(plan),
                 cursor,
                 statuses,
                 gates,
+                prerequisite_statuses=prerequisite_statuses,
                 ui_suggested_task=None,
                 prompt_suggested_task=None,
             )
