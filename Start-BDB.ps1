@@ -14,10 +14,19 @@ if (-not $Python) {
     throw "Python environment not found. Activate the project environment and retry."
 }
 
-$Arguments = @("-m", "bdb_gui.app")
-if ($RuntimeRoot) {
-    $Arguments += @("--runtime-root", $RuntimeRoot)
+if (-not $RuntimeRoot) {
+    $ResolvedRuntime = @(& $Python -m bdb_vnext.runtime_authority)
+    if ($LASTEXITCODE -ne 0) {
+        throw "BDB runtime authority resolution failed. Control Center was not started."
+    }
+    $RuntimeRoot = (($ResolvedRuntime | Select-Object -Last 1) -as [string]).Trim()
+    if (-not $RuntimeRoot) {
+        throw "BDB runtime authority resolution returned an empty path."
+    }
 }
+
+Write-Host "BDB runtime authority: $RuntimeRoot"
+$Arguments = @("-m", "bdb_gui.app", "--runtime-root", $RuntimeRoot)
 & $Python @Arguments
 if ($LASTEXITCODE -ne 0) {
     throw "BDB Control Center exited with code $LASTEXITCODE."
