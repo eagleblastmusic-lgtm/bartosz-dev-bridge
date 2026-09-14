@@ -75,6 +75,7 @@ jobs:
           tests/test_m9b_activation.py
           tests/test_m9b_native_host.py
           tests/test_m9b_browser_bundle.py
+          tests/test_runtime_authority.py
           tests/test_vnext_m3a_submission.py
           tests/test_vnext_m3b_browser_admission.py
           tests/test_vnext_m3c_admission.py
