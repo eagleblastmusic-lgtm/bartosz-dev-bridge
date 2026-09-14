@@ -1,0 +1,290 @@
+name: Apply AUTO result projection fix
+
+on:
+  push:
+    branches:
+      - fix/auto-result-projection
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.event.head_commit.message == 'chore: stage AUTO result projection fix'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/auto-result-projection
+          fetch-depth: 0
+      - name: Apply bounded source patch and regression tests
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          source_path = Path('bdb_vnext/project_center_auto.py')
+          source = source_path.read_text(encoding='utf-8')
+
+          old = '''    def _safe_prerequisite_projection(self, plan: Any | None, current_milestone_id: str | None) -> dict[str, Any]:
+        try:
+            return self._prerequisite_projection(plan, current_milestone_id)
+        except (ProjectMemoryError, ValueError, TypeError) as exc:
+            return {"prerequisite_error": getattr(exc, "code", "prerequisite_state_unavailable")}
+
+    def snapshot(
+'''
+          new = '''    def _safe_prerequisite_projection(self, plan: Any | None, current_milestone_id: str | None) -> dict[str, Any]:
+        try:
+            return self._prerequisite_projection(plan, current_milestone_id)
+        except (ProjectMemoryError, ValueError, TypeError) as exc:
+            return {"prerequisite_error": getattr(exc, "code", "prerequisite_state_unavailable")}
+
+    def _project_memory_task_blocker(self, task_id: str | None) -> tuple[str | None, str | None]:
+        """Project a terminal v1 task failure without mutating the AUTO cursor.
+
+        ProjectExecution records task results in the existing Project Memory
+        execution document.  AUTO continuation already treats that v1 task
+        status as the logical authority; the read-only Project Center snapshot
+        must observe the same blocker instead of requiring a mutating Continue
+        call just to discover it.
+        """
+        if not task_id:
+            return None, None
+        try:
+            execution, _revision = self._memory_execution(self._memory_value())
+        except (ProjectMemoryError, OSError, ValueError, TypeError):
+            return None, None
+        raw_statuses = execution.get("task_statuses", {})
+        if not isinstance(raw_statuses, Mapping) or str(raw_statuses.get(task_id, "")).lower() != "blocked":
+            return None, None
+
+        reason_code = "BLOCKED"
+        explanation = AUTO_STATUS_REASON_TEXT["BLOCKED"]
+        attempts = execution.get("attempts", [])
+        if isinstance(attempts, list):
+            for raw_attempt in reversed(attempts):
+                if not isinstance(raw_attempt, Mapping) or str(raw_attempt.get("task_id")) != task_id:
+                    continue
+                if str(raw_attempt.get("result_status", "")).upper() == "STALE_RESULT":
+                    continue
+                failure_code = raw_attempt.get("failure_code")
+                result_summary = raw_attempt.get("result_summary")
+                if failure_code:
+                    reason_code = str(failure_code)
+                if result_summary:
+                    explanation = str(result_summary)
+                break
+        return reason_code, explanation
+
+    def snapshot(
+'''
+          if old not in source:
+              raise SystemExit('safe prerequisite anchor not found exactly once')
+          source = source.replace(old, new, 1)
+
+          old = '''            task_status = None
+            if "task_execution_states" in tables and cursor["current_task_id"]:
+                task_row = conn.execute(
+                    "SELECT status FROM task_execution_states WHERE project_id = ? AND task_id = ?",
+                    (self.project_id, cursor["current_task_id"]),
+                ).fetchone()
+                task_status = str(task_row[0]).upper() if task_row else None
+
+            send_status = None
+'''
+          new = '''            task_status = None
+            if "task_execution_states" in tables and cursor["current_task_id"]:
+                task_row = conn.execute(
+                    "SELECT status FROM task_execution_states WHERE project_id = ? AND task_id = ?",
+                    (self.project_id, cursor["current_task_id"]),
+                ).fetchone()
+                task_status = str(task_row[0]).upper() if task_row else None
+
+            project_memory_reason_code, project_memory_explanation = self._project_memory_task_blocker(
+                cursor["current_task_id"]
+            )
+            if project_memory_reason_code is not None:
+                task_status = "BLOCKED"
+
+            send_status = None
+'''
+          if old not in source:
+              raise SystemExit('task status anchor not found exactly once')
+          source = source.replace(old, new, 1)
+
+          old = '''            if persisted_reason_code:
+                reason_code = persisted_reason_code
+
+            continuation_status = send_status or "NONE"
+            reason = persisted_explanation or AUTO_STATUS_REASON_TEXT.get(reason_code, f"Kanoniczny status: {reason_code}.")
+'''
+          new = '''            project_memory_blocked = project_memory_reason_code is not None and status == "BLOCKED"
+            if project_memory_blocked:
+                reason_code = project_memory_reason_code
+            elif persisted_reason_code:
+                reason_code = persisted_reason_code
+
+            continuation_status = send_status or "NONE"
+            reason = (
+                project_memory_explanation
+                if project_memory_blocked and project_memory_explanation
+                else persisted_explanation or AUTO_STATUS_REASON_TEXT.get(reason_code, f"Kanoniczny status: {reason_code}.")
+            )
+'''
+          if old not in source:
+              raise SystemExit('reason precedence anchor not found exactly once')
+          source = source.replace(old, new, 1)
+          source_path.write_text(source, encoding='utf-8')
+
+          test_path = Path('tests/test_project_center_auto_result_projection.py')
+          test_path.write_text('''from __future__ import annotations
+
+import json
+import sqlite3
+
+from bdb_vnext.project_center_auto import CanonicalProjectCenterAutoCommands, ProjectCenterAutoViewModel
+
+
+def _write_cursor(tmp_path, *, status: str = "ACTIVE", disposition: str = "INITIALIZED", reason_code: str = "AUTO_STARTED") -> None:
+    db_path = tmp_path / "control" / "project-memory-v2" / "project-1.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE projects (project_id TEXT PRIMARY KEY, revision INTEGER NOT NULL)")
+        conn.execute(
+            """
+            CREATE TABLE scope_cursors (
+                project_id TEXT PRIMARY KEY,
+                scope TEXT NOT NULL,
+                scope_epoch INTEGER NOT NULL,
+                run_id TEXT,
+                current_milestone_id TEXT,
+                current_task_id TEXT,
+                plan_version INTEGER,
+                state_revision INTEGER,
+                disposition TEXT,
+                status TEXT,
+                explanation_json TEXT
+            )
+            """
+        )
+        conn.execute("INSERT INTO projects (project_id, revision) VALUES (?, ?)", ("project-1", 7))
+        conn.execute(
+            """
+            INSERT INTO scope_cursors (
+                project_id, scope, scope_epoch, run_id, current_milestone_id,
+                current_task_id, plan_version, state_revision, disposition,
+                status, explanation_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "project-1",
+                "MILESTONE",
+                1,
+                "run-1",
+                "P1",
+                "P1-01",
+                1,
+                7,
+                disposition,
+                status,
+                json.dumps({"reason_code": reason_code, "explanation": f"cursor:{reason_code}"}),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_read_only_snapshot_projects_project_execution_failure_from_v1(tmp_path) -> None:
+    _write_cursor(tmp_path)
+    memory = {
+        "revision": 9,
+        "execution": {
+            "task_statuses": {"P1-01": "blocked"},
+            "attempts": [
+                {
+                    "task_id": "P1-01",
+                    "result_status": "FAIL",
+                    "failure_code": "validation_failed",
+                    "result_summary": "Validation failed after Submit result.",
+                }
+            ],
+        },
+    }
+    commands = CanonicalProjectCenterAutoCommands(
+        tmp_path,
+        "project-1",
+        memory_provider=lambda: memory,
+    )
+
+    state = commands.snapshot(plan_available=True, plan_version="1")
+    view = ProjectCenterAutoViewModel.from_canonical(state)
+
+    assert state.scope_status == "BLOCKED"
+    assert state.reason_code == "validation_failed"
+    assert state.reason == "Validation failed after Submit result."
+    assert view.can_continue is False
+    assert view.can_stop is False
+
+
+def test_nonblocked_v1_task_keeps_active_cursor_projection(tmp_path) -> None:
+    _write_cursor(tmp_path)
+    memory = {
+        "revision": 9,
+        "execution": {"task_statuses": {"P1-01": "active"}, "attempts": []},
+    }
+    commands = CanonicalProjectCenterAutoCommands(
+        tmp_path,
+        "project-1",
+        memory_provider=lambda: memory,
+    )
+
+    state = commands.snapshot(plan_available=True, plan_version="1")
+    view = ProjectCenterAutoViewModel.from_canonical(state)
+
+    assert state.scope_status == "ACTIVE"
+    assert state.reason_code == "AUTO_STARTED"
+    assert view.can_continue is True
+
+
+def test_stop_fence_keeps_precedence_over_v1_task_blocker(tmp_path) -> None:
+    _write_cursor(tmp_path, status="STOPPED", disposition="STOPPED", reason_code="STOPPED")
+    memory = {
+        "revision": 9,
+        "execution": {
+            "task_statuses": {"P1-01": "blocked"},
+            "attempts": [
+                {
+                    "task_id": "P1-01",
+                    "result_status": "FAIL",
+                    "failure_code": "validation_failed",
+                    "result_summary": "Validation failed after Submit result.",
+                }
+            ],
+        },
+    }
+    commands = CanonicalProjectCenterAutoCommands(
+        tmp_path,
+        "project-1",
+        memory_provider=lambda: memory,
+    )
+
+    state = commands.snapshot(plan_available=True, plan_version="1")
+
+    assert state.scope_status == "STOPPED"
+    assert state.reason_code == "STOPPED"
+''', encoding='utf-8')
+          PY
+      - name: Run targeted regression tests
+        run: python -m pytest -q tests/test_project_center_auto_result_projection.py tests/test_auto_prerequisite_graph.py
+      - name: Commit bounded fix
+        shell: bash
+        run: |
+          git rm .github/workflows/apply-auto-result-projection-fix.yml
+          git add bdb_vnext/project_center_auto.py tests/test_project_center_auto_result_projection.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: project execution failure projection in AUTO"
+          git push origin HEAD:fix/auto-result-projection
