@@ -489,6 +489,42 @@ class CanonicalProjectCenterAutoCommands:
         except (ProjectMemoryError, ValueError, TypeError) as exc:
             return {"prerequisite_error": getattr(exc, "code", "prerequisite_state_unavailable")}
 
+    def _project_memory_task_blocker(self, task_id: str | None) -> tuple[str | None, str | None]:
+        """Project a terminal v1 task failure without mutating the AUTO cursor.
+
+        ProjectExecution records task results in the existing Project Memory
+        execution document. AUTO continuation already treats that v1 task
+        status as the logical authority; the read-only Project Center snapshot
+        must observe the same blocker without a mutating Continue call.
+        """
+        if not task_id:
+            return None, None
+        try:
+            execution, _revision = self._memory_execution(self._memory_value())
+        except (ProjectMemoryError, OSError, ValueError, TypeError):
+            return None, None
+        raw_statuses = execution.get("task_statuses", {})
+        if not isinstance(raw_statuses, Mapping) or str(raw_statuses.get(task_id, "")).lower() != "blocked":
+            return None, None
+
+        reason_code = "BLOCKED"
+        explanation = AUTO_STATUS_REASON_TEXT["BLOCKED"]
+        attempts = execution.get("attempts", [])
+        if isinstance(attempts, list):
+            for raw_attempt in reversed(attempts):
+                if not isinstance(raw_attempt, Mapping) or str(raw_attempt.get("task_id")) != task_id:
+                    continue
+                if str(raw_attempt.get("result_status", "")).upper() == "STALE_RESULT":
+                    continue
+                failure_code = raw_attempt.get("failure_code")
+                result_summary = raw_attempt.get("result_summary")
+                if failure_code:
+                    reason_code = str(failure_code)
+                if result_summary:
+                    explanation = str(result_summary)
+                break
+        return reason_code, explanation
+
     def snapshot(
         self,
         *,
@@ -564,6 +600,12 @@ class CanonicalProjectCenterAutoCommands:
                 ).fetchone()
                 task_status = str(task_row[0]).upper() if task_row else None
 
+            project_memory_reason_code, project_memory_explanation = self._project_memory_task_blocker(
+                cursor["current_task_id"]
+            )
+            if project_memory_reason_code is not None:
+                task_status = "BLOCKED"
+
             send_status = None
             if "send_intents" in tables:
                 row = conn.execute(
@@ -628,11 +670,18 @@ class CanonicalProjectCenterAutoCommands:
                     persisted_reason_code = str(raw_reason_code)
                 if raw_explanation:
                     persisted_explanation = str(raw_explanation)
-            if persisted_reason_code:
+            project_memory_blocked = project_memory_reason_code is not None and status == "BLOCKED"
+            if project_memory_blocked:
+                reason_code = project_memory_reason_code
+            elif persisted_reason_code:
                 reason_code = persisted_reason_code
 
             continuation_status = send_status or "NONE"
-            reason = persisted_explanation or AUTO_STATUS_REASON_TEXT.get(reason_code, f"Kanoniczny status: {reason_code}.")
+            reason = (
+                project_memory_explanation
+                if project_memory_blocked and project_memory_explanation
+                else persisted_explanation or AUTO_STATUS_REASON_TEXT.get(reason_code, f"Kanoniczny status: {reason_code}.")
+            )
             return CanonicalAutoState(
                 project_id=self.project_id,
                 scope=scope,
