@@ -1,0 +1,25 @@
+name: Project history reconciliation gate
+
+on:
+  push:
+    branches:
+      - fix/project-history-reconciliation
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install pytest
+      - run: python -m compileall -q bdb_vnext
+      - run: python -m pytest -q tests/test_project_history_reconciliation.py tests/test_project_center_auto_result_projection.py tests/test_auto_prerequisite_graph.py
