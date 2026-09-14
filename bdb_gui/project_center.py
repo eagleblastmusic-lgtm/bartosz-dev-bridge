@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -44,7 +44,7 @@ from bdb_vnext.composition import default_vnext_runtime_root
 from bdb_vnext.project_catalog import ProjectBrief, ProjectCatalog, ProjectCatalogError, ProjectRecord
 from bdb_vnext.project_execution import ProjectExecutionError
 from bdb_vnext.project_workflow import ProjectWorkflow, ProjectWorkflowError
-from bdb_vnext.project_memory import HANDOFF_MODES, ProjectMemoryError, bounded_history_summary, milestone_gate_statuses, project_health, project_status_sentence, resolve_next_action
+from bdb_vnext.project_memory import HANDOFF_MODES, ProjectMemoryError, bounded_history_summary, milestone_gate_statuses, open_question_statuses, planning_gate_statuses, project_health, project_status_sentence, resolve_next_action, validate_prerequisite_state
 from bdb_vnext.auto_scope_contract import AutoScope, DEFAULT_AUTO_SCOPE
 from bdb_vnext.project_center_auto import (
     AUTO_SCOPE_OPTIONS,
@@ -859,6 +859,9 @@ class ProjectCenterWindow(QMainWindow):
         canonical = self._auto_view_model.canonical
         if plan is None or canonical.prerequisite_revision <= 0 or state.revision != canonical.prerequisite_revision:
             raise ProjectCenterAutoCommandError("stale_prerequisite", "prerequisite UI projection is stale or unavailable")
+        validate_prerequisite_state(plan, state)
+        planning_statuses = planning_gate_statuses(plan, state)
+        question_statuses = open_question_statuses(plan, state)
         if kind == "milestone_gate":
             expected_id = canonical.milestone_gate_id
             status = milestone_gate_statuses(plan, state).get(identifier)
@@ -866,14 +869,12 @@ class ProjectCenterWindow(QMainWindow):
                 raise ProjectCenterAutoCommandError("stale_prerequisite", "milestone gate changed before approval")
         elif kind == "planning_gate":
             context_ids = {item["id"] for item in (plan.planning_context or {}).get("gates", [])}
-            raw = state.execution.get("gate_statuses", {})
-            status = raw.get(identifier) if isinstance(raw, Mapping) else None
+            status = planning_statuses.get(identifier)
             if identifier not in context_ids or status != "pending":
                 raise ProjectCenterAutoCommandError("stale_prerequisite", "planning gate changed before approval")
         elif kind == "open_question":
             context_ids = {item["id"] for item in (plan.planning_context or {}).get("open_questions", [])}
-            raw = state.execution.get("open_question_statuses", {})
-            status = raw.get(identifier) if isinstance(raw, Mapping) else None
+            status = question_statuses.get(identifier)
             if identifier not in context_ids or status != "open":
                 raise ProjectCenterAutoCommandError("stale_prerequisite", "open question changed before resolution")
         else:

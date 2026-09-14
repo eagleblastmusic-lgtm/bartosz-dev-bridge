@@ -18,13 +18,15 @@ from typing import Any, Callable, Mapping, Protocol
 from .auto_scope_contract import AutoScope, DEFAULT_AUTO_SCOPE
 from .project_memory import (
     GATE_STATUS_VALUES,
-    MILESTONE_GATE_STATUS_VALUES,
     OPEN_QUESTION_STATUS_VALUES,
     ProjectMemoryError,
     ProjectMemoryStore,
     milestone_gate_id,
     milestone_gate_statuses,
+    open_question_statuses,
+    planning_gate_statuses,
     task_prerequisite_blockers,
+    validate_prerequisite_state,
 )
 from .project_catalog import classify_dependency_targets
 from .project_memory_v2_store import ProjectMemoryStoreV2, ProjectMemoryV2Error
@@ -438,22 +440,11 @@ class CanonicalProjectCenterAutoCommands:
             return {}
         value = self._memory_value()
         execution, revision = self._memory_execution(value)
-        if hasattr(value, "execution"):
-            durable_milestone_gates = milestone_gate_statuses(plan, value)
-        else:
-            raw_milestone_gates = execution.get("milestone_gate_statuses")
-            expected_gate_ids = {milestone_gate_id(item.milestone_id) for item in plan.milestones}
-            if not isinstance(raw_milestone_gates, Mapping) or set(raw_milestone_gates) != expected_gate_ids:
-                raise ProjectMemoryError(
-                    "milestone_gate_state_invalid",
-                    "durable milestone gate state is missing, unknown, or ambiguously keyed",
-                )
-            durable_milestone_gates = {
-                identifier: str(raw_milestone_gates[identifier])
-                for identifier in sorted(expected_gate_ids)
-            }
-            if any(status not in MILESTONE_GATE_STATUS_VALUES for status in durable_milestone_gates.values()):
-                raise ProjectMemoryError("milestone_gate_state_invalid", "durable milestone gate status is invalid")
+        durable_milestone_gates = milestone_gate_statuses(plan, value)
+        # Validate every durable prerequisite namespace before projecting any
+        # operator action.  Missing maps remain safe legacy defaults; present
+        # malformed maps are unavailable rather than silently repaired.
+        validate_prerequisite_state(plan, value)
 
         milestone_ids = [item.milestone_id for item in plan.milestones]
         current_id = current_milestone_id or milestone_ids[0]
@@ -774,22 +765,8 @@ class CanonicalProjectCenterAutoCommands:
 
         memory_value = self._memory_value()
         execution, _revision = self._memory_execution(memory_value)
-        if hasattr(memory_value, "execution"):
-            durable_gate_statuses = milestone_gate_statuses(plan, memory_value)
-        else:
-            raw_milestone_gates = execution.get("milestone_gate_statuses")
-            expected_gate_ids = {milestone_gate_id(item.milestone_id) for item in plan.milestones}
-            if not isinstance(raw_milestone_gates, Mapping) or set(raw_milestone_gates) != expected_gate_ids:
-                raise ProjectMemoryError(
-                    "milestone_gate_state_invalid",
-                    "durable milestone gate state is missing, unknown, or ambiguously keyed",
-                )
-            durable_gate_statuses = {
-                identifier: str(raw_milestone_gates[identifier])
-                for identifier in sorted(expected_gate_ids)
-            }
-            if any(status not in MILESTONE_GATE_STATUS_VALUES for status in durable_gate_statuses.values()):
-                raise ProjectMemoryError("milestone_gate_state_invalid", "durable milestone gate status is invalid")
+        durable_gate_statuses = milestone_gate_statuses(plan, memory_value)
+        validate_prerequisite_state(plan, memory_value)
 
         raw_task_statuses = execution.get("task_statuses", {})
         if isinstance(raw_task_statuses, Mapping):
@@ -880,7 +857,14 @@ class CanonicalProjectCenterAutoCommands:
         scope: AutoScope,
         milestone_id: str,
     ) -> None:
-        """Create the existing v2 run/scope history rows exactly once."""
+        """Create or validate the v2 history rows for the canonical run.
+
+        A PROJECT/UNTIL_STOPPED run is one continuous scope that may cross
+        milestone boundaries.  The v2 ``runs.milestone_id`` value therefore
+        records the run's origin, while ``scopes.milestone_id`` is the current
+        projection updated by ``_update_scope_history``.  TASK and MILESTONE
+        remain bound to their originating milestone.
+        """
         run = conn.execute("SELECT project_id, milestone_id FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         if run is None:
             now = self._now_iso()
@@ -888,7 +872,10 @@ class CanonicalProjectCenterAutoCommands:
                 "INSERT INTO runs (run_id, project_id, milestone_id, status, current_task_id, started_at, finished_at) VALUES (?, ?, ?, 'running', NULL, ?, NULL)",
                 (run_id, self.project_id, milestone_id, now),
             )
-        elif str(run[0]) != self.project_id or str(run[1]) != milestone_id:
+        elif str(run[0]) != self.project_id or (
+            scope not in (AutoScope.PROJECT, AutoScope.UNTIL_STOPPED)
+            and str(run[1]) != milestone_id
+        ):
             raise ProjectCenterAutoCommandError(
                 "run_identity_conflict",
                 f"run {run_id} is bound to a different project or milestone",
@@ -902,7 +889,10 @@ class CanonicalProjectCenterAutoCommands:
                 "INSERT INTO scopes (scope_id, project_id, mode, status, milestone_id, max_tasks, started_at, finished_at) VALUES (?, ?, ?, 'RUNNING', ?, NULL, ?, NULL)",
                 (scope_id, self.project_id, scope.value, milestone_id, now),
             )
-        elif str(scope_row[0]) != self.project_id or str(scope_row[1]) != milestone_id or str(scope_row[2]) != scope.value:
+        elif str(scope_row[0]) != self.project_id or str(scope_row[2]) != scope.value or (
+            scope not in (AutoScope.PROJECT, AutoScope.UNTIL_STOPPED)
+            and str(scope_row[1]) != milestone_id
+        ):
             raise ProjectCenterAutoCommandError(
                 "scope_identity_conflict",
                 f"scope history {scope_id} is bound to a different canonical identity",
@@ -1359,12 +1349,16 @@ class CanonicalProjectCenterAutoCommands:
         if identifier not in context_gate_ids:
             raise ProjectCenterAutoCommandError("prerequisite_not_found", f"gate does not exist in the current plan: {identifier}")
         try:
+            def read_status(state: Any) -> str | None:
+                validate_prerequisite_state(plan, state)
+                return planning_gate_statuses(plan, state).get(identifier)
+
             return self._memory_mutation_receipt(
                 command="PASS_GATE",
                 identifier=identifier,
                 expected_revision=expected_revision,
                 target_status="passed",
-                read_status=lambda state: str(state.execution.get("gate_statuses", {}).get(identifier)) if isinstance(state.execution, Mapping) else None,
+                read_status=read_status,
                 mutate=lambda memory, revision: memory.pass_gate(identifier, expected_revision=revision),
                 reason_code="GATE_PASSED",
                 explanation=f"Gate {identifier} zaliczono w Project Memory.",
@@ -1382,12 +1376,16 @@ class CanonicalProjectCenterAutoCommands:
         if identifier not in question_ids:
             raise ProjectCenterAutoCommandError("prerequisite_not_found", f"open question does not exist in the current plan: {identifier}")
         try:
+            def read_status(state: Any) -> str | None:
+                validate_prerequisite_state(plan, state)
+                return open_question_statuses(plan, state).get(identifier)
+
             return self._memory_mutation_receipt(
                 command="RESOLVE_OPEN_QUESTION",
                 identifier=identifier,
                 expected_revision=expected_revision,
                 target_status="resolved",
-                read_status=lambda state: str(state.execution.get("open_question_statuses", {}).get(identifier)) if isinstance(state.execution, Mapping) else None,
+                read_status=read_status,
                 mutate=lambda memory, revision: memory.resolve_open_question(identifier, expected_revision=revision),
                 reason_code="OPEN_QUESTION_RESOLVED",
                 explanation=f"Open question {identifier} rozstrzygnięto w Project Memory.",

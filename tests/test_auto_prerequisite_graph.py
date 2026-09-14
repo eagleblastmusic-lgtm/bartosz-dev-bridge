@@ -195,8 +195,17 @@ def test_milestone_gate_lifecycle_is_durable_and_next_scope_is_explicit(tmp_path
     assert after_approval.execution["milestone_gate_statuses"]["GATE:P0"] == "passed"
     assert after_approval.revision == before_approval.revision + 1
 
-    completed = adapter.continue_auto()
-    completed_state = adapter.snapshot(plan_available=True)
+    restarted = CanonicalProjectCenterAutoCommands(
+        runtime,
+        PROJECT_ID,
+        plan_provider=lambda: plan,
+    )
+    restarted_state = restarted.snapshot(plan_available=True)
+    assert restarted_state.milestone_gate_status == "passed"
+    assert restarted_state.prerequisite_revision == after_approval.revision
+
+    completed = restarted.continue_auto()
+    completed_state = restarted.snapshot(plan_available=True)
     assert completed.reason_code == "MILESTONE_SCOPE_COMPLETED"
     assert completed_state.scope_status == "COMPLETED"
     assert completed_state.current_milestone_id == "P0"
@@ -240,6 +249,107 @@ def test_milestone_gate_lifecycle_is_durable_and_next_scope_is_explicit(tmp_path
     duplicate_after = memory.read_state()
     assert duplicate.idempotent is True
     assert duplicate_before.to_dict() == duplicate_after.to_dict()
+
+
+@pytest.mark.parametrize("scope", (AutoScope.PROJECT, AutoScope.UNTIL_STOPPED))
+def test_long_lived_scope_crosses_milestone_without_history_identity_conflict(
+    tmp_path: Path,
+    scope: AutoScope,
+) -> None:
+    runtime = tmp_path / "runtime"
+    document = _premium_two_milestone_plan().to_dict()
+    document["tasks"][1]["dependencies"] = []
+    document.pop("planning_context", None)
+    plan = validate_project_plan(document, expected_project_id=PROJECT_ID)
+    adapter = _adapter(runtime, plan)
+    memory = ProjectMemoryStore(runtime, PROJECT_ID)
+
+    adapter.start_auto(scope, confirmed=True)
+    pending = adapter.continue_auto()
+    assert pending.reason_code in {"MILESTONE_GATE_PENDING", "MILESTONE_GATE_REQUIRED_BEFORE_ADVANCING"}
+
+    memory.pass_milestone_gate("GATE:P0")
+    crossed = adapter.continue_auto()
+    assert crossed.current_milestone_id == "P1"
+    assert crossed.current_task_id == "P1-01"
+
+    connection = sqlite3.connect(str(adapter.db_path))
+    try:
+        run_history = connection.execute(
+            "SELECT run_id, project_id, milestone_id FROM runs WHERE project_id = ?",
+            (PROJECT_ID,),
+        ).fetchall()
+        scope_history = connection.execute(
+            "SELECT project_id, mode, milestone_id, status FROM scopes WHERE project_id = ?",
+            (PROJECT_ID,),
+        ).fetchall()
+    finally:
+        connection.close()
+    assert len(run_history) == 1
+    assert run_history[0][1:] == (PROJECT_ID, "P0")
+    assert scope_history == [(PROJECT_ID, scope.value, "P1", "RUNNING")]
+
+
+@pytest.mark.parametrize("scope", (AutoScope.PROJECT, AutoScope.UNTIL_STOPPED))
+def test_long_lived_scope_waits_for_next_task_prerequisite_after_gate(
+    tmp_path: Path,
+    scope: AutoScope,
+) -> None:
+    runtime = tmp_path / "runtime"
+    adapter = _adapter(runtime, _premium_two_milestone_plan())
+    memory = ProjectMemoryStore(runtime, PROJECT_ID)
+
+    adapter.start_auto(scope, confirmed=True)
+    adapter.continue_auto()
+    memory.pass_milestone_gate("GATE:P0")
+
+    waiting = adapter.continue_auto()
+    assert waiting.reason_code == "NEXT_MILESTONE_TASK_DEPENDENCY_PENDING"
+    assert waiting.current_milestone_id == "P1"
+    assert waiting.current_task_id is None
+    assert _persisted_cursor_explanation(adapter)["dependency_evidence"] == {"G0": "pending"}
+
+    memory.pass_gate("G0")
+    runnable = adapter.continue_auto()
+    assert runnable.reason_code == "PROJECT_NEXT_TASK"
+    assert runnable.current_milestone_id == "P1"
+    assert runnable.current_task_id == "P1-01"
+
+
+def test_completed_last_milestone_does_not_create_phantom_next_run(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    document = _premium_two_milestone_plan().to_dict()
+    document["milestones"] = [document["milestones"][0]]
+    document["tasks"] = [document["tasks"][0]]
+    document["current_task_id"] = "P0-01"
+    document.pop("planning_context", None)
+    plan = validate_project_plan(document, expected_project_id=PROJECT_ID)
+    adapter = _adapter(runtime, plan)
+    memory = ProjectMemoryStore(runtime, PROJECT_ID)
+
+    adapter.start_auto(AutoScope.MILESTONE, confirmed=True)
+    pending = adapter.continue_auto()
+    assert pending.reason_code == "MILESTONE_GATE_PENDING"
+    pending_state = memory.read_state()
+    memory.pass_milestone_gate("GATE:P0", expected_revision=pending_state.revision)
+    completed = adapter.continue_auto()
+    before = adapter.snapshot(plan_available=True)
+    assert completed.reason_code == "MILESTONE_SCOPE_COMPLETED"
+    assert before.scope_status == "COMPLETED"
+
+    with pytest.raises(ProjectCenterAutoCommandError) as error:
+        adapter.start_auto(AutoScope.MILESTONE, confirmed=True)
+    assert error.value.code == "no_next_milestone"
+    after = adapter.snapshot(plan_available=True)
+    assert after.run_id == before.run_id
+    assert after.scope_epoch == before.scope_epoch
+    assert after.current_milestone_id == "P0"
+
+    connection = sqlite3.connect(str(adapter.db_path))
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM runs WHERE project_id = ?", (PROJECT_ID,)).fetchone()[0] == 1
+    finally:
+        connection.close()
 
 
 def test_milestone_gate_commands_fail_closed_for_unknown_and_stale_state(tmp_path: Path) -> None:
@@ -295,6 +405,92 @@ def test_auto_rejects_malformed_durable_milestone_gate_state(tmp_path: Path) -> 
         adapter.start_auto(AutoScope.MILESTONE, confirmed=True)
     assert error.value.code == "milestone_gate_state_invalid"
     assert not adapter.db_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("action", "map_key", "malformed", "error_code", "identifier"),
+    (
+        ("gate", "gate_statuses", {"G0": "passed", "UNKNOWN": "pending"}, "planning_gate_state_invalid", "G0"),
+        ("open_question", "open_question_statuses", {"OQ-001": "resolved", "UNKNOWN": "open"}, "open_question_state_invalid", "OQ-001"),
+    ),
+)
+def test_auto_rejects_malformed_planning_prerequisite_state_without_mutation(
+    tmp_path: Path,
+    action: str,
+    map_key: str,
+    malformed: dict[str, str],
+    error_code: str,
+    identifier: str,
+) -> None:
+    runtime = tmp_path / "runtime"
+    plan = _dependency_plan(
+        "G0",
+        planning_context={
+            "gates": [{"id": "G0", "title": "Foundation gate", "criteria": "Foundation is accepted."}],
+            "open_questions": [{"id": "OQ-001", "question": "Which release cadence?"}],
+        },
+    )
+    adapter = _adapter(runtime, plan)
+    memory = ProjectMemoryStore(runtime, PROJECT_ID)
+    state = memory.read_state()
+    malformed_state = replace(state, execution={**state.execution, map_key: malformed})
+    memory.execution_transaction(lambda _state: (malformed_state, None))
+    before = memory.read_state().to_dict()
+
+    with pytest.raises(ProjectCenterAutoCommandError) as error:
+        if action == "gate":
+            adapter.pass_gate(identifier)
+        else:
+            adapter.resolve_open_question(identifier)
+
+    assert error.value.code == error_code
+    assert memory.read_state().to_dict() == before
+
+
+def test_legacy_state_without_milestone_gate_entry_is_pending_and_upgradable(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    plan = _premium_two_milestone_plan()
+    adapter = _adapter(runtime, plan)
+    memory = ProjectMemoryStore(runtime, PROJECT_ID)
+    adapter.start_auto(AutoScope.MILESTONE, confirmed=True)
+    adapter.continue_auto()
+
+    state = memory.read_state()
+    legacy_state = replace(
+        state,
+        execution={key: value for key, value in state.execution.items() if key != "milestone_gate_statuses"},
+    )
+    memory.execution_transaction(lambda _state: (legacy_state, None))
+    record = new_project_record(
+        project_id=PROJECT_ID,
+        display_name=plan.project_name,
+        repo_alias="premium-calculator",
+        local_repo_path=runtime / "repo",
+        github_repo=None,
+        brief=ProjectBrief("Premium Calculator", "Calculate premiums", "Fixture", "tool"),
+    )
+    restarted = CanonicalProjectCenterAutoCommands(
+        runtime,
+        PROJECT_ID,
+        project_provider=lambda: record,
+        plan_provider=lambda: plan,
+    )
+
+    reloaded = restarted.snapshot(plan_available=True)
+    assert reloaded.prerequisite_error is None
+    assert reloaded.milestone_gate_id == "GATE:P0"
+    assert reloaded.milestone_gate_status == "pending"
+    assert reloaded.current_milestone_id == "P0"
+    approved = restarted.pass_milestone_gate("GATE:P0", expected_revision=reloaded.prerequisite_revision)
+    assert approved.reason_code == "MILESTONE_GATE_PASSED"
+    assert ProjectMemoryStore(runtime, PROJECT_ID).read_state().execution["milestone_gate_statuses"]["GATE:P0"] == "passed"
+    recovered = CanonicalProjectCenterAutoCommands(
+        runtime,
+        PROJECT_ID,
+        project_provider=lambda: record,
+        plan_provider=lambda: plan,
+    )
+    assert recovered.continue_auto().reason_code == "MILESTONE_SCOPE_COMPLETED"
 
 
 def test_project_center_gate_actions_confirm_recheck_and_use_workflow_boundary(tmp_path: Path) -> None:
