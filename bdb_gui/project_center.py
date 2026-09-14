@@ -44,7 +44,7 @@ from bdb_vnext.composition import default_vnext_runtime_root
 from bdb_vnext.project_catalog import ProjectBrief, ProjectCatalog, ProjectCatalogError, ProjectRecord
 from bdb_vnext.project_execution import ProjectExecutionError
 from bdb_vnext.project_workflow import ProjectWorkflow, ProjectWorkflowError
-from bdb_vnext.project_memory import HANDOFF_MODES, ProjectMemoryError, bounded_history_summary, project_health, project_status_sentence, resolve_next_action
+from bdb_vnext.project_memory import HANDOFF_MODES, ProjectMemoryError, bounded_history_summary, milestone_gate_statuses, open_question_statuses, planning_gate_statuses, project_health, project_status_sentence, resolve_next_action, validate_prerequisite_state
 from bdb_vnext.auto_scope_contract import AutoScope, DEFAULT_AUTO_SCOPE
 from bdb_vnext.project_center_auto import (
     AUTO_SCOPE_OPTIONS,
@@ -211,6 +211,7 @@ class ProjectCenterWindow(QMainWindow):
         workflow: ProjectWorkflow | None = None,
         auto_commands_factory: Callable[[ProjectRecord], ProjectCenterAutoCommands] | None = None,
         auto_start_confirmation: Callable[[ProjectCenterAutoViewModel], bool] | None = None,
+        auto_gate_confirmation: Callable[[str, str, str], bool] | None = None,
         environment_commands_factory: Callable[[ProjectRecord], CanonicalEnvironmentCommands] | None = None,
         environment_view_model_factory: Callable[[ProjectRecord, str | None], MachineEnvironmentViewModel] | None = None,
     ) -> None:
@@ -225,6 +226,7 @@ class ProjectCenterWindow(QMainWindow):
         self._workflow = workflow or ProjectWorkflow(self._catalog.runtime_root, catalog=self._catalog)
         self._auto_commands_factory = auto_commands_factory
         self._auto_start_confirmation = auto_start_confirmation
+        self._auto_gate_confirmation = auto_gate_confirmation
         self._environment_commands_factory = environment_commands_factory
         self._environment_view_model_factory = environment_view_model_factory
         self._environment_commands: CanonicalEnvironmentCommands | None = None
@@ -234,6 +236,7 @@ class ProjectCenterWindow(QMainWindow):
         self._auto_commands_project_id: str | None = None
         self._auto_selected_scope = DEFAULT_AUTO_SCOPE
         self._auto_scope_user_changed = False
+        self._auto_prerequisite_revision = 0
         self._auto_view_model = ProjectCenterAutoViewModel.from_canonical(CanonicalAutoState())
         self._snapshot: ControlCenterSnapshot | None = None
         self._projects: tuple[ProjectRecord, ...] = ()
@@ -310,6 +313,41 @@ class ProjectCenterWindow(QMainWindow):
         self._auto_disabled_reason.setObjectName("AutoDisabledReason")
         self._auto_disabled_reason.setWordWrap(True)
         layout.addRow("Powód niedostępności:", self._auto_disabled_reason)
+
+        prerequisite_panel = QGroupBox("Wymagane działania operatora")
+        prerequisite_panel.setObjectName("AutoPrerequisiteActionPanel")
+        prerequisite_layout = QFormLayout(prerequisite_panel)
+
+        self._auto_milestone_gate_label = QLabel("—")
+        self._auto_milestone_gate_label.setObjectName("AutoMilestoneGateStatus")
+        self._auto_milestone_gate_label.setWordWrap(True)
+        self._auto_milestone_gate_button = QPushButton("Zatwierdź milestone gate")
+        self._auto_milestone_gate_button.setObjectName("AutoMilestoneGateButton")
+        self._auto_milestone_gate_button.setAccessibleName("Zatwierdź milestone gate")
+        self._auto_milestone_gate_button.clicked.connect(lambda: self._approve_auto_prerequisite("milestone_gate"))
+        milestone_action = QHBoxLayout(); milestone_action.addWidget(self._auto_milestone_gate_label, 1); milestone_action.addWidget(self._auto_milestone_gate_button)
+        prerequisite_layout.addRow("Milestone gate:", milestone_action)
+
+        self._auto_planning_gate_label = QLabel("—")
+        self._auto_planning_gate_label.setObjectName("AutoPlanningGateStatus")
+        self._auto_planning_gate_label.setWordWrap(True)
+        self._auto_planning_gate_button = QPushButton("Zalicz gate")
+        self._auto_planning_gate_button.setObjectName("AutoPlanningGateButton")
+        self._auto_planning_gate_button.setAccessibleName("Zalicz gate")
+        self._auto_planning_gate_button.clicked.connect(lambda: self._approve_auto_prerequisite("planning_gate"))
+        planning_action = QHBoxLayout(); planning_action.addWidget(self._auto_planning_gate_label, 1); planning_action.addWidget(self._auto_planning_gate_button)
+        prerequisite_layout.addRow("Planning gate:", planning_action)
+
+        self._auto_open_question_label = QLabel("—")
+        self._auto_open_question_label.setObjectName("AutoOpenQuestionStatus")
+        self._auto_open_question_label.setWordWrap(True)
+        self._auto_open_question_button = QPushButton("Rozstrzygnij open question")
+        self._auto_open_question_button.setObjectName("AutoOpenQuestionButton")
+        self._auto_open_question_button.setAccessibleName("Rozstrzygnij open question")
+        self._auto_open_question_button.clicked.connect(lambda: self._approve_auto_prerequisite("open_question"))
+        question_action = QHBoxLayout(); question_action.addWidget(self._auto_open_question_label, 1); question_action.addWidget(self._auto_open_question_button)
+        prerequisite_layout.addRow("Open question:", question_action)
+        layout.addRow("", prerequisite_panel)
 
         controls = QHBoxLayout()
         self._auto_start_button = QPushButton("Uruchom AUTO")
@@ -662,6 +700,15 @@ class ProjectCenterWindow(QMainWindow):
             run_id=value.get("run_id"),
             current_milestone_id=value.get("current_milestone_id"),
             current_task_id=value.get("current_task_id"),
+            milestone_gate_id=value.get("milestone_gate_id"),
+            milestone_gate_status=value.get("milestone_gate_status"),
+            planning_gate_id=value.get("planning_gate_id"),
+            planning_gate_status=value.get("planning_gate_status"),
+            open_question_id=value.get("open_question_id"),
+            open_question_status=value.get("open_question_status"),
+            prerequisite_revision=int(value.get("prerequisite_revision", 0)),
+            prerequisite_error=value.get("prerequisite_error"),
+            next_milestone_id=value.get("next_milestone_id"),
             scope_status=str(value.get("scope_status", "WAITING_FOR_PLAN")),
             continuation_status=str(value.get("continuation_status", "NONE")),
             reentry_status=str(value.get("reentry_status", "NONE")),
@@ -697,6 +744,8 @@ class ProjectCenterWindow(QMainWindow):
                     plan_available=project.plan_imported,
                 )
 
+        self._auto_prerequisite_revision = canonical.prerequisite_revision
+
         active_statuses = {"ACTIVE", "RUNNABLE", "WAITING", "PAUSED", "CI_WAITING", "DELIVERY_UNCERTAIN", "OPERATOR_CHECKPOINT", "STOPPED", "COMPLETED", "BLOCKED"}
         if canonical.scope_status in active_statuses:
             self._auto_selected_scope = canonical.scope
@@ -708,6 +757,11 @@ class ProjectCenterWindow(QMainWindow):
         self._auto_scope_selector.setCurrentIndex(selected_index)
         self._auto_scope_selector.blockSignals(False)
         self._auto_scope_selector.setEnabled(project is not None and canonical.scope_status not in active_statuses)
+        self._auto_start_button.setText(
+            "Uruchom następny milestone"
+            if canonical.scope_status == "COMPLETED" and canonical.next_milestone_id is not None
+            else "Uruchom AUTO"
+        )
         self._auto_scope_status.setText(f"Wybrany: {self._auto_view_model.selected_scope.value} · kanoniczny: {canonical.scope.value} · {self._auto_view_model.scope_status}")
         self._auto_current_milestone.setText(self._auto_view_model.current_milestone)
         self._auto_current_task.setText(self._auto_view_model.current_task)
@@ -716,6 +770,46 @@ class ProjectCenterWindow(QMainWindow):
         premium = "P2 completed · P3 not started" if canonical.p2_completed and not canonical.p3_started else f"P2={'completed' if canonical.p2_completed else 'not completed'} · P3={'started' if canonical.p3_started else 'not started'}"
         self._auto_premium_state.setText(premium)
         self._auto_blocker_reason.setText(f"{canonical.reason_code}: {self._auto_view_model.blocker_reason}")
+
+        prerequisite_error = canonical.prerequisite_error
+        if prerequisite_error:
+            unavailable = f"Stan kanoniczny niedostępny: {prerequisite_error}"
+            self._auto_milestone_gate_label.setText(unavailable)
+            self._auto_planning_gate_label.setText(unavailable)
+            self._auto_open_question_label.setText(unavailable)
+            for button in (self._auto_milestone_gate_button, self._auto_planning_gate_button, self._auto_open_question_button):
+                button.setEnabled(False)
+                button.setToolTip(unavailable)
+        else:
+            milestone_status = canonical.milestone_gate_status
+            if canonical.milestone_gate_id:
+                milestone_text = f"{canonical.milestone_gate_id} · {'oczekuje na zatwierdzenie' if milestone_status == 'pending' else 'zatwierdzony' if milestone_status == 'passed' else 'status nieznany'}"
+            else:
+                milestone_text = "Brak kanonicznego milestone gate."
+            self._auto_milestone_gate_label.setText(milestone_text)
+            milestone_enabled = bool(project and canonical.milestone_gate_id and milestone_status == "pending" and canonical.prerequisite_revision > 0)
+            self._auto_milestone_gate_button.setEnabled(milestone_enabled)
+            self._auto_milestone_gate_button.setToolTip("Wymaga jawnego potwierdzenia; stan zostanie sprawdzony ponownie przed zapisem." if milestone_enabled else "Brak oczekującego kanonicznego milestone gate.")
+
+            planning_status = canonical.planning_gate_status
+            if canonical.planning_gate_id:
+                planning_text = f"{canonical.planning_gate_id} · {'wymaga zaliczenia' if planning_status == 'pending' else 'zaliczony' if planning_status == 'passed' else 'status nieznany'}"
+            else:
+                planning_text = "Brak oczekującego planning-context gate."
+            self._auto_planning_gate_label.setText(planning_text)
+            planning_enabled = bool(project and canonical.planning_gate_id and planning_status == "pending" and canonical.prerequisite_revision > 0)
+            self._auto_planning_gate_button.setEnabled(planning_enabled)
+            self._auto_planning_gate_button.setToolTip("Wymaga jawnego potwierdzenia; stan zostanie sprawdzony ponownie przed zapisem." if planning_enabled else "Brak oczekującego planning-context gate.")
+
+            question_status = canonical.open_question_status
+            if canonical.open_question_id:
+                question_text = f"{canonical.open_question_id} · {'wymaga rozstrzygnięcia' if question_status == 'open' else 'rozstrzygnięte' if question_status == 'resolved' else 'status nieznany'}"
+            else:
+                question_text = "Brak oczekującego open question."
+            self._auto_open_question_label.setText(question_text)
+            question_enabled = bool(project and canonical.open_question_id and question_status == "open" and canonical.prerequisite_revision > 0)
+            self._auto_open_question_button.setEnabled(question_enabled)
+            self._auto_open_question_button.setToolTip("Wymaga jawnego potwierdzenia; stan zostanie sprawdzony ponownie przed zapisem." if question_enabled else "Brak oczekującego open question.")
 
         for action, button in (("start", self._auto_start_button), ("stop", self._auto_stop_button), ("continue", self._auto_continue_button), ("resume", self._auto_resume_button)):
             enabled = {"start": self._auto_view_model.can_start, "stop": self._auto_view_model.can_stop, "continue": self._auto_view_model.can_continue, "resume": self._auto_view_model.can_resume}[action]
@@ -744,6 +838,88 @@ class ProjectCenterWindow(QMainWindow):
             QMessageBox.StandardButton.Cancel,
         )
         return answer == QMessageBox.StandardButton.Ok
+
+    def _confirm_auto_prerequisite(self, kind: str, identifier: str, description: str) -> bool:
+        if self._auto_gate_confirmation is not None:
+            return bool(self._auto_gate_confirmation(kind, identifier, description))
+        answer = QMessageBox.question(
+            self,
+            "Potwierdź działanie prerequisite",
+            f"{description}\n\nIdentyfikator kanoniczny: {identifier}\n\nZapisać tę zmianę w Project Memory?",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Ok
+
+    def _resolve_auto_prerequisite_revision(self, project: ProjectRecord, kind: str, identifier: str) -> int:
+        """Re-read Project Memory and reject a stale UI projection."""
+        memory = self._workflow.memory(project.project_id)
+        plan = memory.current_plan()
+        state = memory.read_state()
+        canonical = self._auto_view_model.canonical
+        if plan is None or canonical.prerequisite_revision <= 0 or state.revision != canonical.prerequisite_revision:
+            raise ProjectCenterAutoCommandError("stale_prerequisite", "prerequisite UI projection is stale or unavailable")
+        validate_prerequisite_state(plan, state)
+        planning_statuses = planning_gate_statuses(plan, state)
+        question_statuses = open_question_statuses(plan, state)
+        if kind == "milestone_gate":
+            expected_id = canonical.milestone_gate_id
+            status = milestone_gate_statuses(plan, state).get(identifier)
+            if identifier != expected_id or status != "pending":
+                raise ProjectCenterAutoCommandError("stale_prerequisite", "milestone gate changed before approval")
+        elif kind == "planning_gate":
+            context_ids = {item["id"] for item in (plan.planning_context or {}).get("gates", [])}
+            status = planning_statuses.get(identifier)
+            if identifier not in context_ids or status != "pending":
+                raise ProjectCenterAutoCommandError("stale_prerequisite", "planning gate changed before approval")
+        elif kind == "open_question":
+            context_ids = {item["id"] for item in (plan.planning_context or {}).get("open_questions", [])}
+            status = question_statuses.get(identifier)
+            if identifier not in context_ids or status != "open":
+                raise ProjectCenterAutoCommandError("stale_prerequisite", "open question changed before resolution")
+        else:
+            raise ProjectCenterAutoCommandError("invalid_prerequisite_action", "unsupported prerequisite action")
+        return state.revision
+
+    def _refresh_project_projections(self, project_id: str) -> None:
+        """Reload catalog, memory, execution, and AUTO projections together."""
+        self.start_bootstrap()
+        if any(item.project_id == project_id for item in self._projects):
+            self._select_project(project_id)
+
+    def _approve_auto_prerequisite(self, kind: str) -> None:
+        project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
+        canonical = self._auto_view_model.canonical
+        if project is None or canonical.prerequisite_error:
+            self._status.setText("BDB AUTO: kanoniczny prerequisite jest niedostępny")
+            return
+        field_by_kind = {
+            "milestone_gate": (canonical.milestone_gate_id, "Zatwierdzić milestone gate"),
+            "planning_gate": (canonical.planning_gate_id, "Zaliczyć planning-context gate"),
+            "open_question": (canonical.open_question_id, "Rozstrzygnąć open question"),
+        }
+        identifier, action = field_by_kind.get(kind, (None, "Wykonać działanie prerequisite"))
+        if not identifier:
+            self._status.setText("BDB AUTO: brak konkretnego kanonicznego prerequisite do wykonania")
+            return
+        if not self._confirm_auto_prerequisite(kind, identifier, action):
+            self._status.setText("BDB AUTO: działanie prerequisite anulowane — stan nie został zmieniony")
+            return
+        try:
+            revision = self._resolve_auto_prerequisite_revision(project, kind, identifier)
+            if kind == "milestone_gate":
+                result = self._workflow.pass_milestone_gate(project.project_id, identifier, expected_revision=revision)
+            elif kind == "planning_gate":
+                result = self._workflow.pass_gate(project.project_id, identifier, expected_revision=revision)
+            else:
+                result = self._workflow.resolve_open_question(project.project_id, identifier, expected_revision=revision)
+        except (ProjectCenterAutoCommandError, ProjectWorkflowError, ProjectMemoryError) as exc:
+            self._status.setText(f"BDB AUTO: działanie prerequisite odrzucone — {getattr(exc, 'code', 'prerequisite_failed')}")
+            self._render_auto(project)
+            return
+        self._mutation_operations_invoked += 1
+        self._set_auto_status_from_receipt(result)
+        self._refresh_project_projections(project.project_id)
 
     def _set_auto_status_from_receipt(self, receipt: Any) -> None:
         if hasattr(receipt, "reason_code"):

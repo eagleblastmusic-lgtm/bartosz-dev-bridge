@@ -43,13 +43,14 @@ _PLAN_VERSION_RE = re.compile(r"^(\d+)(?:\.0+)?$")
 _STATUS_VALUES = frozenset({"pending", "active", "review", "completed", "blocked", "skipped"})
 GATE_STATUS_VALUES = frozenset({"pending", "passed"})
 OPEN_QUESTION_STATUS_VALUES = frozenset({"open", "resolved"})
+MILESTONE_GATE_STATUS_VALUES = GATE_STATUS_VALUES
 _EVENT_TYPES = frozenset({
     "PROJECT_CREATED", "PLAN_IMPORTED", "PLAN_UPDATED", "TASK_STARTED", "TASK_REVIEW", "TASK_COMPLETED", "TASK_BLOCKED",
     "DECISION_ADDED", "DECISION_SUPERSEDED", "INBOX_ITEM_ADDED", "INBOX_ITEM_RESOLVED", "RISK_ADDED", "RISK_RESOLVED",
     "TECH_DEBT_ADDED", "TECH_DEBT_RESOLVED", "ATTENTION_ADDED", "ATTENTION_RESOLVED", "CHECKPOINT_CREATED", "HANDOFF_CREATED",
     "EXECUTION_BOUND", "EXECUTION_STARTED", "EXECUTION_COMPLETED", "TASK_REVIEW", "TASK_REVIEW_ACCEPTED", "TASK_REVIEW_CHANGES_REQUESTED",
     "TASK_COMPLETED", "TASK_BLOCKED", "EXECUTION_STALE_RESULT", "EXECUTION_REPLAYED", "EXECUTION_CONVERSATION_BOUND", "EXECUTION_CHECKPOINT", "MILESTONE_COMPLETED", "MILESTONE_AUTO_STARTED", "MILESTONE_AUTO_STOPPED", "MILESTONE_AUTO_COMPLETED", "PROJECT_REVIEW_REQUESTED",
-    "GATE_PASSED", "GATE_REOPENED", "OPEN_QUESTION_RESOLVED", "OPEN_QUESTION_REOPENED",
+    "GATE_PASSED", "GATE_REOPENED", "MILESTONE_GATE_PASSED", "MILESTONE_GATE_REOPENED", "OPEN_QUESTION_RESOLVED", "OPEN_QUESTION_REOPENED",
 })
 HANDOFF_MODES = (
     "CONTINUE_IMPLEMENTATION", "NEW_CHAT_PROJECT_HANDOFF", "ARCHITECTURE_REVIEW", "PROJECT_REVIEW", "DEBUGGING",
@@ -399,13 +400,54 @@ def _plan_prerequisite_ids(plan: ProjectPlan) -> tuple[set[str], set[str]]:
     return ({item["id"] for item in context.get("gates", [])}, {item["id"] for item in context.get("open_questions", [])})
 
 
-def _bounded_runtime_statuses(execution: Mapping[str, Any], key: str, identifiers: set[str], default: str, allowed: frozenset[str]) -> dict[str, str]:
-    raw = execution.get(key, {})
-    if raw is None:
-        raw = {}
-    if not isinstance(raw, Mapping) or len(raw) > MAX_ITEMS:
-        _fail("memory_execution_shape_invalid", f"execution.{key} is invalid")
-    return {identifier: str(raw.get(identifier, default)) if str(raw.get(identifier, default)) in allowed else default for identifier in sorted(identifiers)}
+def milestone_gate_id(milestone_id: str) -> str:
+    """Return the explicit namespace ID used for a milestone acceptance gate.
+
+    This is a namespace contract for the Scope Orchestrator's
+    ``PlanMilestoneNode.gate_id``.  It is deliberately unrelated to a
+    planning-context gate such as ``G0`` unless a future validated plan adds
+    an explicit relation between the two.
+    """
+    identifier = _text(milestone_id, "milestone_id", max_length=96)
+    if not _ID_RE.fullmatch(identifier):
+        _fail("milestone_id_invalid", "milestone_id is unsafe")
+    return f"GATE:{identifier}"
+
+
+def _milestone_gate_ids(plan: ProjectPlan) -> set[str]:
+    return {milestone_gate_id(item.milestone_id) for item in plan.milestones}
+
+
+def _strict_execution_statuses(
+    state: ProjectMemoryState | Mapping[str, Any],
+    *,
+    key: str,
+    identifiers: set[str],
+    default: str,
+    allowed: frozenset[str],
+    error_code: str,
+    label: str,
+) -> dict[str, str]:
+    """Read one durable prerequisite map without repairing present drift."""
+    if isinstance(state, Mapping):
+        execution = state.get("execution", {})
+    else:
+        execution = state.execution
+    execution = execution if isinstance(execution, Mapping) else {}
+    if key not in execution:
+        # Pre-feature v1 states may not contain this map.  The safe default is
+        # non-accepted and the first command boundary persists the full map.
+        return {identifier: default for identifier in sorted(identifiers)}
+    raw = execution.get(key)
+    if not isinstance(raw, Mapping) or len(raw) > MAX_ITEMS or set(raw) != identifiers:
+        _fail(error_code, f"durable {label} state is missing, unknown, or ambiguously keyed")
+    result: dict[str, str] = {}
+    for identifier in sorted(identifiers):
+        value = raw.get(identifier)
+        if not isinstance(value, str) or value not in allowed:
+            _fail(error_code, f"{label} status is invalid: {identifier}")
+        result[identifier] = value
+    return result
 
 
 def _synchronize_prerequisite_statuses(plan: ProjectPlan, execution: Mapping[str, Any], *, previous_plan: ProjectPlan | None = None) -> dict[str, Any]:
@@ -425,16 +467,87 @@ def _synchronize_prerequisite_statuses(plan: ProjectPlan, execution: Mapping[str
         identifier: str(raw_questions.get(identifier, "open")) if identifier in old_open_question_ids and str(raw_questions.get(identifier, "open")) in OPEN_QUESTION_STATUS_VALUES else "open"
         for identifier in sorted(open_question_ids)
     }
+    result = _synchronize_milestone_gate_statuses(plan, result, previous_plan=previous_plan)
+    return result
+
+
+def _synchronize_milestone_gate_statuses(
+    plan: ProjectPlan,
+    execution: Mapping[str, Any],
+    *,
+    previous_plan: ProjectPlan | None = None,
+) -> dict[str, Any]:
+    """Carry only same-milestone gate approvals into the current plan."""
+    result = dict(execution)
+    current_ids = _milestone_gate_ids(plan)
+    previous_ids = _milestone_gate_ids(previous_plan) if previous_plan is not None else set()
+    raw = execution.get("milestone_gate_statuses", {})
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, Mapping) or len(raw) > MAX_ITEMS:
+        _fail("memory_execution_shape_invalid", "execution.milestone_gate_statuses is invalid")
+    result["milestone_gate_statuses"] = {
+        identifier: str(raw.get(identifier, "pending"))
+        if identifier in previous_ids and str(raw.get(identifier, "pending")) in MILESTONE_GATE_STATUS_VALUES
+        else "pending"
+        for identifier in sorted(current_ids)
+    }
     return result
 
 
 def _runtime_prerequisite_statuses(plan: ProjectPlan, state: ProjectMemoryState) -> tuple[dict[str, str], dict[str, str]]:
-    execution = state.execution if isinstance(state.execution, Mapping) else {}
-    gate_ids, open_question_ids = _plan_prerequisite_ids(plan)
     return (
-        _bounded_runtime_statuses(execution, "gate_statuses", gate_ids, "pending", GATE_STATUS_VALUES),
-        _bounded_runtime_statuses(execution, "open_question_statuses", open_question_ids, "open", OPEN_QUESTION_STATUS_VALUES),
+        planning_gate_statuses(plan, state),
+        open_question_statuses(plan, state),
     )
+
+
+def milestone_gate_statuses(plan: ProjectPlan, state: ProjectMemoryState | Mapping[str, Any]) -> dict[str, str]:
+    """Read the complete durable milestone-gate map, failing closed on drift."""
+    return _strict_execution_statuses(
+        state,
+        key="milestone_gate_statuses",
+        identifiers=_milestone_gate_ids(plan),
+        default="pending",
+        allowed=MILESTONE_GATE_STATUS_VALUES,
+        error_code="milestone_gate_state_invalid",
+        label="milestone gate",
+    )
+
+
+def planning_gate_statuses(plan: ProjectPlan, state: ProjectMemoryState | Mapping[str, Any]) -> dict[str, str]:
+    """Read planning-context gate state, failing closed on present drift."""
+    gate_ids, _open_question_ids = _plan_prerequisite_ids(plan)
+    return _strict_execution_statuses(
+        state,
+        key="gate_statuses",
+        identifiers=gate_ids,
+        default="pending",
+        allowed=GATE_STATUS_VALUES,
+        error_code="planning_gate_state_invalid",
+        label="planning gate",
+    )
+
+
+def open_question_statuses(plan: ProjectPlan, state: ProjectMemoryState | Mapping[str, Any]) -> dict[str, str]:
+    """Read planning-context open-question state, failing closed on drift."""
+    _gate_ids, open_question_ids = _plan_prerequisite_ids(plan)
+    return _strict_execution_statuses(
+        state,
+        key="open_question_statuses",
+        identifiers=open_question_ids,
+        default="open",
+        allowed=OPEN_QUESTION_STATUS_VALUES,
+        error_code="open_question_state_invalid",
+        label="open question",
+    )
+
+
+def validate_prerequisite_state(plan: ProjectPlan, state: ProjectMemoryState | Mapping[str, Any]) -> None:
+    """Validate every durable prerequisite namespace before any mutation."""
+    milestone_gate_statuses(plan, state)
+    planning_gate_statuses(plan, state)
+    open_question_statuses(plan, state)
 
 
 def task_prerequisite_blockers(plan: ProjectPlan | None, state: ProjectMemoryState, task: ProjectTask) -> tuple[dict[str, str], ...]:
@@ -616,7 +729,7 @@ class ProjectMemoryStore:
         event_id = f"{self.project_id}:e{len(state.events) + 1:06d}"
         if prerequisite_id is not None:
             prerequisite_id = _text(prerequisite_id, "prerequisite_id", max_length=96)
-        if prerequisite_kind is not None and prerequisite_kind not in {"gate", "open_question"}:
+        if prerequisite_kind is not None and prerequisite_kind not in {"gate", "milestone_gate", "open_question"}:
             _fail("prerequisite_kind_invalid", "prerequisite kind is unsupported")
         event = ProjectEvent(event_id, self.project_id, event_type, _now(), summary, task_id, milestone_id, plan_version, git_head, correlation_id, prerequisite_id, prerequisite_kind)
         return replace(state, events=state.events + (event,))
@@ -800,7 +913,7 @@ class ProjectMemoryStore:
         self.execution_transaction(transition)
         return canonical
 
-    def _set_prerequisite_status(self, identifier: str, *, kind: str, status: str) -> str:
+    def _set_prerequisite_status(self, identifier: str, *, kind: str, status: str, expected_revision: int | None = None) -> str:
         plan = self.current_plan()
         if plan is None:
             _fail("project_plan_required", "prerequisite status requires an imported plan")
@@ -820,6 +933,7 @@ class ProjectMemoryStore:
         if status not in allowed:
             _fail("prerequisite_status_invalid", "prerequisite status is unsupported")
         def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, str]:
+            validate_prerequisite_state(plan, state)
             execution = _synchronize_prerequisite_statuses(plan, state.execution if isinstance(state.execution, Mapping) else {}, previous_plan=plan)
             statuses = dict(execution[map_key])
             if statuses.get(identifier) == status:
@@ -829,28 +943,74 @@ class ProjectMemoryStore:
             updated = replace(state, execution=execution)
             updated = self._append_event(updated, event_type, f"{kind} {identifier}: {status}", plan_version=plan.plan_version, prerequisite_id=identifier, prerequisite_kind=kind)
             return updated, status
-        return self.execution_transaction(transition)
+        return self.execution_transaction(transition, expected_revision=expected_revision)
 
-    def set_gate_status(self, gate_id: str, status: str) -> str:
-        return self._set_prerequisite_status(gate_id, kind="gate", status=status)
+    def set_gate_status(self, gate_id: str, status: str, *, expected_revision: int | None = None) -> str:
+        return self._set_prerequisite_status(gate_id, kind="gate", status=status, expected_revision=expected_revision)
 
-    def pass_gate(self, gate_id: str) -> str:
-        return self.set_gate_status(gate_id, "passed")
+    def pass_gate(self, gate_id: str, *, expected_revision: int | None = None) -> str:
+        return self.set_gate_status(gate_id, "passed", expected_revision=expected_revision)
 
-    def reopen_gate(self, gate_id: str) -> str:
-        return self.set_gate_status(gate_id, "pending")
+    def reopen_gate(self, gate_id: str, *, expected_revision: int | None = None) -> str:
+        return self.set_gate_status(gate_id, "pending", expected_revision=expected_revision)
 
     def mark_gate_passed(self, gate_id: str) -> str:
         return self.pass_gate(gate_id)
 
-    def set_open_question_status(self, question_id: str, status: str) -> str:
-        return self._set_prerequisite_status(question_id, kind="open_question", status=status)
+    def set_open_question_status(self, question_id: str, status: str, *, expected_revision: int | None = None) -> str:
+        return self._set_prerequisite_status(question_id, kind="open_question", status=status, expected_revision=expected_revision)
 
-    def resolve_open_question(self, question_id: str) -> str:
-        return self.set_open_question_status(question_id, "resolved")
+    def resolve_open_question(self, question_id: str, *, expected_revision: int | None = None) -> str:
+        return self.set_open_question_status(question_id, "resolved", expected_revision=expected_revision)
 
-    def reopen_open_question(self, question_id: str) -> str:
-        return self.set_open_question_status(question_id, "open")
+    def reopen_open_question(self, question_id: str, *, expected_revision: int | None = None) -> str:
+        return self.set_open_question_status(question_id, "open", expected_revision=expected_revision)
+
+    def set_milestone_gate_status(self, gate_id: str, status: str, *, expected_revision: int | None = None) -> str:
+        """Mutate a milestone gate through the same durable Project Memory authority."""
+        plan = self.current_plan()
+        if plan is None:
+            _fail("project_plan_required", "milestone gate status requires an imported plan")
+        identifier = _text(gate_id, "milestone_gate_id", max_length=96)
+        status = _text(status, "milestone_gate_status", max_length=32)
+        milestones_by_gate = {milestone_gate_id(item.milestone_id): item for item in plan.milestones}
+        milestone = milestones_by_gate.get(identifier)
+        if milestone is None:
+            _fail("milestone_gate_not_found", f"milestone gate does not exist in the current plan: {identifier}")
+        if status not in MILESTONE_GATE_STATUS_VALUES:
+            _fail("milestone_gate_status_invalid", "milestone gate status is unsupported")
+        event_type = "MILESTONE_GATE_PASSED" if status == "passed" else "MILESTONE_GATE_REOPENED"
+
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, str]:
+            # A mutation must not repair malformed durable state implicitly;
+            # callers must resolve an unknown or incomplete authority state
+            # before an operator approval can be recorded.
+            validate_prerequisite_state(plan, state)
+            statuses = milestone_gate_statuses(plan, state)
+            execution = dict(state.execution) if isinstance(state.execution, Mapping) else {}
+            if statuses.get(identifier) == status:
+                return state, status
+            statuses[identifier] = status
+            execution["milestone_gate_statuses"] = statuses
+            updated = replace(state, execution=execution)
+            updated = self._append_event(
+                updated,
+                event_type,
+                f"milestone gate {identifier}: {status}",
+                milestone_id=milestone.milestone_id,
+                plan_version=plan.plan_version,
+                prerequisite_id=identifier,
+                prerequisite_kind="milestone_gate",
+            )
+            return updated, status
+
+        return self.execution_transaction(transition, expected_revision=expected_revision)
+
+    def pass_milestone_gate(self, gate_id: str, *, expected_revision: int | None = None) -> str:
+        return self.set_milestone_gate_status(gate_id, "passed", expected_revision=expected_revision)
+
+    def reopen_milestone_gate(self, gate_id: str, *, expected_revision: int | None = None) -> str:
+        return self.set_milestone_gate_status(gate_id, "pending", expected_revision=expected_revision)
 
     def _write_immutable_plan(self, plan: ProjectPlan) -> None:
         self.plans.mkdir(parents=True, exist_ok=True); path = self.plans / f"plan-v{_version(plan.plan_version)}.json"; document = plan.to_dict(); digest = _plan_digest(plan)
@@ -1076,5 +1236,5 @@ def build_handoff_prompt(project: ProjectRecord, plan: ProjectPlan | None, state
 
 
 __all__ = [
-    "HANDOFF_MODES", "GATE_STATUS_VALUES", "OPEN_QUESTION_STATUS_VALUES", "AttentionItem", "Checkpoint", "DebtRecord", "DecisionRecord", "InboxItem", "NextAction", "PlanDiff", "PlanDiffItem", "PlanUpdatePreview", "ProjectEvent", "ProjectMemoryError", "ProjectMemoryState", "ProjectMemoryStore", "RiskRecord", "available_project_tasks", "milestone_auto_progress", "resolve_auto_next_action", "bounded_history_summary", "build_handoff_prompt", "changes_since", "memory_root", "plan_version_number", "project_health", "project_status_sentence", "resolve_next_action", "semantic_plan_diff", "task_prerequisite_blockers",
+    "HANDOFF_MODES", "GATE_STATUS_VALUES", "MILESTONE_GATE_STATUS_VALUES", "OPEN_QUESTION_STATUS_VALUES", "AttentionItem", "Checkpoint", "DebtRecord", "DecisionRecord", "InboxItem", "NextAction", "PlanDiff", "PlanDiffItem", "PlanUpdatePreview", "ProjectEvent", "ProjectMemoryError", "ProjectMemoryState", "ProjectMemoryStore", "RiskRecord", "available_project_tasks", "milestone_gate_id", "milestone_gate_statuses", "planning_gate_statuses", "open_question_statuses", "validate_prerequisite_state", "milestone_auto_progress", "resolve_auto_next_action", "bounded_history_summary", "build_handoff_prompt", "changes_since", "memory_root", "plan_version_number", "project_health", "project_status_sentence", "resolve_next_action", "semantic_plan_diff", "task_prerequisite_blockers",
 ]

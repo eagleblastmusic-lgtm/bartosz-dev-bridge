@@ -80,6 +80,7 @@ class ScopeInputSnapshot:
     next_task_dependencies_satisfied: bool = True
     next_milestone_id: str | None = None
     first_task_in_next_milestone_id: str | None = None
+    first_task_in_next_milestone_dependencies_satisfied: bool = True
     next_milestone_dependencies_satisfied: bool = True
     all_project_milestones_completed: bool = False
     manual_gate_required: bool = False
@@ -349,6 +350,20 @@ def evaluate_scope_transition(snapshot: ScopeInputSnapshot) -> ScopeDecision:
                         selected_milestone_id=snapshot.next_milestone_id,
                         reason_code="NEXT_MILESTONE_DEPENDENCY_PENDING",
                         explanation=f"Next milestone {snapshot.next_milestone_id} dependencies are pending.",
+                    )
+                if (
+                    snapshot.first_task_in_next_milestone_id
+                    and not snapshot.first_task_in_next_milestone_dependencies_satisfied
+                ):
+                    return ScopeDecision(
+                        action=ScopeAction.WAIT_DEPENDENCY_PENDING,
+                        canonical_work_state=CanonicalWorkState.WAITING,
+                        selected_milestone_id=snapshot.next_milestone_id,
+                        reason_code="NEXT_MILESTONE_TASK_DEPENDENCY_PENDING",
+                        explanation=(
+                            f"First task in next milestone {snapshot.next_milestone_id} "
+                            "has pending dependencies."
+                        ),
                     )
                 return ScopeDecision(
                     action=ScopeAction.LAUNCH_TASK,

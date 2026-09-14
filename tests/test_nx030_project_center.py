@@ -226,6 +226,9 @@ def test_project_center_auto_controls_are_keyboard_accessible(tmp_path: Path) ->
         (window._auto_stop_button, "STOP"),
         (window._auto_continue_button, "Kontynuuj"),
         (window._auto_resume_button, "Wznów"),
+        (window._auto_milestone_gate_button, "Zatwierdź milestone gate"),
+        (window._auto_planning_gate_button, "Zalicz gate"),
+        (window._auto_open_question_button, "Rozstrzygnij open question"),
     ):
         assert widget.accessibleName() == expected
         assert widget.focusPolicy().value != 0

@@ -793,6 +793,8 @@ class ScopeOrchestrator:
         next_ms_id = plan.milestones[ms_index + 1].milestone_id if (ms_index + 1 < len(plan.milestones)) else None
         next_ms_deps_ok = True
         first_task_in_next_ms = None
+        first_task_in_next_ms_deps_ok = True
+        first_task_in_next_ms_pending_deps: list[str] = []
         if next_ms_id:
             next_ms = plan.get_milestone(next_ms_id)
             if next_ms:
@@ -800,7 +802,11 @@ class ScopeOrchestrator:
                     canonical_gate_statuses.get(milestone_gate_key(plan, dep)) == "ACCEPTED"
                     for dep in next_ms.dependencies
                 )
-                first_task_in_next_ms, _, _ = self.resolve_next_runnable_task(
+                (
+                    first_task_in_next_ms,
+                    first_task_in_next_ms_deps_ok,
+                    first_task_in_next_ms_pending_deps,
+                ) = self.resolve_next_runnable_task(
                     plan,
                     next_ms_id,
                     task_statuses,
@@ -844,6 +850,7 @@ class ScopeOrchestrator:
             next_task_dependencies_satisfied=deps_satisfied,
             next_milestone_id=next_ms_id,
             first_task_in_next_milestone_id=first_task_in_next_ms,
+            first_task_in_next_milestone_dependencies_satisfied=first_task_in_next_ms_deps_ok,
             next_milestone_dependencies_satisfied=next_ms_deps_ok,
             all_project_milestones_completed=all_proj_done,
             manual_gate_required=man_req,
@@ -860,9 +867,15 @@ class ScopeOrchestrator:
         decision = evaluate_scope_transition(snapshot)
 
         # Build evidence
+        explanation_pending_deps = pending_deps
+        if (
+            not explanation_pending_deps
+            and decision.reason_code == "NEXT_MILESTONE_TASK_DEPENDENCY_PENDING"
+        ):
+            explanation_pending_deps = first_task_in_next_ms_pending_deps
         dep_evidence = {
             d: dependency_state(plan, d, task_statuses, prerequisite_statuses)[1]
-            for d in pending_deps
+            for d in explanation_pending_deps
         }
         gate_evidence = {cur_ms.gate_id: cur_gate_status}
 
@@ -888,6 +901,15 @@ class ScopeOrchestrator:
         # 5. Advance cursor state
         new_ms = decision.selected_milestone_id or cur_ms_id
         new_task = decision.selected_task_id or cursor.current_task_id
+        if decision.action == ScopeAction.WAIT_MILESTONE_GATE_PENDING:
+            # A completed milestone has no current task.  The gate decision is
+            # an operator prerequisite, not a task selection.
+            new_task = None
+        elif decision.action == ScopeAction.WAIT_DEPENDENCY_PENDING:
+            # Do not select a newly discovered task before its prerequisite
+            # is satisfied.  An already current task may remain visible while
+            # it waits for an external prerequisite.
+            new_task = cursor.current_task_id if new_ms == cur_ms_id else None
         if decision.action in {
             ScopeAction.STOP_SCOPE_COMPLETE,
             ScopeAction.STOP_PROJECT_COMPLETE,

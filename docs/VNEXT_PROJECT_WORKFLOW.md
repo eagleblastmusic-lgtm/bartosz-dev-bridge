@@ -151,6 +151,14 @@ current task
 
 Po ukończeniu milestone AUTO zatrzymuje się. Następny milestone wymaga nowej decyzji/startu, jeśli bieżący kontrakt tak stanowi.
 
+### Tożsamość milestone gate i planning-context gate
+
+Milestone gate ma własną, kanoniczną przestrzeń nazw: `GATE:<milestone_id>`, zgodną z `PlanMilestoneNode.gate_id` Orchestratora. Jego status jest trwały w Project Memory v1, w `execution.milestone_gate_statuses`, a zmiana jest zapisywana jako zdarzenie operatora.
+
+Gate z `planning_context`, np. `G0`, pozostaje odrębnym prerequisite. Nie wolno utożsamiać `G0` z `GATE:P0` na podstawie nazwy, kolejności ani bieżącego kursora. Brak jawnej relacji w zwalidowanym planie oznacza brak mapowania; kolizja identyfikatorów kończy się bezpiecznym odrzuceniem planu/komendy.
+
+Zatwierdzenie milestone gate nie wybiera automatycznie kolejnego milestone. Po zakończeniu bieżącego milestone `START_AUTO` dla scope `MILESTONE` tworzy nową tożsamość runu i zwiększa epoch; dopiero kolejny `CONTINUE_AUTO` ocenia prerequisite następnego milestone.
+
 AUTO nie ma globalnego limitu liczby iteracji ani całkowitego czasu milestone. Poszczególne operacje techniczne mogą mieć bounded timeout, size limit i polling policy.
 
 ## 10. Stop conditions

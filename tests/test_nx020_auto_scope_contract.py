@@ -256,6 +256,23 @@ class TestProjectScope:
         assert dec.action == ScopeAction.WAIT_DEPENDENCY_PENDING
         assert dec.canonical_work_state == CanonicalWorkState.WAITING
 
+    def test_project_scope_does_not_launch_next_task_with_pending_task_dependency(self) -> None:
+        snap = ScopeInputSnapshot(
+            current_scope=AutoScope.PROJECT,
+            current_milestone_id="M1",
+            all_milestone_tasks_accepted=True,
+            current_milestone_gate_status="ACCEPTED",
+            next_milestone_id="M2",
+            first_task_in_next_milestone_id="T2",
+            first_task_in_next_milestone_dependencies_satisfied=False,
+            next_milestone_dependencies_satisfied=True,
+        )
+        dec = evaluate_scope_transition(snap)
+        assert dec.action == ScopeAction.WAIT_DEPENDENCY_PENDING
+        assert dec.reason_code == "NEXT_MILESTONE_TASK_DEPENDENCY_PENDING"
+        assert dec.selected_task_id is None
+        assert dec.selected_milestone_id == "M2"
+
     def test_project_scope_terminates_on_project_completion(self) -> None:
         snap = ScopeInputSnapshot(
             current_scope=AutoScope.PROJECT,
