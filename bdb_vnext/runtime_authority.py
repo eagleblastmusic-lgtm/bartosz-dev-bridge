@@ -20,7 +20,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, NoReturn, Sequence
 
-from .composition import BROWSER_EXTENSION_ID, NATIVE_HOST_NAME, default_vnext_runtime_root
+from .composition import (
+    BROWSER_EXTENSION_ID,
+    GENERATION_ID,
+    NATIVE_HOST_NAME,
+    PROTOCOL_GENERATION,
+    default_vnext_runtime_root,
+)
 
 
 NATIVE_CONFIG_SCHEMA = "bdb-vnext-native-host-config-v2"
@@ -123,6 +129,8 @@ def runtime_from_native_manifest(manifest_path: str | Path) -> Path:
     config = _load_json(config_path, field="native config")
     if (
         config.get("schema") != NATIVE_CONFIG_SCHEMA
+        or config.get("generation_id") != GENERATION_ID
+        or config.get("protocol_generation") != PROTOCOL_GENERATION
         or config.get("native_host_name") != NATIVE_HOST_NAME
         or config.get("browser_extension_id") != BROWSER_EXTENSION_ID
     ):
