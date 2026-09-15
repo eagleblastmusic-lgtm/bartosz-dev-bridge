@@ -209,10 +209,10 @@ class ProjectLaunchQueue:
     def peek(self) -> ProjectLaunch | None:
         # Reads are intentionally lock-free. Queue writes are atomic replacements,
         # so readers observe either the previous complete document or the next one.
-        # Expiry is normalized in memory only; the next mutating operation performs
-        # any required cleanup while holding the cross-process lock.
         pending, claim = self._read_state_unlocked()
-        normalized_pending, _ = self._normalize_expiry(pending, claim)
+        normalized_pending, normalized_claim = self._normalize_expiry(pending, claim)
+        if (normalized_pending, normalized_claim) != (pending, claim):
+            self._cleanup_expired_snapshot_nonblocking()
         return normalized_pending
 
     def claim(
@@ -279,6 +279,37 @@ class ProjectLaunchQueue:
         ):
             claim = None
         return pending, claim
+
+    def _cleanup_expired_snapshot_nonblocking(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor: int | None = None
+        acquired = False
+        try:
+            try:
+                descriptor = os.open(
+                    self.lock_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+            except FileExistsError:
+                return
+            acquired = True
+            os.write(descriptor, f"{os.getpid()}\n".encode("ascii"))
+            os.close(descriptor)
+            descriptor = None
+
+            pending, claim = self._read_state_unlocked()
+            normalized_pending, normalized_claim = self._normalize_expiry(pending, claim)
+            if (normalized_pending, normalized_claim) != (pending, claim):
+                self._write_state_unlocked(normalized_pending, normalized_claim)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if acquired:
+                try:
+                    self.lock_path.unlink()
+                except FileNotFoundError:
+                    pass
 
     def _read_state_unlocked(self) -> tuple[ProjectLaunch | None, ProjectLaunchClaim | None]:
         if not self.path.exists():
