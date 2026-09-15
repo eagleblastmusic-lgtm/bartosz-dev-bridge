@@ -320,13 +320,57 @@ class ProjectLaunchQueueAdapter:
             },
         )
 
-    def peek(self) -> ProjectLaunch | None:
-        with self._lock():
+    def _cleanup_expired_snapshot_nonblocking(self) -> None:
+        """Best-effort expiry cleanup that never waits behind a live mutator."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        owner_token = uuid.uuid4().hex
+        descriptor: int | None = None
+        created_lock = False
+        try:
+            try:
+                descriptor = os.open(self.lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                created_lock = True
+            except (FileExistsError, PermissionError):
+                return
+
+            lock_info = ProjectLaunchLockInfo(
+                owner_token=owner_token,
+                pid=os.getpid(),
+                acquired_at=_utc_text(self.now_fn()),
+                stale_after_seconds=_STALE_LOCK_SECONDS,
+            )
+            payload = json.dumps(lock_info.to_dict(), ensure_ascii=False, indent=2).encode("utf-8")
+            os.write(descriptor, payload)
+            os.close(descriptor)
+            descriptor = None
+
             pending, claim = self._read_state_unlocked()
             normalized = self._normalize_expiry(pending, claim)
             if normalized != (pending, claim):
                 self._write_state_unlocked(*normalized)
-            return normalized[0]
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            if created_lock:
+                try:
+                    info, _ = self._read_lock_info_safe()
+                    if info is not None and info.owner_token == owner_token:
+                        self.lock_path.unlink(missing_ok=True)
+                except (FileNotFoundError, PermissionError, OSError):
+                    pass
+
+    def peek(self) -> ProjectLaunch | None:
+        # Queue writes are atomic replacements. A read can therefore observe the
+        # previous complete document or the next complete document without taking
+        # the cross-process mutation lock used by enqueue/claim/ACK.
+        pending, claim = self._read_state_unlocked()
+        normalized = self._normalize_expiry(pending, claim)
+        if normalized != (pending, claim):
+            self._cleanup_expired_snapshot_nonblocking()
+        return normalized[0]
 
     def enqueue(
         self,
