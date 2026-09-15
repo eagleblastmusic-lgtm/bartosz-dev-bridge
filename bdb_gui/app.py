@@ -116,9 +116,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         from PySide6.QtCore import QTimer, qVersion
         from PySide6.QtWidgets import QApplication
 
-        # Project-centric CC3 surface; the imported alias preserves the stable
-        # application construction seam used by existing smoke tests.
-        from .project_center import ProjectCenterWindow as VNextControlCenterWindow
+        # Project-centric CC3 surface.  Bind the GUI to the resilient workflow
+        # before constructing the window so blocked-task retry uses a fresh
+        # immutable binding instead of replaying a terminal binding.
+        from bdb_vnext.resilient_project_workflow import ResilientProjectWorkflow
+        from . import project_center as _project_center
+
+        _project_center.ProjectWorkflow = ResilientProjectWorkflow
+        VNextControlCenterWindow = _project_center.ProjectCenterWindow
     except ImportError as error:
         report = {
             "schema": SMOKE_SCHEMA,

@@ -3,7 +3,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from bdb_vnext.m9b_native_host import main
+import bdb_vnext.m9b_native_host as native_host
+from bdb_vnext.resilient_project_workflow import ResilientProjectWorkflow
+
+# Keep the frozen Native Host on the same project workflow contract as Control
+# Center.  This explicit composition seam is applied before serve()/handle_message
+# construct a workflow for Browser project result submissions.
+native_host.ProjectWorkflow = ResilientProjectWorkflow
+main = native_host.main
 
 
 def _staged_runtime_config(executable: Path) -> Path | None:
