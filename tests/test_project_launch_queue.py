@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import bdb_bridge.project_launch as project_launch_module
 from bdb_bridge.project_launch import ProjectLaunchQueue
 
 
@@ -31,6 +32,16 @@ def test_enqueue_claim_acknowledge_and_single_owner(tmp_path) -> None:
     assert queue.acknowledge(launch.launch_id, competing_claim) is False
     assert queue.acknowledge(launch.launch_id, first_claim) is True
     assert queue.peek() is None
+
+
+def test_peek_does_not_wait_for_writer_lock(tmp_path, monkeypatch) -> None:
+    queue = ProjectLaunchQueue(tmp_path / "launch.json")
+    launch = queue.enqueue(repo_alias="alpha", prompt="Do work", auto_send=False)
+    queue.lock_path.write_text("other-process\n", encoding="ascii")
+    monkeypatch.setattr(project_launch_module, "_LOCK_TIMEOUT_SECONDS", 0.01)
+
+    assert queue.peek() == launch
+    assert queue.lock_path.exists()
 
 
 def test_expired_claim_can_be_reclaimed_by_another_tab(tmp_path) -> None:
@@ -67,6 +78,20 @@ def test_expired_launch_is_removed(tmp_path) -> None:
     document = (tmp_path / "launch.json").read_text(encoding="utf-8")
     assert '"pending": null' in document
     assert '"claim": null' in document
+
+
+def test_expired_peek_stays_nonblocking_when_cleanup_lock_is_held(tmp_path, monkeypatch) -> None:
+    current = [datetime(2026, 7, 21, 3, 0, tzinfo=UTC)]
+    queue = ProjectLaunchQueue(tmp_path / "launch.json", now_fn=lambda: current[0])
+    launch = queue.enqueue(repo_alias="alpha", prompt="Do work", auto_send=False, ttl_minutes=1)
+    queue.lock_path.write_text("other-process\n", encoding="ascii")
+    monkeypatch.setattr(project_launch_module, "_LOCK_TIMEOUT_SECONDS", 0.01)
+
+    current[0] += timedelta(minutes=2)
+
+    assert queue.peek() is None
+    assert queue.lock_path.exists()
+    assert launch.launch_id in (tmp_path / "launch.json").read_text(encoding="utf-8")
 
 
 def test_enqueue_refuses_to_overwrite_pending_prompt(tmp_path) -> None:
