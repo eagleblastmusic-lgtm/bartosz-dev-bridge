@@ -207,12 +207,24 @@ class ProjectLaunchQueue:
             return launch
 
     def peek(self) -> ProjectLaunch | None:
-        with self._lock():
-            pending, claim = self._read_state_unlocked()
-            normalized_pending, normalized_claim = self._normalize_expiry(pending, claim)
-            if (normalized_pending, normalized_claim) != (pending, claim):
-                self._write_state_unlocked(normalized_pending, normalized_claim)
-            return normalized_pending
+        # The queue file is published with os.replace(), so a healthy read can be
+        # served from one complete snapshot without taking the mutation lock.
+        # This matters because every ChatGPT tab may poll for AUTO launches and a
+        # read lock here would turn harmless fan-out into cross-process contention.
+        pending, claim = self._read_state_unlocked()
+        normalized_pending, normalized_claim = self._normalize_expiry(pending, claim)
+        if (normalized_pending, normalized_claim) != (pending, claim):
+            # Expiry cleanup is opportunistic only. A reader must never wait behind
+            # claim/ACK/enqueue work merely to rewrite an already-readable snapshot.
+            try:
+                with self._lock(timeout_seconds=0.0):
+                    current_pending, current_claim = self._read_state_unlocked()
+                    cleaned_pending, cleaned_claim = self._normalize_expiry(current_pending, current_claim)
+                    if (cleaned_pending, cleaned_claim) != (current_pending, current_claim):
+                        self._write_state_unlocked(cleaned_pending, cleaned_claim)
+            except TimeoutError:
+                pass
+        return normalized_pending
 
     def claim(
         self,
@@ -308,9 +320,11 @@ class ProjectLaunchQueue:
         )
 
     @contextmanager
-    def _lock(self) -> Iterator[None]:
+    def _lock(self, *, timeout_seconds: float = _LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+        if timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be non-negative")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+        deadline = time.monotonic() + timeout_seconds
         descriptor: int | None = None
         while descriptor is None:
             try:
