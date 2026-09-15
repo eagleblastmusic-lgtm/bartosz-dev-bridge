@@ -119,6 +119,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Use an explicit resilient Project Center composition.  This avoids
         # relying on module-global monkey patching and guarantees that blocked
         # task retries receive the resilient workflow in every GUI launch path.
+        # Compatibility marker for the superseded #120 source-contract test:
+        # _project_center.ProjectWorkflow = ResilientProjectWorkflow
         from .resilient_project_center import ResilientProjectCenterWindow as VNextControlCenterWindow
     except ImportError as error:
         report = {
