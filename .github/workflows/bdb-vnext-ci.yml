@@ -77,6 +77,7 @@ jobs:
           tests/test_m9b_browser_bundle.py
           tests/test_runtime_authority.py
           tests/test_blocked_task_retry_binding.py
+          tests/test_resilient_project_center_composition.py
           tests/test_vnext_m3a_submission.py
           tests/test_vnext_m3b_browser_admission.py
           tests/test_vnext_m3c_admission.py
