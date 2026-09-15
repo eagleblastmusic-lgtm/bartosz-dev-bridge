@@ -116,14 +116,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from PySide6.QtCore import QTimer, qVersion
         from PySide6.QtWidgets import QApplication
 
-        # Project-centric CC3 surface.  Bind the GUI to the resilient workflow
-        # before constructing the window so blocked-task retry uses a fresh
-        # immutable binding instead of replaying a terminal binding.
-        from bdb_vnext.resilient_project_workflow import ResilientProjectWorkflow
-        from . import project_center as _project_center
-
-        _project_center.ProjectWorkflow = ResilientProjectWorkflow
-        VNextControlCenterWindow = _project_center.ProjectCenterWindow
+        # Use an explicit resilient Project Center composition.  This avoids
+        # relying on module-global monkey patching and guarantees that blocked
+        # task retries receive the resilient workflow in every GUI launch path.
+        from .resilient_project_center import ResilientProjectCenterWindow as VNextControlCenterWindow
     except ImportError as error:
         report = {
             "schema": SMOKE_SCHEMA,
