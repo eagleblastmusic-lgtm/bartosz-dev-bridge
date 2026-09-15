@@ -44,7 +44,9 @@ insertProjectPromptButton.addEventListener("click", async () => {
         conversation_not_eligible: "Wybierz zwykłą rozmowę ChatGPT (nowa bez /c/... też jest obsługiwana) i pozostaw pusty composer.",
         no_pending_prompt: "Brak oczekującego promptu. Najpierw wybierz projekt w BDB i kliknij „Wstaw prompt planu”.",
         composer_not_empty: "Composer nie jest pusty — nic nie nadpisano.",
-        project_prompt_not_inserted: "Prompt nie został wstawiony; niczego nie wysłano."
+project_prompt_not_inserted: "Prompt nie został wstawiony; niczego nie wysłano.",
+project_prompt_inserted_unverified: "Prompt pojawił się w composerze, ale BDB nie potwierdził jego stabilnego utrzymania. Nie wysyłaj go jeszcze.",
+project_prompt_ack_failed: "Prompt jest w composerze, ale BDB nie potwierdził ACK i nie zamknął launchu. Nie wysyłaj go jeszcze."
       };
       throw new Error(messages[code] || `Wstawianie zatrzymane: ${code}`);
     }

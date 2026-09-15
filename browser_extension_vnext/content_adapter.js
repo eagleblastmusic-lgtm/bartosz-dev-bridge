@@ -744,6 +744,24 @@ function projectDelay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function projectVerifyInsertedStable(prompt, {
+  conversationId = null,
+  blankNewChat = false,
+  selectedByUser = false
+} = {}) {
+  const observations = 3;
+  for (let observation = 0; observation < observations; observation += 1) {
+    if (observation > 0) await projectDelay(150);
+    const sameSelection = conversationId
+      ? projectConversationId() === conversationId
+      : blankNewChat && !projectConversationId() && projectBlankNewChat();
+    if (!projectPageEligible({ selectedByUser }) || !sameSelection) return false;
+    const composer = projectFindComposer();
+    if (!composer || projectComposerText(composer) !== prompt) return false;
+  }
+  return true;
+}
+
 async function projectAutoSendInserted(launch, claimId, prompt, insertedComposer, token) {
   if (projectAutoState.phase === "stopped") return false;
   const epoch = projectAutoEpoch;
@@ -831,48 +849,67 @@ async function projectAck(launchId, claimId, handoff = null) {
   return Boolean(result && result.ok === true && result.response && result.response.status === "acknowledged");
 }
 
+function projectLaunchResult(ok, code, launchId = null) {
+  const result = { ok: ok === true, code };
+  if (typeof launchId === "string" && launchId.length > 0) result.launch_id = launchId;
+  return result;
+}
+
 async function projectHandleLaunch(launch, { selectedByUser = false, automatic = false } = {}) {
-  if (projectInsertionActive || !projectPageEligible({ selectedByUser })) return false;
+  const launchId = launch?.launch_id || null;
+  if (projectInsertionActive || !projectPageEligible({ selectedByUser })) {
+    return projectLaunchResult(false, "project_prompt_not_inserted", launchId);
+  }
   const conversationId = projectConversationId();
   const blankNewChat = !conversationId && selectedByUser && projectBlankNewChat();
   const autoMode = automatic || launch.auto_send === true;
   const composer = projectFindComposer();
-  if ((!conversationId && !blankNewChat) || !composer) return false;
+  if ((!conversationId && !blankNewChat) || !composer) {
+    return projectLaunchResult(false, "project_prompt_not_inserted", launchId);
+  }
   const bindings = await projectReadBindings();
   const existing = conversationId ? projectBindingFor(bindings, launch.launch_id, conversationId) : null;
   if (!existing && autoMode && projectExactUserMessageCount(launch.prompt) > 0 && projectComposerText(composer) === "") {
     projectAnnounce("BDB AUTO zatrzymane: istnieje wysłana identyczna wiadomość bez lokalnego dowodu próby.", "warning");
-    return false;
+    return projectLaunchResult(false, "project_auto_duplicate_guard", launchId);
   }
   if (!existing && projectComposerHasForeignState(composer)) {
     if (projectComposerText(composer) === launch.prompt) {
       // Storage may have been lost after insertion but before ACK. The exact
-      // canonical pending prompt is safe to acknowledge without re-inserting.
+      // canonical pending prompt is safe to verify and acknowledge without re-inserting.
     } else {
       projectAnnounce("BDB vNext: composer is not empty; launch left pending.", "warning");
-      return false;
+      return projectLaunchResult(false, "project_prompt_not_inserted", launchId);
     }
   }
   const claimId = existing ? existing.claim_id : projectClaimId(launch.launch_id);
   const claimed = await projectClaim(launch, claimId, conversationId);
-  if (!claimed) return false;
+  if (!claimed) return projectLaunchResult(false, "project_prompt_not_inserted", launchId);
+  const claimedLaunchId = claimed.launch_id || launchId;
   const sameSelection = conversationId
     ? projectConversationId() === conversationId
     : !projectConversationId() && projectBlankNewChat();
-  if (!projectPageEligible({ selectedByUser }) || !sameSelection) return false;
+  if (!projectPageEligible({ selectedByUser }) || !sameSelection) {
+    return projectLaunchResult(false, "project_prompt_not_inserted", claimedLaunchId);
+  }
   let canonicalStatus = null;
   if (autoMode) {
     canonicalStatus = await projectExecutionStatusFor(claimed.project_id, claimed.execution_binding_id, conversationId);
     if (!canonicalStatus || canonicalStatus.current_binding_id !== claimed.execution_binding_id || canonicalStatus.current_task_id !== claimed.task_id || !canonicalStatus.binding || canonicalStatus.binding.project_id !== claimed.project_id || canonicalStatus.binding.task_id !== claimed.task_id || canonicalStatus.binding.conversation_id !== conversationId || !canonicalStatus.milestone_auto || canonicalStatus.milestone_auto.status !== "RUNNABLE") {
       projectAutoStop("canonical_launch_gate_rejected");
-      return false;
+      return projectLaunchResult(false, "project_auto_gate_rejected", claimedLaunchId);
     }
   }
-  if (existing?.state === "ACKED") return true;
+  if (existing?.state === "ACKED") {
+    return projectLaunchResult(true, "project_prompt_inserted", claimedLaunchId);
+  }
   if (autoMode && existing?.state === "SEND_CONFIRMED") {
     const acknowledged = await projectAck(claimed.launch_id, claimId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
-    if (acknowledged) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
-    return acknowledged;
+    if (acknowledged) {
+      await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
+      return projectLaunchResult(true, "project_prompt_inserted", claimedLaunchId);
+    }
+    return projectLaunchResult(false, "project_prompt_ack_failed", claimedLaunchId);
   }
   if (autoMode && existing?.state === "SEND_ATTEMPTED") {
     const baseline = existing.send_baseline_count;
@@ -882,11 +919,14 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
         send_attempt_token: existing.send_attempt_token || null
       });
       const acknowledged = await projectAck(claimed.launch_id, claimId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
-      if (acknowledged) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
-      return acknowledged;
+      if (acknowledged) {
+        await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
+        return projectLaunchResult(true, "project_prompt_inserted", claimedLaunchId);
+      }
+      return projectLaunchResult(false, "project_prompt_ack_failed", claimedLaunchId);
     }
     projectAnnounce("BDB AUTO zatrzymane: poprzednia próba Send pozostaje niepewna; duplicate Send zablokowany.", "warning");
-    return false;
+    return projectLaunchResult(false, "project_auto_send_uncertain", claimedLaunchId);
   }
   if (conversationId) await projectWriteBinding(claimed, claimId, conversationId, "CLAIMED");
   projectInsertionActive = true;
@@ -896,34 +936,51 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
     if (currentText !== claimed.prompt) {
       if (projectComposerHasForeignState(currentComposer) || !projectInsertExact(currentComposer, claimed.prompt)) {
         projectAnnounce("BDB vNext: launch not inserted; composer changed.", "warning");
-        return false;
+        return projectLaunchResult(false, "project_prompt_not_inserted", claimedLaunchId);
       }
     }
-    const finalSelection = conversationId
-      ? projectConversationId() === conversationId
-      : !projectConversationId() && projectBlankNewChat();
-    if (!projectPageEligible({ selectedByUser }) || !finalSelection || projectComposerText(projectFindComposer()) !== claimed.prompt) return false;
+    const stableInsertion = await projectVerifyInsertedStable(claimed.prompt, {
+      conversationId,
+      blankNewChat,
+      selectedByUser
+    });
+    if (!stableInsertion) {
+      if (autoMode) projectAutoStop("inserted_prompt_unverified");
+      projectAnnounce("BDB vNext: prompt appeared, but stable composer verification failed; launch left pending.", "warning");
+      return projectLaunchResult(false, "project_prompt_inserted_unverified", claimedLaunchId);
+    }
     if (autoMode) {
       if (canonicalStatus?.launch_handoff?.status === "SENT") {
         projectAutoState = { phase: "sent", launch_id: claimed.launch_id, execution_binding_id: claimed.execution_binding_id, token: "recovered-sent" };
         const acknowledged = await projectAck(claimed.launch_id, claimId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
-        if (acknowledged && conversationId) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
-        return acknowledged;
+        if (acknowledged) {
+          if (conversationId) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
+          return projectLaunchResult(true, "project_prompt_inserted", claimedLaunchId);
+        }
+        return projectLaunchResult(false, "project_prompt_ack_failed", claimedLaunchId);
       }
-      if (projectAutoState.phase === "stopped") return false;
+      if (projectAutoState.phase === "stopped") {
+        return projectLaunchResult(false, "project_auto_stopped", claimedLaunchId);
+      }
       const token = `${claimed.launch_id}:${claimed.execution_binding_id}:${Date.now()}`;
       projectAutoState = { phase: "inserting_prompt", launch_id: claimed.launch_id, execution_binding_id: claimed.execution_binding_id, token };
       const sent = await projectAutoSendInserted(claimed, claimId, claimed.prompt, projectFindComposer(), token);
-      if (!sent) return false;
+      if (!sent) return projectLaunchResult(false, "project_auto_send_failed", claimedLaunchId);
       const acknowledged = await projectAck(claimed.launch_id, claimId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
-      if (acknowledged && conversationId) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
-      return acknowledged;
+      if (acknowledged) {
+        if (conversationId) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
+        return projectLaunchResult(true, "project_prompt_inserted", claimedLaunchId);
+      }
+      return projectLaunchResult(false, "project_prompt_ack_failed", claimedLaunchId);
     }
     const acknowledged = await projectAck(claimed.launch_id, claimId);
-    if (!acknowledged) return false;
+    if (!acknowledged) {
+      projectAnnounce("BDB vNext: prompt is present, but launch ACK failed; do not send yet.", "warning");
+      return projectLaunchResult(false, "project_prompt_ack_failed", claimedLaunchId);
+    }
     if (conversationId) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
     projectAnnounce("BDB vNext: project prompt inserted (not sent).", "success");
-    return true;
+    return projectLaunchResult(true, "project_prompt_inserted", claimedLaunchId);
   } finally {
     projectInsertionActive = false;
   }
@@ -937,10 +994,7 @@ async function projectInsertSelectedLaunch() {
   if (!launch) {
     return { ok: false, code: "no_pending_prompt" };
   }
-  const inserted = await projectHandleLaunch(launch, { selectedByUser: true });
-  return inserted
-    ? { ok: true, code: "inserted", launch_id: launch.launch_id }
-    : { ok: false, code: "project_prompt_not_inserted", launch_id: launch.launch_id };
+  return projectHandleLaunch(launch, { selectedByUser: true });
 }
 
 async function projectPoll() {
@@ -949,9 +1003,12 @@ async function projectPoll() {
   try {
     const launch = await projectPeek();
     // Manual launches remain owned by the explicit popup action in the tab
-    // selected by the user.  Only canonical AUTO launches may be consumed by
+    // selected by the user. Only canonical AUTO launches may be consumed by
     // the background poller without a focus heuristic.
-    if (launch?.auto_send === true) await projectHandleLaunch(launch, { automatic: true });
+    if (launch?.auto_send === true) {
+      const handled = await projectHandleLaunch(launch, { automatic: true });
+      if (!handled?.ok) return;
+    }
   } catch (_error) {
     // A transient Native/DOM failure leaves the canonical launch pending.
   } finally {
