@@ -82,6 +82,7 @@ jobs:
           tests/test_vnext_m3a_submission.py
           tests/test_vnext_m3b_browser_admission.py
           tests/test_vnext_project_launch_stable_ack.py
+          tests/test_vnext_project_launch_nonblocking_peek.py
           tests/test_vnext_m3c_admission.py
 
       - name: Explain excluded platform experiments
