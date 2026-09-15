@@ -72,3 +72,34 @@ def test_popup_distinguishes_unverified_and_ack_failed_effects() -> None:
     assert "project_prompt_ack_failed" in POPUP
     assert "BDB nie potwierdził ACK" in POPUP
     assert 'project_prompt_not_inserted: "Prompt nie został wstawiony; niczego nie wysłano."' in POPUP
+
+
+def test_popup_does_not_treat_transport_failure_as_empty_queue() -> None:
+    confirm = _between(
+        POPUP,
+        "async function confirmProjectLaunchState",
+        'insertProjectPromptButton.addEventListener("click"',
+    )
+    handler = _between(
+        POPUP,
+        'insertProjectPromptButton.addEventListener("click"',
+        'resumeButton.addEventListener("click"',
+    )
+    assert 'type: "bdb-vnext-project-launch-peek"' in confirm
+    assert 'state: "unavailable"' in confirm
+    assert 'if (code === "no_pending_prompt")' in handler
+    assert 'queueState.state === "pending"' in handler
+    assert 'queueState.state === "unavailable"' in handler
+    assert "BDB nie traktuje błędu transportu jako pustej kolejki" in handler
+
+
+def test_popup_retries_once_when_queue_still_has_pending_launch() -> None:
+    handler = _between(
+        POPUP,
+        'insertProjectPromptButton.addEventListener("click"',
+        'resumeButton.addEventListener("click"',
+    )
+    marker = 'queueState.state === "pending"'
+    retry_tail = handler.split(marker, 1)[1]
+    assert retry_tail.count('type: "bdb-vnext-project-launch-insert"') >= 1
+    assert "Prompt nadal oczekuje w kolejce BDB" in retry_tail
