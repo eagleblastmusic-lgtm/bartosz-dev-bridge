@@ -1,10 +1,12 @@
 """Fail-closed recovery around ProjectWorkflow execution handoffs.
 
-This compatibility layer fixes two lifecycle gaps without weakening the immutable
+This compatibility layer fixes lifecycle gaps without weakening the immutable
 execution binding contract:
 
 * an explicitly blocked milestone task may be retried with a fresh binding for
   the same task/plan/run after the previous binding reached a terminal state;
+* a blocked task may also be recovered from its terminal execution evidence when
+  the legacy active milestone-run projection is stale or already completed;
 * after an accepted promoted result, the registered local checkout is advanced
   by a clean fast-forward to that exact accepted HEAD before AUTO may bind the
   next task.
@@ -57,32 +59,81 @@ class ResilientProjectWorkflow(ProjectWorkflow):
             raise ProjectWorkflowError("project_plan_required", "Project Plan must be imported before retry")
         state = memory.read_state()
         execution = state.execution if isinstance(state.execution, Mapping) else {}
-        run = execution.get("active_milestone_run")
-        if not isinstance(run, Mapping) or str(run.get("status") or "").lower() != "blocked":
-            return None
+        statuses = execution.get("task_statuses", {})
+        if not isinstance(statuses, Mapping):
+            statuses = {}
 
-        raw_task_id = run.get("current_task_id")
-        if not isinstance(raw_task_id, str) or not raw_task_id:
-            raise ProjectWorkflowError("execution_recovery_task_missing", "blocked milestone run has no retry task")
+        run = execution.get("active_milestone_run")
+        run_status = str(run.get("status") or "").lower() if isinstance(run, Mapping) else ""
+        raw_task_id: str | None = None
+
+        if run_status == "blocked":
+            run_task_id = run.get("current_task_id") if isinstance(run, Mapping) else None
+            if not isinstance(run_task_id, str) or not run_task_id:
+                raise ProjectWorkflowError("execution_recovery_task_missing", "blocked milestone run has no retry task")
+            task = _task_by_id(plan, run_task_id)
+            if task is None:
+                raise ProjectWorkflowError("execution_recovery_task_missing", "blocked milestone retry task is not in the current plan")
+            if str(getattr(task, "milestone_id", "")) != str(run.get("milestone_id") or ""):
+                raise ProjectWorkflowError("execution_recovery_ambiguous", "blocked retry task is outside the active milestone")
+            raw_task_id = run_task_id
+        else:
+            # Live migrated projects can retain a legacy/completed active-run
+            # projection while the canonical task status and terminal attempt
+            # already identify the real blocked task. Recover only when that
+            # evidence is unique and the stale run is not active.
+            if run_status in {"running", "review"}:
+                raise ProjectWorkflowError(
+                    "execution_recovery_ambiguous",
+                    "active milestone run disagrees with blocked retry evidence",
+                )
+            attempts = execution.get("attempts", [])
+            candidates: list[str] = []
+            if isinstance(attempts, list):
+                for attempt in reversed(attempts):
+                    if not isinstance(attempt, Mapping):
+                        continue
+                    task_id = attempt.get("task_id")
+                    if not isinstance(task_id, str) or not task_id or task_id in candidates:
+                        continue
+                    if str(attempt.get("plan_version") or plan.plan_version) != str(plan.plan_version):
+                        continue
+                    task = _task_by_id(plan, task_id)
+                    if task is None:
+                        continue
+                    status = str(statuses.get(task_id, getattr(task, "status", "pending"))).lower()
+                    if status != "blocked":
+                        continue
+                    result_status = str(attempt.get("result_status") or "").upper()
+                    execution_status = str(attempt.get("execution_status") or "").upper()
+                    if result_status != "FAIL" and execution_status not in {"FAIL", "FAILED", "BLOCKED"}:
+                        continue
+                    candidates.append(task_id)
+
+            if not candidates:
+                return None
+            if len(candidates) != 1:
+                raise ProjectWorkflowError(
+                    "execution_recovery_ambiguous",
+                    "multiple terminal blocked tasks are eligible for retry",
+                )
+            raw_task_id = candidates[0]
+
         task = _task_by_id(plan, raw_task_id)
         if task is None:
-            raise ProjectWorkflowError("execution_recovery_task_missing", "blocked milestone retry task is not in the current plan")
-        if str(getattr(task, "milestone_id", "")) != str(run.get("milestone_id") or ""):
-            raise ProjectWorkflowError("execution_recovery_ambiguous", "blocked retry task is outside the active milestone")
-
-        statuses = execution.get("task_statuses", {})
-        status = str(statuses.get(raw_task_id, getattr(task, "status", "pending"))).lower() if isinstance(statuses, Mapping) else ""
+            raise ProjectWorkflowError("execution_recovery_task_missing", "blocked retry task is not in the current plan")
+        status = str(statuses.get(raw_task_id, getattr(task, "status", "pending"))).lower()
         if status == "review":
             raise ProjectWorkflowError("execution_review_required", "review state cannot be reopened as an automatic retry")
         if status != "blocked":
-            raise ProjectWorkflowError("execution_recovery_ambiguous", "blocked milestone run disagrees with task status")
+            raise ProjectWorkflowError("execution_recovery_ambiguous", "blocked retry subject disagrees with task status")
 
         cursor = execution.get("current_task_id")
         if isinstance(cursor, str) and cursor and cursor != raw_task_id:
             if _task_by_id(plan, cursor) is not None:
-                raise ProjectWorkflowError("execution_recovery_ambiguous", "canonical task cursor disagrees with blocked milestone retry task")
+                raise ProjectWorkflowError("execution_recovery_ambiguous", "canonical task cursor disagrees with blocked retry task")
             # A stale pointer to a task no longer present in this plan must not
-            # defeat the stronger active milestone-run subject.
+            # defeat the stronger terminal retry evidence.
 
         try:
             active = self.execution.current_task_binding(project_id, raw_task_id)
@@ -93,11 +144,11 @@ class ResilientProjectWorkflow(ProjectWorkflow):
         return raw_task_id
 
     def queue_continue_prompt(self, project_id: str):  # type: ignore[override]
-        """Queue Continue, selecting a terminally blocked milestone task explicitly.
+        """Queue Continue, selecting a terminally blocked task explicitly.
 
         Normal runnable tasks use the original ProjectWorkflow path unchanged.
-        A blocked milestone retry always receives a new generation binding whose
-        expected HEAD is observed after the previous terminal attempt.
+        A blocked retry always receives a new generation binding whose expected
+        HEAD is observed after the previous terminal attempt.
         """
 
         retry_task_id = self._blocked_retry_task_id(project_id)
