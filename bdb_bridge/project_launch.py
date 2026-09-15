@@ -207,12 +207,13 @@ class ProjectLaunchQueue:
             return launch
 
     def peek(self) -> ProjectLaunch | None:
-        with self._lock():
-            pending, claim = self._read_state_unlocked()
-            normalized_pending, normalized_claim = self._normalize_expiry(pending, claim)
-            if (normalized_pending, normalized_claim) != (pending, claim):
-                self._write_state_unlocked(normalized_pending, normalized_claim)
-            return normalized_pending
+        # Reads are intentionally lock-free. Queue writes are atomic replacements,
+        # so readers observe either the previous complete document or the next one.
+        # Expiry is normalized in memory only; the next mutating operation performs
+        # any required cleanup while holding the cross-process lock.
+        pending, claim = self._read_state_unlocked()
+        normalized_pending, _ = self._normalize_expiry(pending, claim)
+        return normalized_pending
 
     def claim(
         self,
