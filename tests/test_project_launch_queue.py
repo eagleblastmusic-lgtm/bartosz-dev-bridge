@@ -33,6 +33,35 @@ def test_enqueue_claim_acknowledge_and_single_owner(tmp_path) -> None:
     assert queue.peek() is None
 
 
+def test_peek_does_not_contend_with_held_mutation_lock(tmp_path) -> None:
+    now = datetime(2026, 7, 21, 3, 0, tzinfo=UTC)
+    queue = ProjectLaunchQueue(tmp_path / "launch.json", now_fn=lambda: now)
+    launch = queue.enqueue(repo_alias="alpha", prompt="Do work", auto_send=False, ttl_minutes=5)
+
+    queue.lock_path.write_text("held-by-other-process\n", encoding="ascii")
+
+    assert queue.peek() == launch
+    assert queue.lock_path.read_text(encoding="ascii") == "held-by-other-process\n"
+
+
+def test_expiry_cleanup_is_non_blocking_when_mutation_lock_is_held(tmp_path) -> None:
+    current = [datetime(2026, 7, 21, 3, 0, tzinfo=UTC)]
+    queue = ProjectLaunchQueue(tmp_path / "launch.json", now_fn=lambda: current[0])
+    queue.enqueue(repo_alias="alpha", prompt="Do work", auto_send=False, ttl_minutes=1)
+    current[0] += timedelta(minutes=2)
+    queue.lock_path.write_text("held-by-other-process\n", encoding="ascii")
+
+    assert queue.peek() is None
+    assert '"pending": {' in queue.path.read_text(encoding="utf-8")
+    assert queue.lock_path.exists()
+
+    queue.lock_path.unlink()
+    assert queue.peek() is None
+    document = queue.path.read_text(encoding="utf-8")
+    assert '"pending": null' in document
+    assert '"claim": null' in document
+
+
 def test_expired_claim_can_be_reclaimed_by_another_tab(tmp_path) -> None:
     current = [datetime(2026, 7, 21, 3, 0, tzinfo=UTC)]
     queue = ProjectLaunchQueue(tmp_path / "launch.json", now_fn=lambda: current[0])
