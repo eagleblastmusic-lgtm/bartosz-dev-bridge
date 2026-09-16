@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .project_execution import ProjectExecutionBinding
+from .project_launch import ProjectLaunchQueueError
 from .project_workflow import ProjectWorkflow, ProjectWorkflowError
 
 
@@ -112,8 +113,8 @@ def _reactivate_same_binding(
     workflow: ProjectWorkflow,
     project_id: str,
     binding: ProjectExecutionBinding,
-) -> None:
-    """Reactivate only the task owned by the already-active canonical binding."""
+) -> dict[str, Any]:
+    """Reactivate the existing binding and return a snapshot usable for compensation."""
 
     memory = workflow.memory(project_id)
     plan = memory.current_plan()
@@ -148,18 +149,74 @@ def _reactivate_same_binding(
             _fail("task_not_found", "execution task does not exist in the current plan")
 
         statuses = dict(execution.get("task_statuses", {}))
+        status_present = binding.task_id in statuses
         current_status = statuses.get(binding.task_id, task.status)
         if current_status in {"completed", "skipped"}:
             _fail("task_already_complete", "completed task cannot be reactivated")
+
+        snapshot = {
+            "status_present": status_present,
+            "task_status": current_status,
+            "current_task_id": execution.get("current_task_id"),
+            "current_binding_id": execution.get("current_binding_id"),
+        }
 
         statuses[binding.task_id] = "active"
         execution["task_statuses"] = statuses
         execution["current_task_id"] = binding.task_id
         execution["current_binding_id"] = binding.execution_binding_id
+        return replace(state, execution=execution), snapshot
 
-        updated = replace(state, execution=execution)
+    return memory.execution_transaction(transition)
+
+
+def _compensate_failed_projection(
+    workflow: ProjectWorkflow,
+    project_id: str,
+    binding: ProjectExecutionBinding,
+    snapshot: dict[str, Any],
+) -> None:
+    """Restore the pre-recovery execution projection after queue publication fails."""
+
+    memory = workflow.memory(project_id)
+
+    def transition(state):
+        execution = dict(state.execution or {})
+        raw = next(
+            (item for item in execution.get("bindings", []) if item.get("execution_binding_id") == binding.execution_binding_id),
+            None,
+        )
+        if raw is None or raw.get("status", "ACTIVE") != "ACTIVE" or raw.get("superseded") is True:
+            _fail("recovery_compensation_conflict", "binding changed while compensating failed launch projection")
+        if execution.get("current_binding_id") != binding.execution_binding_id:
+            _fail("recovery_compensation_conflict", "canonical binding changed while compensating failed launch projection")
+
+        statuses = dict(execution.get("task_statuses", {}))
+        if statuses.get(binding.task_id) != "active":
+            _fail("recovery_compensation_conflict", "task status changed while compensating failed launch projection")
+
+        if snapshot["status_present"]:
+            statuses[binding.task_id] = snapshot["task_status"]
+        else:
+            statuses.pop(binding.task_id, None)
+        execution["task_statuses"] = statuses
+        execution["current_task_id"] = snapshot["current_task_id"]
+        execution["current_binding_id"] = snapshot["current_binding_id"]
+        return replace(state, execution=execution), None
+
+    memory.execution_transaction(transition)
+
+
+def _record_replay_event(
+    workflow: ProjectWorkflow,
+    project_id: str,
+    binding: ProjectExecutionBinding,
+) -> None:
+    memory = workflow.memory(project_id)
+
+    def transition(state):
         updated = memory._append_event(
-            updated,
+            state,
             "EXECUTION_REPLAYED",
             f"Wznowiono zatrzymane wykonanie zadania {binding.task_id} bez zmiany bindingu",
             task_id=binding.task_id,
@@ -179,12 +236,7 @@ def recover_stalled_launch(
     apply: bool = False,
     workflow: ProjectWorkflow | None = None,
 ) -> StalledLaunchRecoveryResult:
-    """Validate or explicitly re-project one stalled launch without creating a new binding.
-
-    Dry-run is the default. With ``apply=True`` the task status/cursor is repaired
-    for the existing ACTIVE binding and the exact same launch identity is projected
-    into the Browser/Native queue again with a fresh transport TTL.
-    """
+    """Validate or explicitly re-project one stalled launch without creating a new binding."""
 
     current = workflow or ProjectWorkflow(runtime_root)
     binding, outbox = _validate_recovery_target(current, project_id, execution_binding_id)
@@ -203,15 +255,29 @@ def recover_stalled_launch(
             applied=False,
         )
 
-    _reactivate_same_binding(current, project_id, binding)
+    snapshot = _reactivate_same_binding(current, project_id, binding)
 
     try:
         launch = current.publish_outbox_launch(project_id, binding.launch_id)
-    except ProjectWorkflowError as exc:
-        raise StalledLaunchRecoveryError(exc.code, str(exc)) from exc
+    except (ProjectWorkflowError, ProjectLaunchQueueError) as exc:
+        try:
+            _compensate_failed_projection(current, project_id, binding, snapshot)
+        except StalledLaunchRecoveryError as compensation_exc:
+            raise StalledLaunchRecoveryError(
+                "recovery_compensation_failed",
+                f"launch projection failed ({getattr(exc, 'code', 'unknown')}), and compensation failed: {compensation_exc}",
+            ) from exc
+        raise StalledLaunchRecoveryError(getattr(exc, "code", "launch_projection_failed"), str(exc)) from exc
 
     if launch.launch_id != binding.launch_id or launch.execution_binding_id != binding.execution_binding_id:
         _fail("launch_projection_identity_mismatch", "re-published launch identity differs from the stalled binding")
+
+    # Audit event is written only after the downstream queue projection exists.
+    # A failure here must not undo a successfully published launch.
+    try:
+        _record_replay_event(current, project_id, binding)
+    except Exception:
+        pass
 
     refreshed = current.execution.launch_outbox_record(project_id, binding.launch_id)
     return StalledLaunchRecoveryResult(
