@@ -450,9 +450,9 @@ def handle_message(
             if not owns_claim or queued_launch is None or queued_launch.launch_id != launch_id:
                 acknowledged = False
             else:
-                conversation_id = _conversation_id(message.get("conversation_id"))
                 canonical = ProjectLaunchCanonicalState(config.runtime_root)
                 if canonical.is_canonical_launch(queued_launch):
+                    conversation_id = _conversation_id(message.get("conversation_id"))
                     if handoff_status == "SENT":
                         project_id = _bounded_text(message.get("project_id"), field="project_id", maximum=128)
                         binding_id = _bounded_text(message.get("execution_binding_id"), field="execution_binding_id", maximum=128)
@@ -477,8 +477,8 @@ def handle_message(
                     acknowledged = queue.acknowledge(launch_id=launch_id, claim_id=claim_id)
                 else:
                     # Historical non-canonical queue entries keep their bounded
-                    # transport-only behavior; no vNext lifecycle state exists to
-                    # acknowledge for them.
+                    # transport-only behavior, including the old ACK shape that
+                    # does not carry conversation_id.
                     acknowledged = queue.acknowledge(launch_id=launch_id, claim_id=claim_id)
 
             return _project_launch_response(
