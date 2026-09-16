@@ -412,6 +412,26 @@ def handle_message(
                         except ProjectExecutionError as exc:
                             raise M9bNativeError(exc.code, str(exc)) from exc
                 launch = queue.claim(launch_id=launch_id, claim_id=claim_id, lease_seconds=30)
+                if launch is not None:
+                    canonical = ProjectLaunchCanonicalState(config.runtime_root)
+                    if canonical.is_canonical_launch(launch):
+                        # Canonical ACK is authoritative. A crash may leave only
+                        # the transport projection behind; consume it without
+                        # exposing the prompt to Browser a second time.
+                        if canonical.is_acknowledged(launch):
+                            queue.acknowledge(launch_id=launch_id, claim_id=claim_id)
+                            return _project_launch_response(
+                                config,
+                                request_id,
+                                status="already_acknowledged",
+                                launch=None,
+                                launch_id=launch_id,
+                                claim_id=claim_id,
+                            )
+                        # Explicit stalled-launch recovery re-publishes the same
+                        # binding. Browser ownership is the bounded point at
+                        # which that exact binding becomes active again.
+                        canonical.activate_claimed(launch)
                 return _project_launch_response(
                     config,
                     request_id,
