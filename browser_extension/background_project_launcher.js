@@ -92,11 +92,15 @@ submitAction = async function submitActionWithProjectLauncher(action, tabId) {
   }
   const launchId = bdbValidateLaunchUuid(action.launch_id, "launch_id");
   const claimId = bdbValidateLaunchUuid(action.claim_id, "claim_id");
-  return sendNative({
+  const nativeRequest = {
     schema: REQUEST_SCHEMA,
     request_id: requestId(action.operation),
     action: action.operation,
     launch_id: launchId,
     claim_id: claimId
-  });
+  };
+  if (action.operation === "project_launch_ack") {
+    nativeRequest.conversation_id = bdbValidateConversationId(action.conversation_id);
+  }
+  return sendNative(nativeRequest);
 };
