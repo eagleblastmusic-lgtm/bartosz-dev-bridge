@@ -44,6 +44,10 @@ from bdb_vnext.project_launch import (
     ProjectLaunchQueueAdapter,
     ProjectLaunchQueueError,
 )
+from bdb_vnext.project_launch_canonical import (
+    ProjectLaunchCanonicalError,
+    ProjectLaunchCanonicalState,
+)
 
 
 M9B_NATIVE_CONFIG_SCHEMA = "bdb-vnext-native-host-config-v2"
@@ -408,6 +412,26 @@ def handle_message(
                         except ProjectExecutionError as exc:
                             raise M9bNativeError(exc.code, str(exc)) from exc
                 launch = queue.claim(launch_id=launch_id, claim_id=claim_id, lease_seconds=30)
+                if launch is not None:
+                    canonical = ProjectLaunchCanonicalState(config.runtime_root)
+                    if canonical.is_canonical_launch(launch):
+                        # Canonical ACK is authoritative. A crash may leave only
+                        # the transport projection behind; consume it without
+                        # exposing the prompt to Browser a second time.
+                        if canonical.is_acknowledged(launch):
+                            queue.acknowledge(launch_id=launch_id, claim_id=claim_id)
+                            return _project_launch_response(
+                                config,
+                                request_id,
+                                status="already_acknowledged",
+                                launch=None,
+                                launch_id=launch_id,
+                                claim_id=claim_id,
+                            )
+                        # Explicit stalled-launch recovery re-publishes the same
+                        # binding. Browser ownership is the bounded point at
+                        # which that exact binding becomes active again.
+                        canonical.activate_claimed(launch)
                 return _project_launch_response(
                     config,
                     request_id,
@@ -416,34 +440,47 @@ def handle_message(
                     launch_id=launch_id,
                     claim_id=claim_id,
                 )
+
             handoff_status = message.get("handoff_status")
             if handoff_status is not None and handoff_status != "SENT":
                 _fail("invalid_payload", "handoff_status must be SENT when supplied")
-            if handoff_status == "SENT":
-                project_id = _bounded_text(message.get("project_id"), field="project_id", maximum=128)
-                binding_id = _bounded_text(message.get("execution_binding_id"), field="execution_binding_id", maximum=128)
-                conversation_id = _conversation_id(message.get("conversation_id"))
-                coordinator = ProjectExecutionCoordinator(config.runtime_root, catalog=ProjectCatalog(config.runtime_root))
-                try:
-                    binding = coordinator.binding(project_id, binding_id)
-                    if binding.launch_id != launch_id:
-                        _fail("execution_launch_mismatch", "handoff launch does not match the canonical binding")
-                    if binding.conversation_id not in (None, conversation_id):
-                        _fail("execution_conversation_mismatch", "handoff conversation does not match the canonical binding")
-                    handoff = coordinator.launch_handoff(project_id, binding_id)
-                    owns_claim = queue.claim_matches(launch_id=launch_id, claim_id=claim_id)
-                    if handoff is not None and handoff.get("status") == "SENT":
-                        acknowledged = queue.peek() is None or (owns_claim and queue.acknowledge(launch_id=launch_id, claim_id=claim_id))
-                    elif owns_claim:
-                        coordinator.mark_launch_handoff_sent(project_id, execution_binding_id=binding_id, launch_id=launch_id, conversation_id=conversation_id)
-                        coordinator.mark_outbox_acknowledged(project_id, launch_id, conversation_id=conversation_id)
-                        acknowledged = queue.acknowledge(launch_id=launch_id, claim_id=claim_id)
-                    else:
-                        acknowledged = False
-                except ProjectExecutionError as exc:
-                    raise M9bNativeError(exc.code, str(exc)) from exc
+
+            owns_claim = queue.claim_matches(launch_id=launch_id, claim_id=claim_id)
+            queued_launch = queue.peek()
+            if not owns_claim or queued_launch is None or queued_launch.launch_id != launch_id:
+                acknowledged = False
             else:
-                acknowledged = queue.acknowledge(launch_id=launch_id, claim_id=claim_id)
+                canonical = ProjectLaunchCanonicalState(config.runtime_root)
+                if canonical.is_canonical_launch(queued_launch):
+                    conversation_id = _conversation_id(message.get("conversation_id"))
+                    if handoff_status == "SENT":
+                        project_id = _bounded_text(message.get("project_id"), field="project_id", maximum=128)
+                        binding_id = _bounded_text(message.get("execution_binding_id"), field="execution_binding_id", maximum=128)
+                        if project_id != queued_launch.project_id or binding_id != queued_launch.execution_binding_id:
+                            _fail("execution_launch_mismatch", "handoff identity differs from queued canonical launch")
+                        coordinator = ProjectExecutionCoordinator(config.runtime_root, catalog=ProjectCatalog(config.runtime_root))
+                        binding = coordinator.binding(project_id, binding_id)
+                        if binding.launch_id != launch_id:
+                            _fail("execution_launch_mismatch", "handoff launch does not match the canonical binding")
+                        if binding.conversation_id not in (None, conversation_id):
+                            _fail("execution_conversation_mismatch", "handoff conversation does not match the canonical binding")
+                        coordinator.mark_launch_handoff_sent(
+                            project_id,
+                            execution_binding_id=binding_id,
+                            launch_id=launch_id,
+                            conversation_id=conversation_id,
+                        )
+                    # Canonical Project Memory is committed before the transport
+                    # projection may disappear. This is required even when the
+                    # Browser only fills the composer (auto_send=false).
+                    canonical.acknowledge_delivery(queued_launch, conversation_id)
+                    acknowledged = queue.acknowledge(launch_id=launch_id, claim_id=claim_id)
+                else:
+                    # Historical non-canonical queue entries keep their bounded
+                    # transport-only behavior, including the old ACK shape that
+                    # does not carry conversation_id.
+                    acknowledged = queue.acknowledge(launch_id=launch_id, claim_id=claim_id)
+
             return _project_launch_response(
                 config,
                 request_id,
@@ -451,7 +488,7 @@ def handle_message(
                 launch_id=launch_id,
                 claim_id=claim_id,
             )
-        except ProjectLaunchQueueError as exc:
+        except (ProjectLaunchQueueError, ProjectLaunchCanonicalError, ProjectExecutionError) as exc:
             raise M9bNativeError(exc.code, str(exc)) from exc
 
     try:
