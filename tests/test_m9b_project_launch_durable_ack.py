@@ -31,19 +31,26 @@ def _config(tmp_path: Path) -> VNextNativeConfig:
     )
 
 
-def _ack_message(**extra: object) -> dict[str, object]:
+def _message(action: str, **extra: object) -> dict[str, object]:
     value: dict[str, object] = {
         "schema": M9B_NATIVE_REQUEST_SCHEMA,
-        "request_id": "ack-request-1",
-        "action": "project_launch_ack",
+        "request_id": f"{action}-request-1",
+        "action": action,
         "protocol_generation": PROTOCOL_GENERATION,
         "browser_extension_id": BROWSER_EXTENSION_ID,
         "launch_id": LAUNCH_ID,
         "claim_id": CLAIM_ID,
-        "conversation_id": CONVERSATION_ID,
     }
     value.update(extra)
     return value
+
+
+def _ack_message(**extra: object) -> dict[str, object]:
+    return _message("project_launch_ack", conversation_id=CONVERSATION_ID, **extra)
+
+
+def _claim_message(**extra: object) -> dict[str, object]:
+    return _message("project_launch_claim", **extra)
 
 
 def _launch() -> SimpleNamespace:
@@ -76,6 +83,13 @@ class _Queue:
     def peek(self):
         return None if self.removed else self.launch
 
+    def claim(self, *, launch_id: str, claim_id: str, lease_seconds: int):
+        assert launch_id == LAUNCH_ID
+        assert claim_id == CLAIM_ID
+        assert lease_seconds == 30
+        self.sequence.append("queue_claim")
+        return None if self.removed else self.launch
+
     def claim_matches(self, *, launch_id: str, claim_id: str) -> bool:
         return not self.removed and launch_id == LAUNCH_ID and claim_id == CLAIM_ID
 
@@ -88,13 +102,30 @@ class _Queue:
 
 
 class _Canonical:
-    def __init__(self, _runtime_root, *, sequence: list[str], fail: bool = False) -> None:
+    def __init__(
+        self,
+        _runtime_root,
+        *,
+        sequence: list[str],
+        fail: bool = False,
+        acknowledged: bool = False,
+    ) -> None:
         self.sequence = sequence
         self.fail = fail
+        self.acknowledged = acknowledged
 
     @staticmethod
     def is_canonical_launch(_launch) -> bool:
         return True
+
+    def is_acknowledged(self, launch) -> bool:
+        assert launch.launch_id == LAUNCH_ID
+        self.sequence.append("canonical_read_ack")
+        return self.acknowledged
+
+    def activate_claimed(self, launch) -> None:
+        assert launch.launch_id == LAUNCH_ID
+        self.sequence.append("canonical_activate")
 
     def acknowledge_delivery(self, launch, conversation_id: str) -> None:
         assert launch.launch_id == LAUNCH_ID
@@ -102,6 +133,44 @@ class _Canonical:
         self.sequence.append("canonical_ack")
         if self.fail:
             raise ProjectLaunchCanonicalError("canonical_ack_failed", "injected canonical failure")
+
+
+def test_claim_consumes_stale_queue_projection_after_durable_ack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sequence: list[str] = []
+    launch = _launch()
+    queue = _Queue(launch, sequence)
+
+    monkeypatch.setattr("bdb_vnext.m9b_native_host._project_launch_queue", lambda _root: queue)
+    monkeypatch.setattr(
+        "bdb_vnext.m9b_native_host.ProjectLaunchCanonicalState",
+        lambda _root: _Canonical(_root, sequence=sequence, acknowledged=True),
+    )
+
+    response = handle_message(_config(tmp_path), _claim_message())
+
+    assert response["status"] == "already_acknowledged"
+    assert response["launch"] is None
+    assert sequence == ["queue_claim", "canonical_read_ack", "queue_ack"]
+    assert queue.peek() is None
+
+
+def test_claim_reactivates_exact_unacknowledged_binding_before_browser_delivery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sequence: list[str] = []
+    launch = _launch()
+    queue = _Queue(launch, sequence)
+
+    monkeypatch.setattr("bdb_vnext.m9b_native_host._project_launch_queue", lambda _root: queue)
+    monkeypatch.setattr(
+        "bdb_vnext.m9b_native_host.ProjectLaunchCanonicalState",
+        lambda _root: _Canonical(_root, sequence=sequence, acknowledged=False),
+    )
+
+    response = handle_message(_config(tmp_path), _claim_message())
+
+    assert response["status"] == "claimed"
+    assert response["launch"]["launch_id"] == LAUNCH_ID
+    assert sequence == ["queue_claim", "canonical_read_ack", "canonical_activate"]
+    assert queue.peek() is launch
 
 
 def test_auto_send_false_ack_is_durable_before_transport_queue_is_cleared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
