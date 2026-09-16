@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +17,7 @@ LAUNCH_ID = "launch-0001"
 @dataclass(frozen=True)
 class _State:
     execution: dict
+    events: tuple = ()
 
 
 class _Memory:
@@ -41,6 +42,10 @@ class _Memory:
         self.state, result = transition(self.state)
         return result
 
+    def _append_event(self, state, event_type, human_summary, **kwargs):
+        event = {"event_type": event_type, "human_summary": human_summary, **kwargs}
+        return replace(state, events=state.events + (event,))
+
 
 class _Queue:
     def __init__(self):
@@ -54,6 +59,7 @@ class _Execution:
     def __init__(self, binding, outbox):
         self.binding = binding
         self.outbox = outbox
+        self.handoff = None
         self.watchdog_state = {
             "state": "STALLED",
             "resume_available": True,
@@ -70,6 +76,11 @@ class _Execution:
         assert binding_id == self.binding.execution_binding_id
         return self.binding
 
+    def launch_handoff(self, project_id, binding_id):
+        assert project_id == PROJECT_ID
+        assert binding_id == self.binding.execution_binding_id
+        return self.handoff
+
     def launch_outbox_record(self, project_id, launch_id):
         assert project_id == PROJECT_ID
         assert launch_id == self.binding.launch_id
@@ -77,7 +88,7 @@ class _Execution:
 
 
 class _Workflow:
-    def __init__(self, *, outbox_status="PUBLISHED"):
+    def __init__(self, *, outbox_status="PUBLISHED", conversation_id=None):
         self.binding = ProjectExecutionBinding(
             execution_binding_id=BINDING_ID,
             project_id=PROJECT_ID,
@@ -92,6 +103,7 @@ class _Workflow:
             status="ACTIVE",
             superseded=False,
             generation=2,
+            conversation_id=conversation_id,
         )
         self.outbox = SimpleNamespace(
             project_id=PROJECT_ID,
@@ -151,6 +163,7 @@ def test_apply_reactivates_task_and_republishes_exact_same_launch_without_new_ge
     assert workflow._memory.state.execution["current_task_id"] == "P3-02"
     assert workflow._memory.state.execution["current_binding_id"] == BINDING_ID
     assert len(workflow._memory.state.execution["bindings"]) == 1
+    assert workflow._memory.state.events[-1]["event_type"] == "EXECUTION_REPLAYED"
 
 
 def test_recovery_refuses_acknowledged_launch():
@@ -160,6 +173,27 @@ def test_recovery_refuses_acknowledged_launch():
         recover_stalled_launch("unused", PROJECT_ID, BINDING_ID, apply=True, workflow=workflow)
 
     assert exc.value.code == "launch_already_acknowledged"
+    assert workflow.publish_calls == []
+
+
+def test_recovery_refuses_binding_already_bound_to_conversation():
+    workflow = _Workflow(conversation_id="conversation-0001")
+
+    with pytest.raises(StalledLaunchRecoveryError) as exc:
+        recover_stalled_launch("unused", PROJECT_ID, BINDING_ID, apply=True, workflow=workflow)
+
+    assert exc.value.code == "launch_has_conversation"
+    assert workflow.publish_calls == []
+
+
+def test_recovery_refuses_completed_browser_handoff():
+    workflow = _Workflow()
+    workflow.execution.handoff = {"status": "SENT"}
+
+    with pytest.raises(StalledLaunchRecoveryError) as exc:
+        recover_stalled_launch("unused", PROJECT_ID, BINDING_ID, apply=True, workflow=workflow)
+
+    assert exc.value.code == "launch_handoff_already_sent"
     assert workflow.publish_calls == []
 
 
