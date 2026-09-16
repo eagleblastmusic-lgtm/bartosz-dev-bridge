@@ -73,6 +73,19 @@ def _validate_recovery_target(
         )
 
     binding = workflow.execution.resume_binding(project_id, execution_binding_id)
+    if binding.conversation_id:
+        _fail(
+            "launch_has_conversation",
+            "a stalled binding already associated with a conversation must not be replayed automatically",
+        )
+
+    handoff = workflow.execution.launch_handoff(project_id, binding.execution_binding_id)
+    if handoff is not None and handoff.get("status") == "SENT":
+        _fail(
+            "launch_handoff_already_sent",
+            "a launch with a completed Browser handoff must not be replayed",
+        )
+
     outbox = workflow.execution.launch_outbox_record(project_id, binding.launch_id)
     if outbox is None:
         _fail("launch_outbox_not_found", "active stalled binding has no canonical launch outbox record")
@@ -145,16 +158,14 @@ def _reactivate_same_binding(
         execution["current_binding_id"] = binding.execution_binding_id
 
         updated = replace(state, execution=execution)
-        append_event = getattr(memory, "_append_event", None)
-        if callable(append_event):
-            updated = append_event(
-                updated,
-                "EXECUTION_RESUMED",
-                f"Wznowiono zatrzymane wykonanie zadania {binding.task_id} bez zmiany bindingu",
-                task_id=binding.task_id,
-                plan_version=binding.plan_version,
-                correlation_id=binding.correlation_id,
-            )
+        updated = memory._append_event(
+            updated,
+            "EXECUTION_REPLAYED",
+            f"Wznowiono zatrzymane wykonanie zadania {binding.task_id} bez zmiany bindingu",
+            task_id=binding.task_id,
+            plan_version=binding.plan_version,
+            correlation_id=binding.correlation_id,
+        )
         return updated, None
 
     memory.execution_transaction(transition)
