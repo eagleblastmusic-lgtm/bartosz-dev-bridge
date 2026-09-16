@@ -112,15 +112,19 @@ async function bdbFetchProjectLaunch() {
   return response.launch;
 }
 
-async function bdbProjectLaunchAction(operation, launchId, claimId) {
+async function bdbProjectLaunchAction(operation, launchId, claimId, conversationId = null) {
+  const action = {
+    schema: ACTION_SCHEMA,
+    operation,
+    launch_id: launchId,
+    claim_id: claimId
+  };
+  if (conversationId) {
+    action.conversation_id = conversationId;
+  }
   const result = await chrome.runtime.sendMessage({
     type: "BDB_SUBMIT_ACTION",
-    action: {
-      schema: ACTION_SCHEMA,
-      operation,
-      launch_id: launchId,
-      claim_id: claimId
-    }
+    action
   });
   return result && result.ok === true ? result.response : null;
 }
@@ -138,11 +142,12 @@ async function bdbClaimProjectLaunch(launch) {
   return { launch: response.launch, claimId };
 }
 
-async function bdbAcknowledgeProjectLaunch(launchId, claimId) {
+async function bdbAcknowledgeProjectLaunch(launchId, claimId, conversationId) {
   const response = await bdbProjectLaunchAction(
     "project_launch_ack",
     launchId,
-    claimId
+    claimId,
+    conversationId
   );
   if (response && response.status === "acknowledged") {
     bdbProjectClaims.delete(launchId);
@@ -188,9 +193,13 @@ async function bdbHandleProjectLaunch(candidate) {
   if (!await bdbBindProjectConversation(launch)) {
     return false;
   }
+  const conversationId = bdbProjectConversationId();
+  if (!conversationId) {
+    return false;
+  }
   const marker = bdbProjectLaunchMarker(launch.launch_id);
   if (bdbUserMessageContains(marker)) {
-    return bdbAcknowledgeProjectLaunch(launch.launch_id, claimId);
+    return bdbAcknowledgeProjectLaunch(launch.launch_id, claimId, conversationId);
   }
 
   let composer = findComposer();
@@ -213,13 +222,13 @@ async function bdbHandleProjectLaunch(candidate) {
   }
 
   if (!launch.auto_send) {
-    return bdbAcknowledgeProjectLaunch(launch.launch_id, claimId);
+    return bdbAcknowledgeProjectLaunch(launch.launch_id, claimId, conversationId);
   }
   const sent = await bdbSubmitProjectLaunch(marker);
   if (!sent) {
     return false;
   }
-  return bdbAcknowledgeProjectLaunch(launch.launch_id, claimId);
+  return bdbAcknowledgeProjectLaunch(launch.launch_id, claimId, conversationId);
 }
 
 async function bdbPollProjectLaunch() {
