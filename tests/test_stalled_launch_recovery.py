@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from bdb_vnext.project_execution import ProjectExecutionBinding
+from bdb_vnext.project_launch import ProjectLaunchQueueError
 from bdb_vnext.stalled_launch_recovery import StalledLaunchRecoveryError, recover_stalled_launch
 
 
@@ -116,6 +117,7 @@ class _Workflow:
         self.queue = _Queue()
         self._memory = _Memory(self.binding)
         self.publish_calls = []
+        self.publish_error = None
 
     def memory(self, project_id):
         assert project_id == PROJECT_ID
@@ -125,6 +127,8 @@ class _Workflow:
         assert project_id == PROJECT_ID
         assert launch_id == LAUNCH_ID
         self.publish_calls.append((project_id, launch_id))
+        if self.publish_error is not None:
+            raise self.publish_error
         self.queue.pending = SimpleNamespace(
             launch_id=LAUNCH_ID,
             execution_binding_id=BINDING_ID,
@@ -164,6 +168,22 @@ def test_apply_reactivates_task_and_republishes_exact_same_launch_without_new_ge
     assert workflow._memory.state.execution["current_binding_id"] == BINDING_ID
     assert len(workflow._memory.state.execution["bindings"]) == 1
     assert workflow._memory.state.events[-1]["event_type"] == "EXECUTION_REPLAYED"
+
+
+def test_queue_failure_compensates_task_and_cursor_state():
+    workflow = _Workflow()
+    before = dict(workflow._memory.state.execution)
+    before_statuses = dict(before["task_statuses"])
+    workflow.publish_error = ProjectLaunchQueueError("queue_busy", "project launch queue is busy")
+
+    with pytest.raises(StalledLaunchRecoveryError) as exc:
+        recover_stalled_launch("unused", PROJECT_ID, BINDING_ID, apply=True, workflow=workflow)
+
+    assert exc.value.code == "queue_busy"
+    assert workflow._memory.state.execution["task_statuses"] == before_statuses
+    assert workflow._memory.state.execution["current_task_id"] == before["current_task_id"]
+    assert workflow._memory.state.execution["current_binding_id"] == before["current_binding_id"]
+    assert workflow._memory.state.events == ()
 
 
 def test_recovery_refuses_acknowledged_launch():
