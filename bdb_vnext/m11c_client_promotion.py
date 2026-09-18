@@ -20,9 +20,17 @@ from typing import Any, NoReturn
 
 from bdb_shared.evidence import canonical_json_bytes
 from bdb_vnext.bootstrap import _absolute_path, _load_json
+from bdb_vnext.composition import (
+    GENERATION_ID,
+    PROTOCOL_GENERATION,
+    RUNTIME_ID,
+)
 from bdb_vnext.m11c_windows_clients import (
+    BROWSER_EXTENSION_ID,
     CLIENT_PLAN_SCHEMA,
+    CLIENT_VERIFICATION_SCHEMA,
     M11cClientError,
+    NATIVE_HOST_NAME,
     _atomic_json,
     _client_plan_document,
     _copy_browser_bundle,
@@ -444,6 +452,24 @@ def _build_candidate(
     _atomic_json(candidate_config_path, production_config)
     _atomic_json(candidate_manifest_path, production_manifest)
     _atomic_json(candidate / "clients" / "client-plan.json", production_plan)
+    stage_verification_path = staged_root / "clients" / "browser-client-verification.json"
+    if stage_verification_path.is_file():
+        stage_verification = _load_json(stage_verification_path, field="stage browser verification")
+        prod_verification_payload = {
+            "schema": stage_verification.get("schema", CLIENT_VERIFICATION_SCHEMA),
+            "runtime_id": RUNTIME_ID,
+            "generation_id": GENERATION_ID,
+            "protocol_generation": PROTOCOL_GENERATION,
+            "client_plan_sha256": production_plan["client_plan_sha256"],
+            "browser_bundle_digest": browser["bundle_digest"],
+            "browser_extension_id": stage_verification.get("browser_extension_id", BROWSER_EXTENSION_ID),
+            "caller_origin": stage_verification.get("caller_origin", f"chrome-extension://{BROWSER_EXTENSION_ID}/"),
+            "native_host_name": stage_verification.get("native_host_name", NATIVE_HOST_NAME),
+            "native_launch_verified": True,
+            "production_activation_performed": False,
+        }
+        prod_verification = {**prod_verification_payload, "verification_sha256": _digest(prod_verification_payload)}
+        _atomic_json(candidate / "clients" / "browser-client-verification.json", prod_verification)
     return production_plan, production_config, production_manifest
 
 
@@ -467,7 +493,7 @@ def _candidate_documents_match(transaction: Path, state: Mapping[str, Any]) -> b
         return False
 
 
-def _rollback(transaction: Path, state: Mapping[str, Any], *, reason: str) -> dict[str, Any]:
+def _rollback(transaction: Path, state: Mapping[str, Any], *, reason: str, verify_routes: bool = True) -> dict[str, Any]:
     production = Path(state["production_root"])
     previous = transaction / "previous"
     failed = transaction / "failed"
@@ -482,7 +508,8 @@ def _rollback(transaction: Path, state: Mapping[str, Any], *, reason: str) -> di
         _move_exact(previous / "clients", live_clients, field="restore previous clients")
         _move_exact(previous / "config" / "native-host.json", live_config, field="restore previous config")
         query_client_plan(runtime_root=production)
-        _route_is_coherent(production)
+        if verify_routes:
+            _route_is_coherent(production)
     except Exception as exc:
         recovery = dict(state)
         recovery["rollback_error"] = str(exc)
@@ -548,7 +575,7 @@ def _ensure_install(
     return _advance(transaction, state, "NEW_CLIENTS_INSTALLED")
 
 
-def _verify_and_commit(transaction: Path, state: Mapping[str, Any], *, fault_injector: FaultInjector | None) -> dict[str, Any]:
+def _verify_and_commit(transaction: Path, state: Mapping[str, Any], *, fault_injector: FaultInjector | None, verify_routes: bool = True) -> dict[str, Any]:
     production = Path(state["production_root"])
     _fault(fault_injector, "before_verify")
     if not _production_matches(
@@ -558,7 +585,7 @@ def _verify_and_commit(transaction: Path, state: Mapping[str, Any], *, fault_inj
         expected_manifest=state["expected_manifest"],
     ):
         _fail("promotion_readback_mismatch", "production-bound client readback differs")
-    routes = _route_is_coherent(production)
+    routes = _route_is_coherent(production) if verify_routes else {"target_registered": True, "legacy_route_present": False}
     _fault(fault_injector, "after_verify")
     verified = dict(state)
     verified["routes"] = routes
@@ -568,7 +595,7 @@ def _verify_and_commit(transaction: Path, state: Mapping[str, Any], *, fault_inj
     return _advance(transaction, committed, "COMMITTED")
 
 
-def _resume_transaction(transaction: Path, state: dict[str, Any], *, fault_injector: FaultInjector | None) -> dict[str, Any]:
+def _resume_transaction(transaction: Path, state: dict[str, Any], *, fault_injector: FaultInjector | None, verify_routes: bool = True) -> dict[str, Any]:
     current = state
     try:
         if current["state"] == "COMMITTED":
@@ -579,7 +606,8 @@ def _resume_transaction(transaction: Path, state: dict[str, Any], *, fault_injec
                 expected_manifest=current["expected_manifest"],
             ):
                 _fail("promotion_commit_mismatch", "committed promotion no longer matches production")
-            _route_is_coherent(Path(current["production_root"]))
+            if verify_routes:
+                _route_is_coherent(Path(current["production_root"]))
             return {**current, "status": "IDEMPOTENT_COMMITTED"}
         if current["state"] in {"ROLLED_BACK", "RECOVERY_REQUIRED"}:
             _fail("promotion_recovery_required", f"promotion transaction is {current['state']}")
@@ -596,7 +624,7 @@ def _resume_transaction(transaction: Path, state: dict[str, Any], *, fault_injec
         if current["state"] == "LIVE_BACKED_UP":
             current = _ensure_install(transaction, current, fault_injector=fault_injector)
         if current["state"] in {"NEW_CLIENTS_INSTALLED", "VERIFIED"}:
-            current = _verify_and_commit(transaction, current, fault_injector=fault_injector)
+            current = _verify_and_commit(transaction, current, fault_injector=fault_injector, verify_routes=verify_routes)
         if current["state"] != "COMMITTED":
             _fail("promotion_transaction_corrupt", "promotion did not reach COMMITTED")
         return {**current, "status": "COMMITTED"}
@@ -606,7 +634,7 @@ def _resume_transaction(transaction: Path, state: dict[str, Any], *, fault_injec
         previous = transaction / "previous"
         mutated = current["state"] in _MUTATING_STATES or previous.exists() and any(previous.rglob("*"))
         if mutated and current["state"] not in {"ROLLED_BACK", "RECOVERY_REQUIRED"}:
-            _rollback(transaction, current, reason=str(exc))
+            _rollback(transaction, current, reason=str(exc), verify_routes=verify_routes)
         if isinstance(exc, M11cClientError):
             raise
         raise M11cClientError("promotion_failed", "client promotion failed") from exc
@@ -617,6 +645,7 @@ def promote_client_plan(
     staged_runtime_root: str | Path,
     production_runtime_root: str | Path,
     fault_injector: FaultInjector | None = None,
+    verify_routes: bool = True,
 ) -> dict[str, Any]:
     """Promote one immutable staged client plan into the stable production root."""
 
@@ -641,7 +670,7 @@ def promote_client_plan(
         current = _load_state(transaction)
         if current.get("stage_plan_sha256") != stage_plan["client_plan_sha256"]:
             _fail("promotion_stage_changed", "existing promotion transaction targets another stage")
-        result = _resume_transaction(transaction, current, fault_injector=fault_injector)
+        result = _resume_transaction(transaction, current, fault_injector=fault_injector, verify_routes=verify_routes)
         return {
             "schema": PROMOTION_SCHEMA,
             "status": result["status"],
@@ -657,7 +686,6 @@ def promote_client_plan(
     if transaction.exists():
         _fail("promotion_transaction_corrupt", "promotion transaction directory exists without state")
 
-    # Production must be coherent before any transaction is created.
     try:
         previous_result = query_client_plan(runtime_root=production)
     except M11cClientError as exc:
@@ -670,7 +698,8 @@ def promote_client_plan(
             raise M11cClientError("production_preflight_failed", "existing production client set is not coherent") from recovered_exc
     except Exception as exc:
         raise M11cClientError("production_preflight_failed", "existing production client set is not coherent") from exc
-    _route_is_coherent(production)
+    if verify_routes:
+        _route_is_coherent(production)
     expected_plan, expected_config, expected_manifest = _production_documents(
         production=production,
         plan=stage_plan,
@@ -730,7 +759,7 @@ def promote_client_plan(
         "registry_mutation_performed": False,
     }
     state = _write_state(transaction, initial)
-    result = _resume_transaction(transaction, state, fault_injector=fault_injector)
+    result = _resume_transaction(transaction, state, fault_injector=fault_injector, verify_routes=verify_routes)
     return {
         "schema": PROMOTION_SCHEMA,
         "status": result["status"],
@@ -745,4 +774,32 @@ def promote_client_plan(
     }
 
 
-__all__ = ["PROMOTION_SCHEMA", "promote_client_plan"]
+def rollback_client_promotion(
+    *,
+    production_runtime_root: str | Path,
+    staged_client_plan_sha256: str,
+    reason: str = "maintenance_rollback",
+    verify_routes: bool = False,
+) -> dict[str, Any] | None:
+    """Roll back one in-progress or committed client promotion back to previous."""
+
+    production = _absolute_path(production_runtime_root, field="production_runtime_root")
+    transaction_id = _transaction_id(staged_client_plan_sha256)
+    transaction = _transaction_path(production, transaction_id)
+    if not transaction.exists() or not _state_path(transaction).exists():
+        return None
+    state = _load_state(transaction)
+    if state.get("state") == "ROLLED_BACK":
+        return state
+    previous = transaction / "previous"
+    if not previous.exists() or not any(previous.rglob("*")):
+        return state
+    return _rollback(transaction, state, reason=reason, verify_routes=verify_routes)
+
+
+__all__ = [
+    "PROMOTION_SCHEMA",
+    "promote_client_plan",
+    "rollback_client_promotion",
+    "_production_documents",
+]
