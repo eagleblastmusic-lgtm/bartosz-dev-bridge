@@ -27,6 +27,9 @@ import bdb_vnext.m11c_post_active_maintenance as maintenance
 
 
 SHA = "sha256:" + "a" * 64
+STAGED_PLAN_SHA = "sha256:" + "1" * 64
+CANON_PLAN_SHA = "sha256:" + "2" * 64
+CANON_MANIFEST_SHA = "sha256:" + "3" * 64
 HEAD = "1" * 40
 TREE = "2" * 40
 OLD = "3" * 40
@@ -102,22 +105,46 @@ def _patch_common(
     def route_write(*, runtime_root: Path, view: str, manifest_path: str) -> None:
         route_state["values"][view] = manifest_path
 
-    # _client_identity returns different manifest paths depending on which
-    # runtime_root it is called with — staged vs canonical.
+    distinct_canonical = canonical_root is not None and canonical != staged
+
+    # _client_identity deliberately returns different plan identities for the
+    # staged and canonical roots.  This is the production regression: client
+    # plans are path-bound, so their SHA changes after promotion.
     def client_identity(runtime_root: Path, **_kw: object) -> dict[str, object]:
-        if str(runtime_root) == str(canonical):
+        if distinct_canonical and str(runtime_root) == str(canonical):
             return {
-                "client_plan_sha256": SHA,
+                "client_plan_sha256": CANON_PLAN_SHA,
                 "browser_bundle_digest": SHA,
-                "native_manifest_digest": SHA,
+                "native_manifest_digest": CANON_MANIFEST_SHA,
                 "native_manifest_path": canonical_manifest,
             }
         return {
-            "client_plan_sha256": SHA,
+            "client_plan_sha256": STAGED_PLAN_SHA,
             "browser_bundle_digest": SHA,
             "native_manifest_digest": SHA,
             "native_manifest_path": staged_manifest,
         }
+
+    # prepare must precompute the production-path-bound document set before
+    # apply.  Keep this focused test independent from filesystem packaging.
+    monkeypatch.setattr(
+        maintenance,
+        "query_client_plan",
+        lambda **_: {"plan": {"client_plan_sha256": STAGED_PLAN_SHA}},
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_production_documents",
+        lambda **_: (
+            {
+                "client_plan_sha256": CANON_PLAN_SHA,
+                "native_manifest_sha256": CANON_MANIFEST_SHA,
+                "native_manifest_path": canonical_manifest,
+            },
+            {},
+            {},
+        ),
+    )
 
     monkeypatch.setattr(maintenance, "_active_observation", lambda _authority: current)
     monkeypatch.setattr(maintenance, "_observe_candidate_bundle", lambda **_: {"health": {"status": "READY"}})
@@ -170,7 +197,9 @@ class TestCanonicalPrepare:
         result, staged, canonical = _prepare_canonical(monkeypatch, tmp_path)
         cand = result["candidate"]
         assert cand["canonical_runtime_root"] == str(canonical)
-        assert cand["staged_client_plan_sha256"] == SHA
+        assert cand["staged_client_plan_sha256"] == STAGED_PLAN_SHA
+        assert cand["client_plan_sha256"] == CANON_PLAN_SHA
+        assert cand["native_manifest_digest"] == CANON_MANIFEST_SHA
         assert cand["candidate_client_runtime_root"] == str(staged)
         # candidate_native_manifest_path must be canonical
         assert str(canonical) in cand["candidate_native_manifest_path"]
@@ -181,7 +210,10 @@ class TestCanonicalPrepare:
         result, staged, canonical = _prepare_canonical(monkeypatch, tmp_path)
         plan = result["plan"]
         assert plan["canonical_runtime_root"] == str(canonical)
-        assert plan["staged_client_plan_sha256"] == SHA
+        assert plan["staged_client_plan_sha256"] == STAGED_PLAN_SHA
+        assert plan["client_plan_sha256"] == CANON_PLAN_SHA
+        assert plan["native_manifest_digest"] == CANON_MANIFEST_SHA
+        assert result["route_transition_plan"]["candidate_client_plan_sha256"] == CANON_PLAN_SHA
         assert str(canonical) in plan["candidate_native_manifest_path"]
 
     def test_prepare_without_canonical_has_no_extra_fields(
@@ -238,7 +270,7 @@ class TestCanonicalApply:
 
         def mock_promote(**kwargs: object) -> dict[str, object]:
             promotion_calls.append(kwargs)
-            return {"status": "COMMITTED", "client_plan_sha256": SHA}
+            return {"status": "COMMITTED", "client_plan_sha256": CANON_PLAN_SHA}
 
         monkeypatch.setattr(maintenance, "promote_client_plan", mock_promote)
 
@@ -296,7 +328,7 @@ class TestCanonicalApply:
 
         def mock_promote(**kwargs: object) -> dict[str, object]:
             promotion_calls.append(kwargs)
-            return {"status": "COMMITTED", "client_plan_sha256": SHA}
+            return {"status": "COMMITTED", "client_plan_sha256": CANON_PLAN_SHA}
 
         monkeypatch.setattr(maintenance, "promote_client_plan", mock_promote)
 
@@ -342,7 +374,7 @@ class TestCanonicalRollback:
 
         def mock_promote(**kwargs: object) -> dict[str, object]:
             promotion_calls.append("promote")
-            return {"status": "COMMITTED", "client_plan_sha256": SHA}
+            return {"status": "COMMITTED", "client_plan_sha256": CANON_PLAN_SHA}
 
         def mock_rollback(**kwargs: object) -> dict[str, object] | None:
             rollback_calls.append(kwargs)
@@ -382,3 +414,4 @@ class TestCanonicalRollback:
         rb = rollback_calls[0]
         assert str(rb["production_runtime_root"]) == str(canonical)
         assert rb["verify_routes"] is False
+        assert rb["staged_client_plan_sha256"] == STAGED_PLAN_SHA
