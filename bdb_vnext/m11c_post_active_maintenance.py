@@ -550,19 +550,34 @@ def prepare_post_active_maintenance(
             required_capabilities=required,
         )
         client = _client_identity(client_root, source_head=source_head, source_tree=source_tree)
+        target_client = dict(client)
+        if needs_canonical_promotion:
+            # Client plans are path-bound.  Compute and approve the exact
+            # canonical production document set before any mutation so the
+            # maintenance plan binds the post-promotion SHA, not the staged
+            # temporary-runtime SHA.
+            staged_plan = query_client_plan(runtime_root=client_root)["plan"]
+            production_plan, _production_config, _production_manifest = _production_documents(
+                production=canonical_root,
+                plan=staged_plan,
+                browser_digest=client["browser_bundle_digest"],
+                legacy=legacy,
+                bootstrap=authority,
+            )
+            target_client = {
+                **client,
+                "client_plan_sha256": production_plan["client_plan_sha256"],
+                "native_manifest_digest": production_plan["native_manifest_sha256"],
+                "native_manifest_path": production_plan["native_manifest_path"],
+            }
+
         routes = _route_observation(client_root)
         old_routes = [dict(item) for item in canonical_routes(routes)]
-        if needs_canonical_promotion:
-            # Compute the canonical manifest path where HKCU will finally point.
-            canonical_manifest_path = str(
-                canonical_root / "clients" / "native-host" / Path(client["native_manifest_path"]).name
-            )
-        else:
-            canonical_manifest_path = client["native_manifest_path"]
+        canonical_manifest_path = target_client["native_manifest_path"]
         route_payload = _route_plan_payload(
             maintenance_id=maintenance_id,
             current=current,
-            client=client,
+            client=target_client,
             candidate_source_head=source_head,
             candidate_source_tree=source_tree,
             candidate_manifest_path=canonical_manifest_path,
@@ -582,7 +597,7 @@ def prepare_post_active_maintenance(
             "source_head": source_head,
             "source_tree": source_tree,
             "candidate_bundle_sha256": bundle_sha,
-            "client_plan_sha256": client["client_plan_sha256"],
+            "client_plan_sha256": target_client["client_plan_sha256"],
             "native_artifact_manifest_sha256": native_artifact_sha,
             "current_state_sha256": state["state_sha256"],
             "route_transition_plan_sha256": route_digest,
@@ -602,9 +617,9 @@ def prepare_post_active_maintenance(
             "source_head": source_head,
             "source_tree": source_tree,
             "candidate_client_runtime_root": str(client_root),
-            "client_plan_sha256": client["client_plan_sha256"],
-            "browser_bundle_digest": client["browser_bundle_digest"],
-            "native_manifest_digest": client["native_manifest_digest"],
+            "client_plan_sha256": target_client["client_plan_sha256"],
+            "browser_bundle_digest": target_client["browser_bundle_digest"],
+            "native_manifest_digest": target_client["native_manifest_digest"],
             "native_artifact_manifest_sha256": native_artifact_sha,
             "protocol_generation": PROTOCOL_GENERATION,
             "control_store_schema": CONTROL_STORE_SCHEMA,
@@ -642,9 +657,9 @@ def prepare_post_active_maintenance(
             "candidate_source_head": source_head,
             "candidate_source_tree": source_tree,
             "candidate_bundle_sha256": bundle_sha,
-            "client_plan_sha256": client["client_plan_sha256"],
-            "browser_bundle_digest": client["browser_bundle_digest"],
-            "native_manifest_digest": client["native_manifest_digest"],
+            "client_plan_sha256": target_client["client_plan_sha256"],
+            "browser_bundle_digest": target_client["browser_bundle_digest"],
+            "native_manifest_digest": target_client["native_manifest_digest"],
             "native_artifact_manifest_sha256": native_artifact_sha,
             "current_state_sha256": state["state_sha256"],
             "current_active_manifest_sha256": state["active_manifest_sha256"],
@@ -918,11 +933,19 @@ def apply_post_active_maintenance(
             required_capabilities=tuple(plan["required_capabilities"]),
         )
         client = _client_identity(client_root, source_head=plan["candidate_source_head"], source_tree=plan["candidate_source_tree"])
-        if any(client[field] != plan[field] for field in ("client_plan_sha256", "browser_bundle_digest", "native_manifest_digest")):
-            _fail("maintenance_client_binding_mismatch", "observed candidate client differs from the approved plan")
-        # When canonical promotion is active, the staged manifest path differs
-        # from the plan's canonical_native_manifest_path.  Skip this check.
-        if not needs_canonical_promotion:
+        if needs_canonical_promotion:
+            # The immutable staged plan is intentionally path-bound to the
+            # temporary runtime.  The approved maintenance plan binds the
+            # separately precomputed canonical target plan, so pre-promotion
+            # validation must compare against staged_client_plan_sha256.
+            if (
+                client["client_plan_sha256"] != plan["staged_client_plan_sha256"]
+                or client["browser_bundle_digest"] != plan["browser_bundle_digest"]
+            ):
+                _fail("maintenance_client_binding_mismatch", "observed staged candidate client differs from the approved staged subject")
+        else:
+            if any(client[field] != plan[field] for field in ("client_plan_sha256", "browser_bundle_digest", "native_manifest_digest")):
+                _fail("maintenance_client_binding_mismatch", "observed candidate client differs from the approved plan")
             if client.get("native_manifest_path") != plan["candidate_native_manifest_path"]:
                 _fail("maintenance_client_binding_mismatch", "observed Native manifest path differs from the approved plan")
         if fault_hook:
