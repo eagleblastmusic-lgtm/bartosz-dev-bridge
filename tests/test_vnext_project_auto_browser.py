@@ -330,7 +330,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                 assert.equal(submitMessages.length, 0, "stale/wrong gate must not submit");
                 assert.equal(sendClicks, 0);
               }
-            }, mode === "noeffect" ? 5300 : 350);
+            }, mode === "noeffect" ? 5300 : 1200);
             '''
         ),
         encoding="utf-8",
@@ -366,8 +366,8 @@ def test_vnext_project_auto_contract_preserves_manual_fallback_and_stops_at_boun
     assert "document.hasFocus" not in adapter
     assert '"SEND_ATTEMPTED"' in adapter
     assert '"SEND_CONFIRMED"' in adapter
-    assert 'projectAck(claimed.launch_id, claimId, {' in adapter
+    assert 'projectAck(claimed.launch_id, claimId, conversationId, {' in adapter
     send_index = adapter.index('const sent = await projectAutoSendInserted')
-    assert send_index < adapter.index('const acknowledged = await projectAck(claimed.launch_id, claimId, {', send_index)
+    assert send_index < adapter.index('const acknowledged = await projectAck(claimed.launch_id, claimId, conversationId, {', send_index)
     assert 'handoff_status: "SENT"' in worker
     assert 'launch_handoff' in native

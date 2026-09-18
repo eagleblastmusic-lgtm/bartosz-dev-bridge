@@ -252,3 +252,41 @@ def test_sent_handoff_stays_additional_and_precedes_durable_delivery_ack(tmp_pat
 
     assert response["status"] == "acknowledged"
     assert sequence == ["handoff_sent", "canonical_ack", "queue_ack"]
+
+
+def test_manual_ack_without_conversation_id_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sequence: list[str] = []
+    launch = _launch()
+    queue = _Queue(launch, sequence)
+
+    monkeypatch.setattr("bdb_vnext.m9b_native_host._project_launch_queue", lambda _root: queue)
+    monkeypatch.setattr(
+        "bdb_vnext.m9b_native_host.ProjectLaunchCanonicalState",
+        lambda _root: _Canonical(_root, sequence=sequence),
+    )
+
+    with pytest.raises(M9bNativeError) as exc:
+        handle_message(_config(tmp_path), _message("project_launch_ack"))
+
+    assert exc.value.code == "execution_conversation_invalid"
+    assert sequence == []
+    assert queue.peek() is launch
+
+
+def test_manual_ack_with_conversation_id_succeeds_and_clears_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sequence: list[str] = []
+    launch = _launch()
+    queue = _Queue(launch, sequence)
+
+    monkeypatch.setattr("bdb_vnext.m9b_native_host._project_launch_queue", lambda _root: queue)
+    monkeypatch.setattr(
+        "bdb_vnext.m9b_native_host.ProjectLaunchCanonicalState",
+        lambda _root: _Canonical(_root, sequence=sequence),
+    )
+
+    response = handle_message(_config(tmp_path), _message("project_launch_ack", conversation_id=CONVERSATION_ID))
+
+    assert response["status"] == "acknowledged"
+    assert sequence == ["canonical_ack", "queue_ack"]
+    assert queue.peek() is None
+

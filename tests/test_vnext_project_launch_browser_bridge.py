@@ -74,6 +74,7 @@ def test_vnext_native_project_launch_operations_reuse_one_queue_and_do_not_requi
     queue = ProjectLaunchQueueAdapter(queue_path)
     launch = queue.enqueue(repo_alias="demo-project", prompt="Create\ncalculator", project_id="p", task_id="t")
     monkeypatch.setattr("bdb_vnext.m9b_native_host.default_vnext_runtime_root", lambda: tmp_path / "wrong-packaged-root")
+    monkeypatch.setattr("bdb_vnext.m9b_native_host.ProjectLaunchCanonicalState.is_canonical_launch", staticmethod(lambda _launch: False))
     config = VNextNativeConfig(
         runtime_root=tmp_path / "runtime",
         legacy_runtime_root=tmp_path / "legacy",
@@ -1145,7 +1146,7 @@ def test_vnext_popup_inserts_pending_prompt_into_user_selected_conversation(tmp_
               messages.length = 0;
               const result = await new Promise((resolve) => listeners[0]({ type: "bdb-vnext-project-launch-insert" }, {}, resolve));
               assert.equal(result.ok, true);
-              assert.equal(result.code, "inserted");
+              assert.equal(result.code, "project_prompt_inserted");
               assert.equal(result.launch_id, launchId);
               assert.equal(composer.textContent, launch.prompt, "the selected conversation composer receives the pending prompt");
                 assert.deepEqual(messages.map((item) => item.type), [
@@ -1154,6 +1155,7 @@ def test_vnext_popup_inserts_pending_prompt_into_user_selected_conversation(tmp_
                   "bdb-vnext-project-launch-ack"
                 ]);
                 assert.equal(messages[1].conversation_id, "abcdef12-3456-4789-abcd-abcdef123456");
+                assert.equal(messages[2].conversation_id, "abcdef12-3456-4789-abcd-abcdef123456");
                 assert.equal(messages.some((item) => item.type === "bdb-vnext-submit"), false);
             }, 25);
             '''
@@ -1173,13 +1175,15 @@ def test_vnext_popup_inserts_pending_prompt_into_user_selected_conversation(tmp_
     popup_js = (ROOT / "browser_extension_vnext" / "popup.js").read_text(encoding="utf-8")
     assert 'id="insert-project-prompt"' in popup
     assert "Wstaw prompt początkowy" in popup
-    assert "nowej bez /c/" in popup
+    assert "adresem /c/..." in popup
+    assert "nowej bez /c/" not in popup
     assert 'chrome.tabs.query({ active: true, currentWindow: true })' in popup_js
     assert 'type: "bdb-vnext-project-launch-insert"' in popup_js
-    assert "nowa bez /c/" in popup_js
+    assert "istniejącą rozmowę ChatGPT z adresem /c/..." in popup_js
+    assert "nowa bez /c/" not in popup_js
 
 
-def test_vnext_popup_inserts_pending_prompt_into_genuinely_new_chat(tmp_path: Path) -> None:
+def test_vnext_popup_rejects_new_chat_without_conversation_id(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for the Browser content contract")
@@ -1266,15 +1270,10 @@ def test_vnext_popup_inserts_pending_prompt_into_genuinely_new_chat(tmp_path: Pa
               assert.equal(listeners.length, 1, "new-chat content adapter must expose popup insertion");
               messages.length = 0;
               const result = await new Promise((resolve) => listeners[0]({ type: "bdb-vnext-project-launch-insert" }, {}, resolve));
-              assert.equal(result.ok, true);
-              assert.equal(result.code, "inserted");
-              assert.equal(composer.textContent, launch.prompt);
-              assert.deepEqual(messages.map((item) => item.type), [
-                "bdb-vnext-project-launch-peek",
-                "bdb-vnext-project-launch-claim",
-                "bdb-vnext-project-launch-ack"
-              ]);
-              assert.equal(messages.some((item) => item.type === "bdb-vnext-submit"), false);
+              assert.equal(result.ok, false);
+              assert.equal(result.code, "conversation_not_eligible");
+              assert.equal(composer.textContent, "");
+              assert.deepEqual(messages, []);
             }, 25);
             '''
         ),

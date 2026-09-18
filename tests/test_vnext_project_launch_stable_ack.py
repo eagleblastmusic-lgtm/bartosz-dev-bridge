@@ -33,7 +33,7 @@ def test_stable_repeated_match_is_required_before_manual_ack() -> None:
     )
     verify = handle.index("const stableInsertion = await projectVerifyInsertedStable")
     unstable = handle.index('return projectLaunchResult(false, "project_prompt_inserted_unverified"', verify)
-    manual_ack = handle.rindex("const acknowledged = await projectAck(claimed.launch_id, claimId);")
+    manual_ack = handle.rindex("const acknowledged = await projectAck(claimed.launch_id, claimId, conversationId);")
     assert verify < unstable < manual_ack
     assert 'return projectLaunchResult(true, "project_prompt_inserted"' in handle[manual_ack:]
 
@@ -44,7 +44,7 @@ def test_ack_failure_after_visible_insert_is_reported_separately() -> None:
         "async function projectHandleLaunch",
         "async function projectInsertSelectedLaunch",
     )
-    manual_ack = handle.rindex("const acknowledged = await projectAck(claimed.launch_id, claimId);")
+    manual_ack = handle.rindex("const acknowledged = await projectAck(claimed.launch_id, claimId, conversationId);")
     tail = handle[manual_ack:]
     assert 'return projectLaunchResult(false, "project_prompt_ack_failed"' in tail
     assert 'return projectLaunchResult(false, "project_prompt_not_inserted"' not in tail

@@ -487,13 +487,9 @@ function projectConversationId() {
   return match ? match[1] : null;
 }
 
-function projectBlankNewChat() {
-  return location.protocol === "https:" && location.hostname === "chatgpt.com" && (location.pathname === "/" || location.pathname === "");
-}
-
 function projectPageEligible({ selectedByUser = false } = {}) {
   return Boolean(
-    (projectConversationId() || (selectedByUser && projectBlankNewChat())) &&
+    projectConversationId() &&
     document.visibilityState === "visible"
   );
 }
@@ -741,20 +737,20 @@ function projectSendEffectObserved(prompt, baselineCount, conversationId) {
 }
 
 function projectDelay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  if (typeof setTimeout === "function") {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  }
+  return Promise.resolve();
 }
 
 async function projectVerifyInsertedStable(prompt, {
   conversationId = null,
-  blankNewChat = false,
   selectedByUser = false
 } = {}) {
   const observations = 3;
   for (let observation = 0; observation < observations; observation += 1) {
     if (observation > 0) await projectDelay(150);
-    const sameSelection = conversationId
-      ? projectConversationId() === conversationId
-      : blankNewChat && !projectConversationId() && projectBlankNewChat();
+    const sameSelection = Boolean(conversationId && projectConversationId() === conversationId);
     if (!projectPageEligible({ selectedByUser }) || !sameSelection) return false;
     const composer = projectFindComposer();
     if (!composer || projectComposerText(composer) !== prompt) return false;
@@ -839,12 +835,22 @@ async function projectClaim(launch, claimId, conversationId) {
   return projectValidLaunch(result.response.launch) ? result.response.launch : null;
 }
 
-async function projectAck(launchId, claimId, handoff = null) {
+async function projectAck(launchId, claimId, conversationId = null, handoff = null) {
+  let explicitConversation = null;
+  let handoffObj = handoff;
+  if (typeof conversationId === "string") {
+    explicitConversation = conversationId;
+  } else if (conversationId && typeof conversationId === "object" && handoff === null) {
+    handoffObj = conversationId;
+    explicitConversation = handoffObj.conversation_id || null;
+  }
+  const finalConversation = (handoffObj && handoffObj.conversation_id) || explicitConversation;
   const result = await chrome.runtime.sendMessage({
     type: "bdb-vnext-project-launch-ack",
     launch_id: launchId,
     claim_id: claimId,
-    ...(handoff ? { handoff } : {})
+    ...(finalConversation ? { conversation_id: finalConversation } : {}),
+    ...(handoffObj ? { handoff: handoffObj } : {})
   });
   return Boolean(result && result.ok === true && result.response && result.response.status === "acknowledged");
 }
@@ -861,10 +867,12 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
     return projectLaunchResult(false, "project_prompt_not_inserted", launchId);
   }
   const conversationId = projectConversationId();
-  const blankNewChat = !conversationId && selectedByUser && projectBlankNewChat();
+  if (!conversationId) {
+    return projectLaunchResult(false, "conversation_not_eligible", launchId);
+  }
   const autoMode = automatic || launch.auto_send === true;
   const composer = projectFindComposer();
-  if ((!conversationId && !blankNewChat) || !composer) {
+  if (!composer) {
     return projectLaunchResult(false, "project_prompt_not_inserted", launchId);
   }
   const bindings = await projectReadBindings();
@@ -886,9 +894,7 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
   const claimed = await projectClaim(launch, claimId, conversationId);
   if (!claimed) return projectLaunchResult(false, "project_prompt_not_inserted", launchId);
   const claimedLaunchId = claimed.launch_id || launchId;
-  const sameSelection = conversationId
-    ? projectConversationId() === conversationId
-    : !projectConversationId() && projectBlankNewChat();
+  const sameSelection = projectConversationId() === conversationId;
   if (!projectPageEligible({ selectedByUser }) || !sameSelection) {
     return projectLaunchResult(false, "project_prompt_not_inserted", claimedLaunchId);
   }
@@ -904,7 +910,7 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
     return projectLaunchResult(true, "project_prompt_inserted", claimedLaunchId);
   }
   if (autoMode && existing?.state === "SEND_CONFIRMED") {
-    const acknowledged = await projectAck(claimed.launch_id, claimId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
+    const acknowledged = await projectAck(claimed.launch_id, claimId, conversationId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
     if (acknowledged) {
       await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
       return projectLaunchResult(true, "project_prompt_inserted", claimedLaunchId);
@@ -918,7 +924,7 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
         send_baseline_count: baseline,
         send_attempt_token: existing.send_attempt_token || null
       });
-      const acknowledged = await projectAck(claimed.launch_id, claimId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
+      const acknowledged = await projectAck(claimed.launch_id, claimId, conversationId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
       if (acknowledged) {
         await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
         return projectLaunchResult(true, "project_prompt_inserted", claimedLaunchId);
@@ -941,7 +947,6 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
     }
     const stableInsertion = await projectVerifyInsertedStable(claimed.prompt, {
       conversationId,
-      blankNewChat,
       selectedByUser
     });
     if (!stableInsertion) {
@@ -952,7 +957,7 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
     if (autoMode) {
       if (canonicalStatus?.launch_handoff?.status === "SENT") {
         projectAutoState = { phase: "sent", launch_id: claimed.launch_id, execution_binding_id: claimed.execution_binding_id, token: "recovered-sent" };
-        const acknowledged = await projectAck(claimed.launch_id, claimId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
+        const acknowledged = await projectAck(claimed.launch_id, claimId, conversationId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
         if (acknowledged) {
           if (conversationId) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
           return projectLaunchResult(true, "project_prompt_inserted", claimedLaunchId);
@@ -966,14 +971,14 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
       projectAutoState = { phase: "inserting_prompt", launch_id: claimed.launch_id, execution_binding_id: claimed.execution_binding_id, token };
       const sent = await projectAutoSendInserted(claimed, claimId, claimed.prompt, projectFindComposer(), token);
       if (!sent) return projectLaunchResult(false, "project_auto_send_failed", claimedLaunchId);
-      const acknowledged = await projectAck(claimed.launch_id, claimId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
+      const acknowledged = await projectAck(claimed.launch_id, claimId, conversationId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
       if (acknowledged) {
         if (conversationId) await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
         return projectLaunchResult(true, "project_prompt_inserted", claimedLaunchId);
       }
       return projectLaunchResult(false, "project_prompt_ack_failed", claimedLaunchId);
     }
-    const acknowledged = await projectAck(claimed.launch_id, claimId);
+    const acknowledged = await projectAck(claimed.launch_id, claimId, conversationId);
     if (!acknowledged) {
       projectAnnounce("BDB vNext: prompt is present, but launch ACK failed; do not send yet.", "warning");
       return projectLaunchResult(false, "project_prompt_ack_failed", claimedLaunchId);
