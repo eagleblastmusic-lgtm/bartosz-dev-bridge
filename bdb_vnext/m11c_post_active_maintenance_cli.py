@@ -21,6 +21,7 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("authority-root", "candidate-bundle-root", "candidate-client-runtime-root", "source-head", "source-tree", "native-artifact-manifest-sha256", "maintenance-id"):
         prepare.add_argument(f"--{name}", required=True)
     prepare.add_argument("--candidate-bundle-sha256", required=True)
+    prepare.add_argument("--canonical-runtime-root", default=None)
     query = sub.add_parser("query")
     query.add_argument("--authority-root", required=True)
     query.add_argument("--maintenance-id", required=True)
@@ -45,6 +46,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 source_tree=args.source_tree,
                 native_artifact_manifest_sha256=args.native_artifact_manifest_sha256,
                 maintenance_id=args.maintenance_id,
+                canonical_runtime_root=args.canonical_runtime_root,
             )
         elif args.command == "query":
             result = query_post_active_maintenance(authority_root=args.authority_root, maintenance_id=args.maintenance_id)

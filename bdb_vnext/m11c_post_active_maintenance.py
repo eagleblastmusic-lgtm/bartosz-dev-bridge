@@ -36,6 +36,12 @@ from bdb_vnext.composition import (
     GENERATION_ID,
     PROTOCOL_GENERATION,
     RUNTIME_ID,
+    default_vnext_runtime_root,
+)
+from bdb_vnext.m11c_client_promotion import (
+    _production_documents,
+    promote_client_plan,
+    rollback_client_promotion,
 )
 from bdb_vnext.m11a_bootstrap_slots import (
     SlotSource,
@@ -327,7 +333,15 @@ def _load_candidate(authority: Path, digest: str) -> dict[str, Any]:
     route_expected = {
         "route_transition_plan_sha256", "old_native_routes", "candidate_native_manifest_path",
     }
-    expected = legacy_expected if schema == LEGACY_MAINTENANCE_CANDIDATE_SCHEMA else legacy_expected | route_expected
+    canonical_optional = {"canonical_runtime_root", "staged_client_plan_sha256"}
+    if schema == LEGACY_MAINTENANCE_CANDIDATE_SCHEMA:
+        expected = legacy_expected
+    else:
+        base = legacy_expected | route_expected
+        extra = set(document) - base
+        if extra and extra != canonical_optional:
+            _fail("maintenance_candidate_invalid", "maintenance candidate fields differ")
+        expected = base | extra
     if set(document) != expected or schema not in {LEGACY_MAINTENANCE_CANDIDATE_SCHEMA, MAINTENANCE_CANDIDATE_SCHEMA}:
         _fail("maintenance_candidate_invalid", "maintenance candidate fields differ")
     if document.get("runtime_id") != RUNTIME_ID or document.get("generation_id") != GENERATION_ID:
@@ -386,7 +400,15 @@ def _load_plan(authority: Path, maintenance_id: str) -> dict[str, Any]:
         "route_transition_plan_sha256", "old_native_routes", "candidate_native_manifest_path",
         "legacy_route_present",
     }
-    expected = legacy_expected if schema == LEGACY_MAINTENANCE_PLAN_SCHEMA else legacy_expected | route_expected
+    canonical_optional = {"canonical_runtime_root", "staged_client_plan_sha256"}
+    if schema == LEGACY_MAINTENANCE_PLAN_SCHEMA:
+        expected = legacy_expected
+    else:
+        base = legacy_expected | route_expected
+        extra = set(document) - base
+        if extra and extra != canonical_optional:
+            _fail("maintenance_plan_invalid", "maintenance plan fields differ")
+        expected = base | extra
     if set(document) != expected or schema not in {LEGACY_MAINTENANCE_PLAN_SCHEMA, MAINTENANCE_PLAN_SCHEMA}:
         _fail("maintenance_plan_invalid", "maintenance plan fields differ")
     if document.get("runtime_id") != RUNTIME_ID or document.get("generation_id") != GENERATION_ID:
@@ -495,6 +517,7 @@ def prepare_post_active_maintenance(
     source_tree: str,
     native_artifact_manifest_sha256: str,
     maintenance_id: str,
+    canonical_runtime_root: str | Path | None = None,
     preflight_evidence: Mapping[str, Any] | None = None,
     fault_hook: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
@@ -503,6 +526,7 @@ def prepare_post_active_maintenance(
     authority = _absolute_path(authority_root, field="authority_root")
     candidate_root = _absolute_path(candidate_bundle_root, field="candidate_bundle_root")
     client_root = _absolute_path(candidate_client_runtime_root, field="candidate_client_runtime_root")
+    canonical_root = _absolute_path(canonical_runtime_root, field="canonical_runtime_root") if canonical_runtime_root is not None else None
     source_head = _check_sha40(source_head, "source_head")
     source_tree = _check_sha40(source_tree, "source_tree")
     bundle_sha = _check_digest(candidate_bundle_sha256, "candidate_bundle_sha256")
@@ -511,6 +535,7 @@ def prepare_post_active_maintenance(
     evidence = dict(preflight_evidence or {})
     if any(not isinstance(key, str) or not isinstance(value, str) or _DIGEST.fullmatch(value) is None for key, value in evidence.items()):
         _fail("preflight_evidence_invalid", "preflight evidence must be a mapping of names to digests")
+    needs_canonical_promotion = canonical_root is not None and canonical_root != client_root
     with BootstrapLock(authority / "bootstrap.lock"):
         current = _active_observation(authority)
         state = current["state"]
@@ -527,13 +552,20 @@ def prepare_post_active_maintenance(
         client = _client_identity(client_root, source_head=source_head, source_tree=source_tree)
         routes = _route_observation(client_root)
         old_routes = [dict(item) for item in canonical_routes(routes)]
+        if needs_canonical_promotion:
+            # Compute the canonical manifest path where HKCU will finally point.
+            canonical_manifest_path = str(
+                canonical_root / "clients" / "native-host" / Path(client["native_manifest_path"]).name
+            )
+        else:
+            canonical_manifest_path = client["native_manifest_path"]
         route_payload = _route_plan_payload(
             maintenance_id=maintenance_id,
             current=current,
             client=client,
             candidate_source_head=source_head,
             candidate_source_tree=source_tree,
-            candidate_manifest_path=client["native_manifest_path"],
+            candidate_manifest_path=canonical_manifest_path,
             old_routes=old_routes,
         )
         route_digest = _digest(route_payload)
@@ -556,7 +588,7 @@ def prepare_post_active_maintenance(
             "route_transition_plan_sha256": route_digest,
         }
         preparation_sha = _digest(preparation_payload)
-        payload = {
+        payload: dict[str, Any] = {
             "schema": MAINTENANCE_CANDIDATE_SCHEMA,
             "runtime_id": RUNTIME_ID,
             "generation_id": GENERATION_ID,
@@ -586,14 +618,17 @@ def prepare_post_active_maintenance(
             "preflight_evidence": evidence,
             "route_transition_plan_sha256": route_digest,
             "old_native_routes": old_routes,
-            "candidate_native_manifest_path": client["native_manifest_path"],
+            "candidate_native_manifest_path": canonical_manifest_path,
         }
+        if needs_canonical_promotion:
+            payload["canonical_runtime_root"] = str(canonical_root)
+            payload["staged_client_plan_sha256"] = client["client_plan_sha256"]
         candidate_digest = _digest(payload)
         candidate = {**payload, "candidate_manifest_sha256": candidate_digest}
         _write_immutable(_candidate_path(authority, candidate_digest), candidate, code="maintenance_candidate")
         if fault_hook:
             fault_hook("after_candidate_publication")
-        plan_payload = {
+        plan_payload: dict[str, Any] = {
             "schema": MAINTENANCE_PLAN_SCHEMA,
             "runtime_id": RUNTIME_ID,
             "generation_id": GENERATION_ID,
@@ -621,9 +656,12 @@ def prepare_post_active_maintenance(
             "preflight_evidence": evidence,
             "route_transition_plan_sha256": route_digest,
             "old_native_routes": old_routes,
-            "candidate_native_manifest_path": client["native_manifest_path"],
+            "candidate_native_manifest_path": canonical_manifest_path,
             "legacy_route_present": False,
         }
+        if needs_canonical_promotion:
+            plan_payload["canonical_runtime_root"] = str(canonical_root)
+            plan_payload["staged_client_plan_sha256"] = client["client_plan_sha256"]
         plan_digest = _digest(plan_payload)
         plan = {**plan_payload, "plan_sha256": plan_digest}
         if fault_hook:
@@ -688,7 +726,7 @@ def _result(*, authority: Path, maintenance_id: str, expected: str, final: Mappi
 def _check_candidate_plan_binding(candidate: Mapping[str, Any], plan: Mapping[str, Any]) -> None:
     if "plan_sha256" in candidate:
         _fail("maintenance_candidate_invalid", "candidate unexpectedly contains a plan binding")
-    bindings = (
+    bindings = [
         ("candidate_manifest_sha256", "candidate_manifest_sha256"),
         ("source_head", "candidate_source_head"),
         ("source_tree", "candidate_source_tree"),
@@ -699,7 +737,10 @@ def _check_candidate_plan_binding(candidate: Mapping[str, Any], plan: Mapping[st
         ("route_transition_plan_sha256", "route_transition_plan_sha256"),
         ("old_native_routes", "old_native_routes"),
         ("candidate_native_manifest_path", "candidate_native_manifest_path"),
-    )
+    ]
+    if "canonical_runtime_root" in candidate or "canonical_runtime_root" in plan:
+        bindings.append(("canonical_runtime_root", "canonical_runtime_root"))
+        bindings.append(("staged_client_plan_sha256", "staged_client_plan_sha256"))
     if any(candidate.get(left) != plan.get(right) for left, right in bindings):
         _fail("maintenance_plan_binding_mismatch", "candidate differs from the approved plan")
 
@@ -826,11 +867,20 @@ def apply_post_active_maintenance(
         if transition_state is None:
             _fail("route_transition_state_missing", "exact route transition state is missing")
         client_root = Path(candidate["candidate_client_runtime_root"])
+        # Determine canonical root: if the plan was prepared with a distinct
+        # canonical_runtime_root, the final route and client verification must
+        # target that root instead of the temporary staging location.
+        canonical_root_str = candidate.get("canonical_runtime_root") or plan.get("canonical_runtime_root")
+        needs_canonical_promotion = canonical_root_str is not None
+        canonical_root = Path(canonical_root_str) if needs_canonical_promotion else client_root
+        # Route observation and writing always target the canonical root
+        # because the route_transition_plan binds the canonical manifest path.
+        route_root = canonical_root
         current, route = _recover_route_if_needed(
             authority=authority,
             plan=plan,
             current=current,
-            client_root=client_root,
+            client_root=route_root,
             transition_state=transition_state,
             fault_hook=fault_hook,
         )
@@ -841,7 +891,7 @@ def apply_post_active_maintenance(
             _verify_final_route(plan, route)
             if current["active"]["source_commit"] != plan["candidate_source_head"] or current["state"]["candidate_manifest_sha256"] is not None:
                 _fail("route_bootstrap_mismatch", "recovered Bootstrap does not bind the candidate")
-            recovered_client = _client_identity(client_root, source_head=plan["candidate_source_head"], source_tree=plan["candidate_source_tree"])
+            recovered_client = _client_identity(canonical_root, source_head=plan["candidate_source_head"], source_tree=plan["candidate_source_tree"])
             if recovered_client.get("client_plan_sha256") != plan["client_plan_sha256"] or recovered_client.get("native_manifest_path") != plan["candidate_native_manifest_path"]:
                 _fail("maintenance_readback_mismatch", "recovered client does not bind the candidate")
             completed_state = _write_transition_state(
@@ -870,8 +920,11 @@ def apply_post_active_maintenance(
         client = _client_identity(client_root, source_head=plan["candidate_source_head"], source_tree=plan["candidate_source_tree"])
         if any(client[field] != plan[field] for field in ("client_plan_sha256", "browser_bundle_digest", "native_manifest_digest")):
             _fail("maintenance_client_binding_mismatch", "observed candidate client differs from the approved plan")
-        if client.get("native_manifest_path") != plan["candidate_native_manifest_path"]:
-            _fail("maintenance_client_binding_mismatch", "observed Native manifest path differs from the approved plan")
+        # When canonical promotion is active, the staged manifest path differs
+        # from the plan's canonical_native_manifest_path.  Skip this check.
+        if not needs_canonical_promotion:
+            if client.get("native_manifest_path") != plan["candidate_native_manifest_path"]:
+                _fail("maintenance_client_binding_mismatch", "observed Native manifest path differs from the approved plan")
         if fault_hook:
             fault_hook("after_revalidation_before_switch")
         _write_transition_state(
@@ -884,15 +937,29 @@ def apply_post_active_maintenance(
         )
         switched = False
         bootstrap_published = False
+        clients_promoted = False
         old_active = current["active"]
         old_previous = current["previous"]
         try:
+            # Step 1: Promote clients from staged to canonical root if needed.
+            if needs_canonical_promotion:
+                if fault_hook:
+                    fault_hook("before_client_promotion")
+                promote_client_plan(
+                    staged_runtime_root=client_root,
+                    production_runtime_root=canonical_root,
+                    verify_routes=False,
+                )
+                clients_promoted = True
+                if fault_hook:
+                    fault_hook("after_client_promotion")
+            # Step 2: Switch routes to canonical manifest.
             try:
                 route = dict(transition_to_candidate(
                     old_routes=plan["old_native_routes"],
                     candidate_manifest_path=plan["candidate_native_manifest_path"],
-                    observe=lambda: _route_observation(client_root),
-                    write_view=lambda view, manifest: set_windows_target_native_route_view(runtime_root=client_root, view=view, manifest_path=manifest),
+                    observe=lambda: _route_observation(route_root),
+                    write_view=lambda view, manifest: set_windows_target_native_route_view(runtime_root=route_root, view=view, manifest_path=manifest),
                     fault_hook=fault_hook,
                 ))
             except RouteTransitionError as exc:
@@ -977,11 +1044,11 @@ def apply_post_active_maintenance(
             if fault_hook:
                 fault_hook("before_final_verification")
             final = _active_observation(authority)
-            final_route = _route_observation(client_root)
+            final_route = _route_observation(route_root)
             _verify_final_route(plan, final_route)
             if final["active"]["source_commit"] != plan["candidate_source_head"] or final["state"]["candidate_manifest_sha256"] is not None:
                 _fail("maintenance_readback_mismatch", "final Bootstrap readback differs from the approved candidate")
-            final_client = _client_identity(client_root, source_head=plan["candidate_source_head"], source_tree=plan["candidate_source_tree"])
+            final_client = _client_identity(canonical_root, source_head=plan["candidate_source_head"], source_tree=plan["candidate_source_tree"])
             if final_client.get("client_plan_sha256") != plan["client_plan_sha256"] or final_client.get("native_manifest_path") != plan["candidate_native_manifest_path"]:
                 _fail("maintenance_readback_mismatch", "final client readback differs from the approved plan")
             completed_state = _write_transition_state(
@@ -998,10 +1065,17 @@ def apply_post_active_maintenance(
                     restore_old_route(
                         old_routes=plan["old_native_routes"],
                         candidate_manifest_path=plan["candidate_native_manifest_path"],
-                        observe=lambda: _route_observation(client_root),
-                        write_view=lambda view, manifest: set_windows_target_native_route_view(runtime_root=client_root, view=view, manifest_path=manifest),
+                        observe=lambda: _route_observation(route_root),
+                        write_view=lambda view, manifest: set_windows_target_native_route_view(runtime_root=route_root, view=view, manifest_path=manifest),
                         fault_hook=fault_hook,
                     )
+                    if clients_promoted and needs_canonical_promotion:
+                        rollback_client_promotion(
+                            production_runtime_root=canonical_root,
+                            staged_client_plan_sha256=plan.get("staged_client_plan_sha256", plan["client_plan_sha256"]),
+                            reason="maintenance_pre_bootstrap_rollback",
+                            verify_routes=False,
+                        )
                     rolled_back = _write_transition_state(
                         authority,
                         maintenance_id=maintenance_id,
