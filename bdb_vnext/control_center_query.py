@@ -175,7 +175,11 @@ def read_control_center_authority_summary(
             m9b_plan = post_maint.get("plan") or {}
             observed_m9b = read_activation(runtime_root)
             m9b = observed_m9b.as_dict() if observed_m9b is not None else {}
-        client_root_value = m9b_plan.get("candidate_client_runtime_root")
+        client_root_value = (
+            m9b_plan.get("canonical_runtime_root")
+            or m9b_plan.get("candidate_client_runtime_root")
+            or str(runtime_root)
+        )
         routes: dict[str, Any]
         if isinstance(client_root_value, str) and client_root_value:
             routes = observe_windows_native_routes(runtime_root=client_root_value)
