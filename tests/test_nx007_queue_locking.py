@@ -284,7 +284,7 @@ def test_permission_error_classification_and_native_host_resilience(tmp_path: Pa
     queue.lock_path.write_text(json.dumps(active_lock.to_dict()), encoding="utf-8")
 
     with pytest.raises(ProjectLaunchQueueError) as exc_info:
-        queue.peek()
+        queue.enqueue(repo_alias="test", prompt="test")
 
     assert exc_info.value.code == "queue_busy"
     assert str(exc_info.value) == "project launch queue is busy"

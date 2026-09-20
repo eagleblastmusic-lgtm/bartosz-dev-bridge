@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
@@ -929,6 +930,39 @@ class ProjectCenterWindow(QMainWindow):
         else:
             self._status.setText("BDB AUTO: polecenie zapisane w canonical authority")
 
+    def _synchronize_auto_execution_on_start(self, project: ProjectRecord, receipt: AutoCommandReceipt) -> None:
+        milestone_id = getattr(receipt, "current_milestone_id", None)
+        if not milestone_id:
+            return
+        try:
+            snapshot = self._workflow.execution.begin_milestone_auto(project.project_id, milestone_id=milestone_id)
+            if snapshot.get("status") == "RUNNABLE" and snapshot.get("current_task_id"):
+                pending = self._workflow.queue.peek()
+                if pending is None or pending.project_id != project.project_id or pending.task_id != snapshot.get("current_task_id"):
+                    self._workflow.queue_continue_prompt(project.project_id)
+        except Exception:
+            pass
+
+    def _synchronize_auto_execution_on_continue(self, project: ProjectRecord, receipt: AutoCommandReceipt) -> None:
+        milestone_id = getattr(receipt, "current_milestone_id", None)
+        task_id = getattr(receipt, "current_task_id", None)
+        if not milestone_id:
+            return
+        try:
+            state = self._workflow.memory(project.project_id).read_state()
+            active_run = state.execution.get("active_milestone_run") if isinstance(state.execution, Mapping) else None
+            if not isinstance(active_run, Mapping) or active_run.get("status") != "running" or active_run.get("milestone_id") != milestone_id:
+                self._workflow.execution.begin_milestone_auto(project.project_id, milestone_id=milestone_id)
+            exec_snapshot = self._workflow.execution.snapshot(project.project_id)
+            auto = exec_snapshot.get("milestone_auto") or {}
+            target_task_id = task_id or auto.get("current_task_id")
+            if auto.get("status") == "RUNNABLE" and target_task_id:
+                pending = self._workflow.queue.peek()
+                if pending is None or pending.project_id != project.project_id or pending.task_id != target_task_id:
+                    self._workflow.queue_continue_prompt(project.project_id)
+        except Exception:
+            pass
+
     def _start_auto_from_gui(self) -> None:
         project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
         if project is None:
@@ -943,6 +977,7 @@ class ProjectCenterWindow(QMainWindow):
             return
         try:
             receipt = self._auto_commands_for_project(project).start_auto(view_model.selected_scope, confirmed=True)
+            self._synchronize_auto_execution_on_start(project, receipt)
         except (ProjectCenterAutoCommandError, ProjectExecutionError, ProjectWorkflowError) as exc:
             self._status.setText(f"BDB AUTO zatrzymany — {getattr(exc, 'code', 'auto_start_failed')}")
             return
@@ -957,6 +992,14 @@ class ProjectCenterWindow(QMainWindow):
             return
         try:
             receipt = self._auto_commands_for_project(project).stop_auto()
+            try:
+                exec_snapshot = self._workflow.execution.snapshot(project.project_id)
+                auto = exec_snapshot.get("milestone_auto") or {}
+                run_id = auto.get("milestone_run_id")
+                if run_id and auto.get("status") in {"RUNNABLE", "running"}:
+                    self._workflow.execution.stop_milestone_auto(project.project_id, run_id=run_id)
+            except Exception:
+                pass
         except (ProjectCenterAutoCommandError, ProjectExecutionError, ProjectWorkflowError) as exc:
             self._status.setText(f"BDB AUTO STOP zatrzymany — {getattr(exc, 'code', 'auto_stop_failed')}")
             return
@@ -973,6 +1016,7 @@ class ProjectCenterWindow(QMainWindow):
             # No task or milestone is passed here; canonical orchestrator owns
             # the next-action decision.
             receipt = self._auto_commands_for_project(project).continue_auto()
+            self._synchronize_auto_execution_on_continue(project, receipt)
         except (ProjectCenterAutoCommandError, ProjectExecutionError, ProjectWorkflowError) as exc:
             self._status.setText(f"BDB AUTO Kontynuuj zatrzymane — {getattr(exc, 'code', 'auto_continue_failed')}")
             return
@@ -987,6 +1031,7 @@ class ProjectCenterWindow(QMainWindow):
             return
         try:
             receipt = self._auto_commands_for_project(project).resume_auto()
+            self._synchronize_auto_execution_on_continue(project, receipt)
         except (ProjectCenterAutoCommandError, ProjectExecutionError, ProjectWorkflowError) as exc:
             self._status.setText(f"BDB AUTO Wznów zatrzymane — {getattr(exc, 'code', 'auto_resume_failed')}")
             return

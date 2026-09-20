@@ -1173,10 +1173,30 @@ class CanonicalProjectCenterAutoCommands:
                 plan_version=int(str(plan.plan_version).split(".", 1)[0]),
                 scope_selection_explicit=True,
             )
-            first_milestone_id = plan.milestones[0].milestone_id
+            try:
+                task_statuses, _prerequisite_statuses, gate_inputs = self._canonical_prerequisite_inputs(plan, conn)
+            except Exception:
+                task_statuses, gate_inputs = {}, {}
+
+            initial_milestone_id = None
+            for m in plan.milestones:
+                all_tasks_done = all(
+                    task_statuses.get(t.task_id, getattr(t, "status", "pending")) in {"ACCEPTED", "completed", "skipped"}
+                    for t in plan.tasks
+                    if t.milestone_id == m.milestone_id
+                )
+                m_gate = milestone_gate_id(m.milestone_id)
+                gate_passed = gate_inputs.get(m_gate, "ACCEPTED") == "ACCEPTED"
+                if not (all_tasks_done and gate_passed):
+                    initial_milestone_id = m.milestone_id
+                    break
+
+            if initial_milestone_id is None:
+                initial_milestone_id = plan.milestones[-1].milestone_id if plan.milestones else "P0"
+
             initialized = replace(
                 cursor,
-                current_milestone_id=first_milestone_id,
+                current_milestone_id=initial_milestone_id,
                 plan_identity=f"{plan.project_id}:plan:v{plan.plan_version}",
                 plan_version=self._plan_version_number(plan),
                 disposition="INITIALIZED",
@@ -1187,14 +1207,14 @@ class CanonicalProjectCenterAutoCommands:
                 conn,
                 run_id=cursor.run_id,
                 scope=requested_scope,
-                milestone_id=first_milestone_id,
+                milestone_id=initial_milestone_id,
             )
             state = CanonicalAutoState(
                 project_id=self.project_id,
                 scope=cursor.scope,
                 scope_epoch=cursor.scope_epoch,
                 run_id=cursor.run_id,
-                current_milestone_id=first_milestone_id,
+                current_milestone_id=initial_milestone_id,
                 scope_status="ACTIVE",
                 continuation_status="NONE",
                 reentry_status="NONE",
@@ -1203,7 +1223,7 @@ class CanonicalProjectCenterAutoCommands:
                 plan_available=True,
                 plan_version=self._plan_version_number(plan),
                 canonical_revision=cursor.state_revision + 1,
-                **self._safe_prerequisite_projection(plan, first_milestone_id),
+                **self._safe_prerequisite_projection(plan, initial_milestone_id),
             )
             return self._receipt_from_state("START_AUTO", state, reason_code="AUTO_STARTED")
 
