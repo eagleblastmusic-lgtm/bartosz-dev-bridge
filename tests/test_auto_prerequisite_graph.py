@@ -574,9 +574,25 @@ def test_project_center_gate_actions_confirm_recheck_and_use_workflow_boundary(t
     from bdb_gui.project_center import ProjectCenterWindow
 
     runtime = tmp_path / "runtime"
-    plan = _premium_two_milestone_plan()
-    adapter = _adapter(runtime, plan)
+    plan_document = {
+        "schema": "bdb-project-plan-v1",
+        "project_id": PROJECT_ID,
+        "project_name": "Premium Calculator",
+        "plan_version": "1",
+        "milestones": [
+            {"id": "P0", "title": "P0", "description": "P0 milestone", "status": "active"},
+        ],
+        "tasks": [
+            {"id": "P0-01", "milestone_id": "P0", "title": "P0-01", "description": "P0 task with gate", "status": "pending", "dependencies": ["G0"], "acceptance_criteria": []},
+        ],
+        "current_task_id": "P0-01",
+        "planning_context": {
+            "gates": [{"id": "G0", "title": "Foundation gate", "criteria": "Foundation is accepted."}],
+        },
+    }
+    plan = validate_project_plan(plan_document, expected_project_id=PROJECT_ID)
     memory = ProjectMemoryStore(runtime, PROJECT_ID)
+    memory.ensure_initial_plan(plan)
     record = new_project_record(
         project_id=PROJECT_ID,
         display_name=plan.project_name,
@@ -585,9 +601,15 @@ def test_project_center_gate_actions_confirm_recheck_and_use_workflow_boundary(t
         github_repo=None,
         brief=ProjectBrief("Premium Calculator", "Calculate premiums", "Fixture", "tool"),
     )
-    record = replace(record, plan_imported=True, plan_version=plan.plan_version, total_tasks=2, current_milestone="P1", current_task="P1-01")
+    record = replace(record, plan_imported=True, plan_version=plan.plan_version, total_tasks=1, current_milestone="P0", current_task="P0-01")
     catalog = ProjectCatalog(runtime)
     catalog.upsert(record)
+    adapter = CanonicalProjectCenterAutoCommands(
+        runtime,
+        PROJECT_ID,
+        project_provider=lambda: record,
+        plan_provider=lambda: plan,
+    )
     adapter.start_auto(AutoScope.MILESTONE, confirmed=True)
     adapter.continue_auto()
 
@@ -935,3 +957,181 @@ def test_until_stopped_round_trips_context_prerequisites_through_approved_graph(
     )
     assert runnable.decision.action == ScopeAction.LAUNCH_TASK
     assert runnable.decision.selected_task_id == "T1"
+
+
+def test_project_center_auto_start_synchronizes_milestone_run_and_launch_queue(tmp_path: Path) -> None:
+    import subprocess
+    from collections.abc import Mapping
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+    from bdb_vnext.control_center_query import ControlCenterSnapshot
+    from bdb_vnext.project_catalog import ProjectCatalog
+    from bdb_vnext.project_workflow import ProjectWorkflow
+    from bdb_gui.project_center import ProjectCenterWindow
+
+    runtime = tmp_path / "runtime"
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "BDB"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "bdb@test.invalid"], cwd=repo, capture_output=True, check=True)
+    (repo / "file.txt").write_text("initial", encoding="utf-8")
+    subprocess.run(["git", "add", "file.txt"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True, check=True)
+
+    plan_doc = {
+        "schema": "bdb-project-plan-v1",
+        "project_id": PROJECT_ID,
+        "project_name": "Premium Calculator",
+        "plan_version": "1",
+        "milestones": [
+            {"id": "P0", "title": "P0", "description": "P0", "status": "active"},
+        ],
+        "tasks": [
+            {"id": "P0-01", "milestone_id": "P0", "title": "P0-01", "description": "T1", "status": "pending", "dependencies": [], "acceptance_criteria": []},
+        ],
+        "current_task_id": "P0-01",
+    }
+    plan = validate_project_plan(plan_doc, expected_project_id=PROJECT_ID)
+    catalog = ProjectCatalog(runtime)
+    record = new_project_record(
+        project_id=PROJECT_ID,
+        display_name=plan.project_name,
+        repo_alias="premium-calculator",
+        local_repo_path=repo,
+        github_repo=None,
+        brief=ProjectBrief("Premium Calculator", "Calculate premiums", "Fixture", "tool"),
+    )
+    record = replace(
+        record,
+        plan_imported=True,
+        plan_version=plan.plan_version,
+        total_tasks=len(plan.tasks),
+        current_milestone="P0",
+        current_task="P0-01",
+    )
+    catalog.upsert(record)
+    workflow = ProjectWorkflow(runtime, catalog=catalog)
+    workflow.memory(PROJECT_ID).ensure_initial_plan(plan)
+
+    app = QApplication.instance() or QApplication(["auto-sync-test"])
+    window = ProjectCenterWindow(
+        runtime_root=runtime,
+        catalog=catalog,
+        workflow=workflow,
+        auto_start_confirmation=lambda _vm: True,
+        snapshot_loader=lambda root: ControlCenterSnapshot(str(root), "OFF", "OFF", "OFF", "OFF", None, (), ()),
+    )
+    window._projects = (record,)
+    window._select_project(PROJECT_ID)
+    window._start_auto_from_gui()
+
+    state = workflow.memory(PROJECT_ID).read_state()
+    active_run = state.execution.get("active_milestone_run")
+    assert isinstance(active_run, Mapping)
+    assert active_run.get("status") == "running"
+    assert active_run.get("milestone_id") == "P0"
+
+    pending = workflow.queue.peek()
+    assert pending is not None
+    assert pending.project_id == PROJECT_ID
+    assert pending.task_id == "P0-01"
+    assert pending.auto_send is True
+
+    window._stop_auto_from_gui()
+    state_stopped = workflow.memory(PROJECT_ID).read_state()
+    active_stopped = state_stopped.execution.get("active_milestone_run")
+    assert isinstance(active_stopped, Mapping)
+    assert active_stopped.get("status") == "stopped"
+
+    window._resume_auto_from_gui()
+    state_resumed = workflow.memory(PROJECT_ID).read_state()
+    active_resumed = state_resumed.execution.get("active_milestone_run")
+    assert isinstance(active_resumed, Mapping)
+    assert active_resumed.get("status") == "running"
+
+    window.close()
+    app.processEvents()
+
+
+def test_project_center_milestone_transition_and_gate_approval_launches_next_milestone(tmp_path: Path) -> None:
+    from collections.abc import Mapping
+    import subprocess
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+    from bdb_vnext.control_center_query import ControlCenterSnapshot
+    from bdb_vnext.project_catalog import ProjectCatalog
+    from bdb_vnext.project_workflow import ProjectWorkflow
+    from bdb_gui.project_center import ProjectCenterWindow
+
+    runtime = tmp_path / "runtime"
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "BDB"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.email", "bdb@test.invalid"], cwd=repo, capture_output=True, check=True)
+    (repo / "file.txt").write_text("initial", encoding="utf-8")
+    subprocess.run(["git", "add", "file.txt"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True, check=True)
+
+    plan = _premium_two_milestone_plan()
+    catalog = ProjectCatalog(runtime)
+    record = new_project_record(
+        project_id=PROJECT_ID,
+        display_name=plan.project_name,
+        repo_alias="premium-calculator",
+        local_repo_path=repo,
+        github_repo=None,
+        brief=ProjectBrief("Premium Calculator", "Calculate premiums", "Fixture", "tool"),
+    )
+    record = replace(
+        record,
+        plan_imported=True,
+        plan_version=plan.plan_version,
+        total_tasks=len(plan.tasks),
+        completed_tasks=1,
+        current_milestone="P0",
+        current_task="P0-01",
+    )
+    catalog.upsert(record)
+    workflow = ProjectWorkflow(runtime, catalog=catalog)
+    memory = workflow.memory(PROJECT_ID)
+    memory.ensure_initial_plan(plan)
+    # Pass planning context gate G0 so only milestone gate GATE:P0 blocks transition
+    memory.pass_gate("G0")
+
+    app = QApplication.instance() or QApplication(["milestone-gate-sync-test"])
+    window = ProjectCenterWindow(
+        runtime_root=runtime,
+        catalog=catalog,
+        workflow=workflow,
+        auto_start_confirmation=lambda _vm: True,
+        auto_gate_confirmation=lambda _kind, _identifier, _description: True,
+        snapshot_loader=lambda root: ControlCenterSnapshot(str(root), "OFF", "OFF", "OFF", "OFF", None, (), ()),
+    )
+    window._projects = (record,)
+    window._select_project(PROJECT_ID)
+
+    assert "GATE:P0" in window._auto_milestone_gate_label.text()
+    assert window._auto_milestone_gate_button.isEnabled()
+
+    window._auto_milestone_gate_button.click()
+    assert memory.read_state().execution["milestone_gate_statuses"]["GATE:P0"] == "passed"
+    assert not window._auto_milestone_gate_button.isEnabled()
+
+    window._start_auto_from_gui()
+    state_after = memory.read_state()
+    active_run = state_after.execution.get("active_milestone_run")
+    assert isinstance(active_run, Mapping)
+    assert active_run.get("status") == "running"
+    assert active_run.get("milestone_id") == "P1"
+
+    pending = workflow.queue.peek()
+    assert pending is not None
+    assert pending.project_id == PROJECT_ID
+    assert pending.task_id == "P1-01"
+    assert pending.auto_send is True
+
+    window.close()
+    app.processEvents()
+

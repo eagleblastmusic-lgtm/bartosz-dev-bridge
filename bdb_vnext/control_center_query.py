@@ -148,7 +148,7 @@ def read_control_center_authority_summary(
     try:
         from bdb_vnext.m11c_active_reader import observe_bootstrap_activation
         from bdb_vnext.m11c_windows_clients import observe_windows_native_routes
-        from bdb_vnext.m9b_reconciliation import query_post_active_reconciliation
+        from bdb_vnext.m9b_reconciliation import M9bReconciliationError, query_post_active_reconciliation
 
         bootstrap = observe_bootstrap_activation(authority_root=authority_path)
         state = bootstrap.get("state") or {}
@@ -156,13 +156,25 @@ def read_control_center_authority_summary(
         if not isinstance(activation_id, str) or not activation_id:
             _fail("authority_identity_missing", "Bootstrap ACTIVE has no canonical maintenance identity")
         maintenance_id = activation_id.removeprefix("m11c-maint-")
-        m9b_result = query_post_active_reconciliation(
-            authority_root=authority_path,
-            maintenance_id=maintenance_id,
-            deployed_runtime_root=runtime_root,
-        )
-        m9b = m9b_result.get("m9b_record") or m9b_result.get("subject", {}).get("m9b") or {}
-        m9b_plan = m9b_result.get("plan") or {}
+        try:
+            m9b_result = query_post_active_reconciliation(
+                authority_root=authority_path,
+                maintenance_id=maintenance_id,
+                deployed_runtime_root=runtime_root,
+            )
+            m9b = m9b_result.get("m9b_record") or m9b_result.get("subject", {}).get("m9b") or {}
+            m9b_plan = m9b_result.get("plan") or {}
+        except M9bReconciliationError:
+            from bdb_vnext.m11c_post_active_maintenance import query_post_active_maintenance
+            from bdb_vnext.m9b_activation import read_activation
+
+            post_maint = query_post_active_maintenance(
+                authority_root=authority_path,
+                maintenance_id=maintenance_id,
+            )
+            m9b_plan = post_maint.get("plan") or {}
+            observed_m9b = read_activation(runtime_root)
+            m9b = observed_m9b.as_dict() if observed_m9b is not None else {}
         client_root_value = m9b_plan.get("candidate_client_runtime_root")
         routes: dict[str, Any]
         if isinstance(client_root_value, str) and client_root_value:

@@ -38,7 +38,12 @@ from bdb_vnext.m3a_submission import M3aError, ShadowSubmissionRequest
 from bdb_vnext.m3c_admission import CanonicalVNextAdmissionAuthority, M3cError
 from bdb_vnext.m9b_activation import M9bActivationError, read_activation, require_active
 from bdb_vnext.project_catalog import ProjectCatalog
-from bdb_vnext.project_execution import ProjectExecutionCoordinator, ProjectExecutionError, ProjectExecutionSubmission
+from bdb_vnext.project_execution import (
+    OUTBOX_STATUS_ACKNOWLEDGED,
+    ProjectExecutionCoordinator,
+    ProjectExecutionError,
+    ProjectExecutionSubmission,
+)
 from bdb_vnext.project_workflow import ProjectWorkflow, ProjectWorkflowError
 from bdb_vnext.project_launch import (
     ProjectLaunchQueueAdapter,
@@ -449,6 +454,32 @@ def handle_message(
             queued_launch = queue.peek()
             if not owns_claim or queued_launch is None or queued_launch.launch_id != launch_id:
                 acknowledged = False
+                if (
+                    handoff_status == "SENT"
+                    and message.get("project_id")
+                    and message.get("execution_binding_id")
+                ):
+                    try:
+                        project_id = _bounded_text(message.get("project_id"), field="project_id", maximum=128)
+                        binding_id = _bounded_text(message.get("execution_binding_id"), field="execution_binding_id", maximum=128)
+                        conversation_id = _conversation_id(message.get("conversation_id"))
+                        coordinator = ProjectExecutionCoordinator(config.runtime_root, catalog=ProjectCatalog(config.runtime_root))
+                        binding = coordinator.binding(project_id, binding_id)
+                        handoff = coordinator.launch_handoff(project_id, binding_id)
+                        outbox = coordinator.launch_outbox_record(project_id, launch_id)
+                        if (
+                            binding is not None
+                            and binding.launch_id == launch_id
+                            and binding.conversation_id in (None, conversation_id)
+                            and handoff is not None
+                            and handoff.get("status") == "SENT"
+                            and handoff.get("launch_id") == launch_id
+                            and outbox is not None
+                            and outbox.status == OUTBOX_STATUS_ACKNOWLEDGED
+                        ):
+                            acknowledged = True
+                    except Exception:
+                        acknowledged = False
             else:
                 canonical = ProjectLaunchCanonicalState(config.runtime_root)
                 if canonical.is_canonical_launch(queued_launch):
