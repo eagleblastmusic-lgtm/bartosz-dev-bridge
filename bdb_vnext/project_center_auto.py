@@ -435,7 +435,12 @@ class CanonicalProjectCenterAutoCommands:
             if exc.code != "plan_already_exists":
                 raise ProjectCenterAutoCommandError(exc.code, str(exc)) from exc
 
-    def _prerequisite_projection(self, plan: Any | None, current_milestone_id: str | None) -> dict[str, Any]:
+    def _prerequisite_projection(
+        self,
+        plan: Any | None,
+        current_milestone_id: str | None,
+        current_task_id: str | None = None,
+    ) -> dict[str, Any]:
         if plan is None or not plan.milestones:
             return {}
         value = self._memory_value()
@@ -457,7 +462,20 @@ class CanonicalProjectCenterAutoCommands:
         open_question_status: str | None = None
         if hasattr(value, "execution"):
             raw_task_statuses = execution.get("task_statuses", {})
-            for task in plan.tasks:
+            if current_task_id is not None:
+                current_task = next((task for task in plan.tasks if task.task_id == current_task_id), None)
+                if current_task is None or current_task.milestone_id != current_id:
+                    raise ProjectMemoryError(
+                        "prerequisite_state_invalid",
+                        "current AUTO task is not present in the current canonical milestone",
+                    )
+                candidate_tasks = (current_task,)
+            else:
+                candidate_tasks = tuple(
+                    task for task in plan.tasks if task.milestone_id == current_id
+                )
+
+            for task in candidate_tasks:
                 task_status = str(raw_task_statuses.get(task.task_id, task.status)).lower() if isinstance(raw_task_statuses, Mapping) else task.status
                 if task_status in {"completed", "skipped"}:
                     continue
@@ -483,9 +501,14 @@ class CanonicalProjectCenterAutoCommands:
             "next_milestone_id": next_milestone_id,
         }
 
-    def _safe_prerequisite_projection(self, plan: Any | None, current_milestone_id: str | None) -> dict[str, Any]:
+    def _safe_prerequisite_projection(
+        self,
+        plan: Any | None,
+        current_milestone_id: str | None,
+        current_task_id: str | None = None,
+    ) -> dict[str, Any]:
         try:
-            return self._prerequisite_projection(plan, current_milestone_id)
+            return self._prerequisite_projection(plan, current_milestone_id, current_task_id)
         except (ProjectMemoryError, ValueError, TypeError) as exc:
             return {"prerequisite_error": getattr(exc, "code", "prerequisite_state_unavailable")}
 
@@ -698,7 +721,11 @@ class CanonicalProjectCenterAutoCommands:
                 plan_version=int(cursor["plan_version"] or 0) or None,
                 canonical_revision=int(cursor["state_revision"] or (project_row[0] if project_row else 0)),
                 stop_fenced=stop_fenced,
-                **self._safe_prerequisite_projection(plan, cursor["current_milestone_id"]),
+                **self._safe_prerequisite_projection(
+                    plan,
+                    cursor["current_milestone_id"],
+                    cursor["current_task_id"],
+                ),
             )
         finally:
             conn.close()
