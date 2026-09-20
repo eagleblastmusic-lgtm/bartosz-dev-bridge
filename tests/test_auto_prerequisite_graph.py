@@ -142,6 +142,78 @@ def _persisted_cursor_explanation(adapter: CanonicalProjectCenterAutoCommands) -
         connection.close()
 
 
+
+def test_snapshot_does_not_project_future_task_prerequisites_onto_current_task(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    document = {
+        "schema": "bdb-project-plan-v1",
+        "project_id": PROJECT_ID,
+        "project_name": "Premium Calculator",
+        "plan_version": "1",
+        "milestones": [
+            {"id": "P1", "title": "P1", "description": "P1 milestone", "status": "active"},
+        ],
+        "tasks": [
+            {
+                "id": "P0-01",
+                "milestone_id": "P1",
+                "title": "Completed dependency",
+                "description": "Completed dependency",
+                "status": "completed",
+                "dependencies": [],
+                "acceptance_criteria": [],
+            },
+            {
+                "id": "P1-01",
+                "milestone_id": "P1",
+                "title": "Current task",
+                "description": "Current runnable task",
+                "status": "pending",
+                "dependencies": ["P0-01"],
+                "acceptance_criteria": [],
+            },
+            {
+                "id": "P1-02",
+                "milestone_id": "P1",
+                "title": "Future task",
+                "description": "Future task with future prerequisites",
+                "status": "pending",
+                "dependencies": ["G5", "OQ-003"],
+                "acceptance_criteria": [],
+            },
+        ],
+        "current_task_id": "P1-01",
+        "planning_context": {
+            "gates": [
+                {
+                    "id": "G5",
+                    "title": "Future product-quality gate",
+                    "criteria": "Future task gate only.",
+                }
+            ],
+            "open_questions": [
+                {
+                    "id": "OQ-003",
+                    "question": "Future release question?",
+                }
+            ],
+        },
+    }
+    plan = validate_project_plan(document, expected_project_id=PROJECT_ID)
+    adapter = _adapter(runtime, plan)
+
+    adapter.start_auto(AutoScope.MILESTONE, confirmed=True)
+    runnable = adapter.continue_auto()
+    state = adapter.snapshot(plan_available=True)
+
+    assert runnable.reason_code == "MILESTONE_NEXT_TASK"
+    assert state.current_task_id == "P1-01"
+    assert state.planning_gate_id is None
+    assert state.planning_gate_status is None
+    assert state.open_question_id is None
+    assert state.open_question_status is None
+
+
 def test_isolated_two_milestone_case_reproduces_independent_pending_boundaries(tmp_path: Path) -> None:
     runtime = tmp_path / "runtime"
     plan = _premium_two_milestone_plan()
