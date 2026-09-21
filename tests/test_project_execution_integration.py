@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -87,6 +88,62 @@ def test_execution_binding_selects_single_runnable_task_when_plan_cursor_is_empt
 
     assert binding.task_id == "t1"
     assert coordinator.snapshot(project_id)["current_task_id"] == "t1"
+
+
+def test_operator_continue_rearms_acknowledged_unfinished_auto_launch(tmp_path: Path) -> None:
+    catalog, _coordinator, project_id = _fixture(tmp_path, all_deterministic=True)
+
+    class _HeadRunner:
+        def run(self, args, *, cwd=None, timeout_seconds=120.0):
+            return CommandResult(tuple(str(item) for item in args), 0, HEAD + "\n", "")
+
+    workflow = ProjectWorkflow(
+        catalog.runtime_root,
+        catalog=catalog,
+        command_runner=_HeadRunner(),
+    )
+    workflow.execution.begin_milestone_auto(
+        project_id,
+        milestone_id="m1",
+        milestone_run_id="milestone-run-rearm",
+    )
+
+    first = workflow.queue_continue_prompt(project_id)
+    assert first.auto_send is True
+    binding_id = first.execution_binding_id
+    assert binding_id is not None
+
+    # Reproduce the production state that triggered the bug: Browser ACKed the
+    # transport projection, but no execution result arrived and the canonical
+    # handoff remained PENDING.
+    workflow.execution.mark_outbox_acknowledged(
+        project_id,
+        first.launch_id,
+        conversation_id="conversation-0001",
+    )
+    claim_id = str(uuid.uuid4())
+    assert workflow.queue.claim(
+        launch_id=first.launch_id,
+        claim_id=claim_id,
+        lease_seconds=30,
+    ) is not None
+    assert workflow.queue.acknowledge(
+        launch_id=first.launch_id,
+        claim_id=claim_id,
+    ) is True
+    assert workflow.queue.peek() is None
+    assert workflow.execution.launch_handoff(project_id, binding_id)["status"] == "PENDING"
+
+    recovered, status = workflow.ensure_auto_current_launch(project_id)
+
+    assert status == "rearmed"
+    assert recovered is not None
+    assert recovered.launch_id == first.launch_id
+    assert recovered.execution_binding_id == binding_id
+    assert workflow.queue.peek() is not None
+    assert workflow.queue.peek().launch_id == first.launch_id
+    assert workflow.execution.launch_outbox_record(project_id, first.launch_id).status == "PUBLISHED"
+    assert workflow.execution.snapshot(project_id)["current_binding_id"] == binding_id
 
 
 def test_milestone_auto_advances_in_plan_order_without_global_limits_and_stops_at_boundary(tmp_path: Path) -> None:

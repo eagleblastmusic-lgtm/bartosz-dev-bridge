@@ -1035,6 +1035,117 @@ class ProjectExecutionCoordinator:
 
         return memory.execution_transaction(transition)
 
+    def rearm_acknowledged_launch(
+        self,
+        project_id: str,
+        launch_id: str,
+        *,
+        execution_binding_id: str,
+        ttl_minutes: int = 10,
+    ) -> ProjectLaunchOutboxRecord:
+        """Re-arm one acknowledged-but-unfinished launch for explicit operator recovery.
+
+        This is intentionally narrow: the binding must still be the current active
+        binding, the task must be non-terminal, no execution result may exist for
+        the binding, and the durable handoff must not already be SENT.
+        """
+        if ttl_minutes <= 0 or ttl_minutes > 60 * 24:
+            _fail("launch_rearm_ttl_invalid", "ttl_minutes must be positive and bounded")
+        binding_id = _identifier(execution_binding_id, "execution_binding_id")
+        _project, plan, memory = self._project(project_id)
+        now_dt = datetime.now(timezone.utc)
+        now_iso = _utc_now()
+        expires_iso = (now_dt + timedelta(minutes=ttl_minutes)).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, ProjectLaunchOutboxRecord]:
+            execution = _execution_document(state)
+            raw_binding = next(
+                (
+                    item for item in execution.get("bindings", [])
+                    if item.get("execution_binding_id") == binding_id
+                ),
+                None,
+            )
+            if raw_binding is None:
+                _fail("execution_binding_not_found", "launch re-arm binding does not exist")
+            binding = _binding_from_dict(raw_binding)
+            if (
+                binding.project_id != project_id
+                or binding.plan_version != plan.plan_version
+                or binding.launch_id != launch_id
+                or binding.status != STATUS_ACTIVE
+                or binding.superseded
+            ):
+                _fail("execution_binding_stale", "launch re-arm binding is not the current active binding")
+            if execution.get("current_binding_id") != binding_id:
+                _fail("execution_binding_stale", "launch re-arm binding is not the canonical current binding")
+
+            task = next((item for item in plan.tasks if item.task_id == binding.task_id), None)
+            if task is None:
+                _fail("task_not_found", "launch re-arm task does not exist")
+            task_status = str(execution.get("task_statuses", {}).get(binding.task_id, task.status)).lower()
+            if task_status in {"completed", "skipped"}:
+                _fail("task_already_complete", "completed task cannot be re-armed")
+
+            if any(
+                item.get("execution_binding_id") == binding_id
+                for item in execution.get("attempts", [])
+                if isinstance(item, Mapping)
+            ):
+                _fail("launch_rearm_result_exists", "execution result already exists for this binding")
+
+            handoff = execution.get("launch_handoffs", {}).get(binding_id)
+            if not isinstance(handoff, Mapping):
+                _fail("launch_handoff_missing", "canonical launch handoff is missing")
+            if handoff.get("status") == "SENT":
+                _fail("launch_rearm_already_sent", "canonical launch handoff is already SENT")
+            if handoff.get("launch_id") != launch_id or handoff.get("task_id") != binding.task_id:
+                _fail("launch_handoff_conflict", "canonical launch handoff identity differs")
+
+            outbox_dict = dict(execution.get("launch_outbox", {}))
+            raw_outbox = outbox_dict.get(launch_id)
+            if raw_outbox is None:
+                _fail("launch_outbox_not_found", f"launch outbox record '{launch_id}' does not exist")
+            current = ProjectLaunchOutboxRecord.from_dict(raw_outbox)
+            if current.execution_binding_id != binding_id or current.task_id != binding.task_id:
+                _fail("launch_outbox_conflict", "launch outbox identity differs from current binding")
+            if current.status not in {
+                OUTBOX_STATUS_ACKNOWLEDGED,
+                OUTBOX_STATUS_PUBLISHED,
+                OUTBOX_STATUS_PENDING,
+            }:
+                _fail("launch_outbox_status_invalid", "launch outbox cannot be re-armed from its current state")
+
+            updated_rec = replace(
+                current,
+                status=OUTBOX_STATUS_PENDING,
+                updated_at=now_iso,
+                expires_at=expires_iso,
+            )
+            outbox_dict[launch_id] = updated_rec.to_dict()
+            execution["launch_outbox"] = outbox_dict
+
+            handoffs = dict(execution.get("launch_handoffs", {}))
+            handoffs[binding_id] = {
+                **dict(handoff),
+                "status": "PENDING",
+                "updated_at": now_iso,
+            }
+            execution["launch_handoffs"] = handoffs
+
+            updated = replace(state, execution=execution)
+            updated = memory._append_event(
+                updated,
+                "EXECUTION_LAUNCH_REARMED",
+                f"Ponownie uzbrojono handoff zadania {binding.task_id}",
+                task_id=binding.task_id,
+                plan_version=binding.plan_version,
+                correlation_id=binding.correlation_id,
+            )
+            return updated, updated_rec
+
+        return memory.execution_transaction(transition)
+
     def launch_outbox_record(self, project_id: str, launch_id: str) -> ProjectLaunchOutboxRecord | None:
         _project, _plan, memory = self._project(project_id)
         execution = _execution_document(memory.read_state())

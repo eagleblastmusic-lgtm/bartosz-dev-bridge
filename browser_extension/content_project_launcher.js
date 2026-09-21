@@ -112,7 +112,8 @@ async function bdbFetchProjectLaunch() {
   return response.launch;
 }
 
-async function bdbProjectLaunchAction(operation, launchId, claimId, conversationId = null) {
+async function bdbProjectLaunchAction(operation, launch, claimId, conversationId = null, handoffSent = false) {
+  const launchId = typeof launch === "string" ? launch : launch && launch.launch_id;
   const action = {
     schema: ACTION_SCHEMA,
     operation,
@@ -121,6 +122,18 @@ async function bdbProjectLaunchAction(operation, launchId, claimId, conversation
   };
   if (conversationId) {
     action.conversation_id = conversationId;
+  }
+  if (
+    operation === "project_launch_ack" &&
+    handoffSent &&
+    launch &&
+    typeof launch === "object" &&
+    typeof launch.project_id === "string" &&
+    typeof launch.execution_binding_id === "string"
+  ) {
+    action.handoff_status = "SENT";
+    action.project_id = launch.project_id;
+    action.execution_binding_id = launch.execution_binding_id;
   }
   const result = await chrome.runtime.sendMessage({
     type: "BDB_SUBMIT_ACTION",
@@ -133,8 +146,9 @@ async function bdbClaimProjectLaunch(launch) {
   const claimId = bdbProjectClaimId(launch.launch_id);
   const response = await bdbProjectLaunchAction(
     "project_launch_claim",
-    launch.launch_id,
-    claimId
+    launch,
+    claimId,
+    bdbProjectConversationId()
   );
   if (!response || response.status !== "claimed" || !bdbValidProjectLaunch(response.launch)) {
     return null;
@@ -142,15 +156,16 @@ async function bdbClaimProjectLaunch(launch) {
   return { launch: response.launch, claimId };
 }
 
-async function bdbAcknowledgeProjectLaunch(launchId, claimId, conversationId) {
+async function bdbAcknowledgeProjectLaunch(launch, claimId, conversationId, handoffSent = false) {
   const response = await bdbProjectLaunchAction(
     "project_launch_ack",
-    launchId,
+    launch,
     claimId,
-    conversationId
+    conversationId,
+    handoffSent
   );
   if (response && response.status === "acknowledged") {
-    bdbProjectClaims.delete(launchId);
+    bdbProjectClaims.delete(launch.launch_id);
     return true;
   }
   return false;
@@ -199,7 +214,7 @@ async function bdbHandleProjectLaunch(candidate) {
   }
   const marker = bdbProjectLaunchMarker(launch.launch_id);
   if (bdbUserMessageContains(marker)) {
-    return bdbAcknowledgeProjectLaunch(launch.launch_id, claimId, conversationId);
+    return bdbAcknowledgeProjectLaunch(launch, claimId, conversationId, true);
   }
 
   let composer = findComposer();
@@ -222,13 +237,13 @@ async function bdbHandleProjectLaunch(candidate) {
   }
 
   if (!launch.auto_send) {
-    return bdbAcknowledgeProjectLaunch(launch.launch_id, claimId, conversationId);
+    return bdbAcknowledgeProjectLaunch(launch, claimId, conversationId, false);
   }
   const sent = await bdbSubmitProjectLaunch(marker);
   if (!sent) {
     return false;
   }
-  return bdbAcknowledgeProjectLaunch(launch.launch_id, claimId, conversationId);
+  return bdbAcknowledgeProjectLaunch(launch, claimId, conversationId, true);
 }
 
 async function bdbPollProjectLaunch() {

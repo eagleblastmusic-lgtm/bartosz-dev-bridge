@@ -18,7 +18,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 from .project_catalog import PROJECT_PLAN_MAX_BYTES, ProjectBrief, ProjectCatalog, ProjectCatalogError, ProjectPlan, ProjectRecord, new_project_record, validate_project_plan
 from .project_launch import ProjectLaunch, ProjectLaunchQueueAdapter, ProjectLaunchQueueError
 from .project_memory import HANDOFF_MODES, PlanUpdatePreview, ProjectMemoryError, ProjectMemoryState, ProjectMemoryStore, available_project_tasks, build_handoff_prompt
-from .project_execution import ProjectExecutionBinding, ProjectExecutionCoordinator, ProjectExecutionError, ProjectLaunchOutboxRecord
+from .project_execution import OUTBOX_STATUS_ACKNOWLEDGED, ProjectExecutionBinding, ProjectExecutionCoordinator, ProjectExecutionError, ProjectLaunchOutboxRecord
 from .work_planning import WorkPlanningPrompt, WorkPlanningPromptBuilder, WorkPlanningPromptError
 
 
@@ -487,8 +487,36 @@ class ProjectWorkflow:
             handoff = self.execution.launch_handoff(project_id, binding.execution_binding_id)
             if handoff is not None and handoff.get("status") == "SENT":
                 return None, "already_sent"
+
+            outbox = self.execution.launch_outbox_record(project_id, binding.launch_id)
+            if (
+                outbox is not None
+                and outbox.status == OUTBOX_STATUS_ACKNOWLEDGED
+                and handoff is not None
+                and handoff.get("status") == "PENDING"
+            ):
+                try:
+                    rearmed = self.execution.rearm_acknowledged_launch(
+                        project_id,
+                        binding.launch_id,
+                        execution_binding_id=binding.execution_binding_id,
+                    )
+                    launch = self.publish_outbox_launch(project_id, rearmed.launch_id)
+                except ProjectExecutionError as exc:
+                    raise ProjectWorkflowError(exc.code, str(exc)) from exc
+                return launch, "rearmed"
+
         launch = self._queue_execution_prompt(project_id, "continue", binding_override=binding)
         return launch, "ready"
+
+    def ensure_auto_current_launch(self, project_id: str) -> tuple[ProjectLaunch | None, str]:
+        """Ensure the current AUTO task has one deliverable launch.
+
+        Explicit operator Continue uses this recovery-safe path so an existing
+        active binding is reused and an acknowledged-but-unfinished handoff can
+        be re-armed without minting a second execution identity.
+        """
+        return self._ensure_auto_next_launch(project_id)
 
     def submit_project_execution_result(self, result: Mapping[str, Any], *, conversation_id: str, launch_id: str) -> dict[str, Any]:
         """Record one Browser project result and, for AUTO, queue the next task."""

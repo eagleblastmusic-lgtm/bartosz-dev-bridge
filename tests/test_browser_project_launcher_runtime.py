@@ -28,6 +28,15 @@ def test_all_extension_javascript_parses() -> None:
         assert completed.returncode == 0, f"{script.name}:\n{completed.stdout}{completed.stderr}"
 
 
+def test_content_launcher_marks_auto_send_ack_as_sent_and_claims_conversation() -> None:
+    source = (EXTENSION / "content_project_launcher.js").read_text(encoding="utf-8")
+    assert '"project_launch_claim"' in source
+    assert "bdbProjectConversationId()" in source
+    assert 'action.handoff_status = "SENT"' in source
+    assert "action.project_id = launch.project_id" in source
+    assert "action.execution_binding_id = launch.execution_binding_id" in source
+
+
 def test_background_routes_project_launch_peek_claim_and_ack(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:
@@ -189,12 +198,14 @@ def test_background_routes_project_launch_peek_claim_and_ack(tmp_path: Path) -> 
                   schema: "bdb-action-v1",
                   operation: "project_launch_claim",
                   launch_id: launchId,
-                  claim_id: claimId
+                  claim_id: claimId,
+                  conversation_id: "conversation-0001"
                 }
               });
               assert.equal(claimed.status, "claimed");
               assert.equal(nativeRequests.at(-1).action, "project_launch_claim");
               assert.equal(nativeRequests.at(-1).claim_id, claimId);
+              assert.equal(nativeRequests.at(-1).conversation_id, "conversation-0001");
 
               const acknowledged = await send({
                 type: "BDB_SUBMIT_ACTION",
@@ -202,11 +213,19 @@ def test_background_routes_project_launch_peek_claim_and_ack(tmp_path: Path) -> 
                   schema: "bdb-action-v1",
                   operation: "project_launch_ack",
                   launch_id: launchId,
-                  claim_id: claimId
+                  claim_id: claimId,
+                  conversation_id: "conversation-0001",
+                  handoff_status: "SENT",
+                  project_id: "project-0001",
+                  execution_binding_id: "binding-0001"
                 }
               });
               assert.equal(acknowledged.status, "acknowledged");
               assert.equal(nativeRequests.at(-1).action, "project_launch_ack");
+              assert.equal(nativeRequests.at(-1).conversation_id, "conversation-0001");
+              assert.equal(nativeRequests.at(-1).handoff_status, "SENT");
+              assert.equal(nativeRequests.at(-1).project_id, "project-0001");
+              assert.equal(nativeRequests.at(-1).execution_binding_id, "binding-0001");
             }
 
             run().catch((error) => {

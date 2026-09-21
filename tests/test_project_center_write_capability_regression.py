@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -209,16 +210,26 @@ def test_canonical_active_makes_project_center_writable_and_continue_queues_laun
             self.catalog = cat
             self.queue = queue
             self.execution = MagicMock()
-            self.memory = MagicMock()
+            memory = MagicMock()
+            memory.read_state.return_value = SimpleNamespace(
+                execution={
+                    "active_milestone_run": {
+                        "status": "running",
+                        "milestone_id": "P3",
+                        "current_task_id": "P3-03",
+                    }
+                }
+            )
+            self.memory = MagicMock(return_value=memory)
 
-        def queue_continue_prompt(self, project_id: str) -> Any:
+        def ensure_auto_current_launch(self, project_id: str) -> tuple[Any, str]:
             launch = queue.enqueue(
                 repo_alias="premium-calculator",
                 prompt=f"Continue prompt for {project_id} / P3-03",
                 project_id=project_id,
                 task_id="P3-03",
             )
-            return launch
+            return launch, "ready"
 
     workflow = FakeWorkflow(runtime, catalog)
 
@@ -244,11 +255,7 @@ def test_canonical_active_makes_project_center_writable_and_continue_queues_laun
     receipt.current_milestone_id = "P3"
     receipt.current_task_id = "P3-03"
 
-    def continue_auto() -> Any:
-        workflow.queue_continue_prompt(project.project_id)
-        return receipt
-
-    commands.continue_auto.side_effect = continue_auto
+    commands.continue_auto.return_value = receipt
 
     window = ProjectCenterWindow(
         runtime_root=runtime,
@@ -311,6 +318,86 @@ def test_canonical_active_makes_project_center_writable_and_continue_queues_laun
     assert response["launch"]["project_id"] == project.project_id
     assert response["launch"]["task_id"] == "P3-03"
 
+    window.close()
+
+
+def test_auto_continue_surfaces_launch_synchronization_failure(tmp_path: Path) -> None:
+    app = _app()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(parents=True)
+    catalog = ProjectCatalog(runtime)
+    project = _fake_project()
+    catalog.upsert(project)
+
+    active_snapshot = ControlCenterSnapshot(
+        runtime_root=str(runtime),
+        system_state="ON",
+        writer_state="ON",
+        activation_state="ACTIVE",
+        store_state="SEALED",
+        store_instance_id="store-active",
+        works=(),
+        action_predicates=(ActionPredicate("resume", enabled=True),),
+        reason_code="production_acceptance_pass",
+        read_only=False,
+    )
+
+    class FailingWorkflow:
+        def __init__(self) -> None:
+            self.queue = ProjectLaunchQueueAdapter(runtime / "control" / "project-launch-queue.json")
+            memory = MagicMock()
+            memory.read_state.return_value = SimpleNamespace(
+                execution={
+                    "active_milestone_run": {
+                        "status": "running",
+                        "milestone_id": "P3",
+                        "current_task_id": "P3-03",
+                    }
+                }
+            )
+            self.memory = MagicMock(return_value=memory)
+            self.execution = MagicMock()
+
+        def ensure_auto_current_launch(self, _project_id: str):
+            from bdb_vnext.project_workflow import ProjectWorkflowError
+            raise ProjectWorkflowError("queue_pending", "different canonical launch is already pending")
+
+    workflow = FailingWorkflow()
+    auto_state = CanonicalAutoState(
+        project_id=project.project_id,
+        scope=AutoScope.MILESTONE,
+        current_milestone_id="P3",
+        current_task_id="P3-03",
+        scope_status="ACTIVE",
+        continuation_status="CONTINUE_AVAILABLE",
+        reason="ACTIVE",
+        plan_available=True,
+        p2_completed=True,
+        p3_started=True,
+    )
+    commands = MagicMock()
+    commands.snapshot.return_value = auto_state
+    commands.continue_auto.return_value = MagicMock(
+        reason_code="TASK_IN_PROGRESS",
+        explanation="Current task P3-03 is in progress.",
+        current_milestone_id="P3",
+        current_task_id="P3-03",
+    )
+
+    window = ProjectCenterWindow(
+        runtime_root=runtime,
+        catalog=catalog,
+        workflow=workflow,
+        snapshot_loader=lambda _root: active_snapshot,
+        auto_commands_factory=lambda _proj: commands,
+    )
+    window.start_bootstrap()
+    app.processEvents()
+    window._continue_auto_from_gui()
+    app.processEvents()
+
+    assert "queue_pending" in window._status.text()
+    assert "TASK_IN_PROGRESS" not in window._status.text()
     window.close()
 
 

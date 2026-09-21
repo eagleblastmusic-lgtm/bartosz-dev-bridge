@@ -99,8 +99,22 @@ submitAction = async function submitActionWithProjectLauncher(action, tabId) {
     launch_id: launchId,
     claim_id: claimId
   };
-  if (action.operation === "project_launch_ack") {
+  if (action.conversation_id !== undefined && action.conversation_id !== null) {
     nativeRequest.conversation_id = bdbValidateConversationId(action.conversation_id);
+  }
+  if (action.operation === "project_launch_ack" && action.handoff_status !== undefined) {
+    if (action.handoff_status !== "SENT") {
+      throw new Error("Project handoff_status must be SENT");
+    }
+    if (typeof action.project_id !== "string" || !action.project_id.trim() || action.project_id.length > 128) {
+      throw new Error("Project project_id is invalid");
+    }
+    if (typeof action.execution_binding_id !== "string" || !action.execution_binding_id.trim() || action.execution_binding_id.length > 128) {
+      throw new Error("Project execution_binding_id is invalid");
+    }
+    nativeRequest.handoff_status = "SENT";
+    nativeRequest.project_id = action.project_id;
+    nativeRequest.execution_binding_id = action.execution_binding_id;
   }
   return sendNative(nativeRequest);
 };
