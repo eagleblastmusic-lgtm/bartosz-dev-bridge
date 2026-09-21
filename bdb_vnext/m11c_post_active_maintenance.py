@@ -1137,6 +1137,7 @@ def apply_post_active_maintenance(
                     bootstrap_phase="NEW",
                     bootstrap_state_sha256=next_state["state_sha256"],
                 )
+            raise
     try:
         from bdb_vnext.m9b_reconciliation import ensure_post_active_m9b_reconciled
         ensure_post_active_m9b_reconciled(
