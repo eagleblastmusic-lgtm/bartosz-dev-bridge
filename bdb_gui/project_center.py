@@ -1046,25 +1046,27 @@ class ProjectCenterWindow(QMainWindow):
         except Exception:
             pass
 
-    def _synchronize_auto_execution_on_continue(self, project: ProjectRecord, receipt: AutoCommandReceipt) -> None:
+    def _synchronize_auto_execution_on_continue(self, project: ProjectRecord, receipt: AutoCommandReceipt) -> str:
         milestone_id = getattr(receipt, "current_milestone_id", None)
-        task_id = getattr(receipt, "current_task_id", None)
         if not milestone_id:
-            return
+            return "no_milestone"
         try:
             state = self._workflow.memory(project.project_id).read_state()
             active_run = state.execution.get("active_milestone_run") if isinstance(state.execution, Mapping) else None
             if not isinstance(active_run, Mapping) or active_run.get("status") != "running" or active_run.get("milestone_id") != milestone_id:
                 self._workflow.execution.begin_milestone_auto(project.project_id, milestone_id=milestone_id)
-            exec_snapshot = self._workflow.execution.snapshot(project.project_id)
-            auto = exec_snapshot.get("milestone_auto") or {}
-            target_task_id = task_id or auto.get("current_task_id")
-            if auto.get("status") == "RUNNABLE" and target_task_id:
-                pending = self._workflow.queue.peek()
-                if pending is None or pending.project_id != project.project_id or pending.task_id != target_task_id:
-                    self._workflow.queue_continue_prompt(project.project_id)
-        except Exception:
-            pass
+            _launch, launch_status = self._workflow.ensure_auto_current_launch(project.project_id)
+            return launch_status
+        except (ProjectExecutionError, ProjectWorkflowError) as exc:
+            raise ProjectWorkflowError(
+                getattr(exc, "code", "auto_launch_sync_failed"),
+                str(exc),
+            ) from exc
+        except Exception as exc:
+            raise ProjectWorkflowError(
+                "auto_launch_sync_failed",
+                f"AUTO launch synchronization failed: {exc}",
+            ) from exc
 
     def _start_auto_from_gui(self) -> None:
         if self._is_read_only():
@@ -1128,12 +1130,19 @@ class ProjectCenterWindow(QMainWindow):
             # No task or milestone is passed here; canonical orchestrator owns
             # the next-action decision.
             receipt = self._auto_commands_for_project(project).continue_auto()
-            self._synchronize_auto_execution_on_continue(project, receipt)
+            launch_status = self._synchronize_auto_execution_on_continue(project, receipt)
         except (ProjectCenterAutoCommandError, ProjectExecutionError, ProjectWorkflowError) as exc:
-            self._status.setText(f"BDB AUTO Kontynuuj zatrzymane — {getattr(exc, 'code', 'auto_continue_failed')}")
+            code = getattr(exc, "code", "auto_continue_failed")
+            self._status.setText(f"BDB AUTO Kontynuuj zatrzymane — {code}: {exc}")
+            self._render_auto(project)
             return
         self._mutation_operations_invoked += 1
-        self._set_auto_status_from_receipt(receipt)
+        if launch_status in {"ready", "rearmed"}:
+            self._status.setText(
+                f"BDB AUTO: {receipt.reason_code} — launch {launch_status}; przekazano do kolejki Browser/Native"
+            )
+        else:
+            self._set_auto_status_from_receipt(receipt)
         self._render_auto(project)
 
     def _resume_auto_from_gui(self) -> None:
