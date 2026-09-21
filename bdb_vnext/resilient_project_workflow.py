@@ -82,11 +82,6 @@ class ResilientProjectWorkflow(ProjectWorkflow):
             # projection while the canonical task status and terminal attempt
             # already identify the real blocked task. Recover only when that
             # evidence is unique and the stale run is not active.
-            if run_status in {"running", "review"}:
-                raise ProjectWorkflowError(
-                    "execution_recovery_ambiguous",
-                    "active milestone run disagrees with blocked retry evidence",
-                )
             attempts = execution.get("attempts", [])
             candidates: list[str] = []
             if isinstance(attempts, list):
@@ -112,6 +107,11 @@ class ResilientProjectWorkflow(ProjectWorkflow):
 
             if not candidates:
                 return None
+            if run_status in {"running", "review"}:
+                raise ProjectWorkflowError(
+                    "execution_recovery_ambiguous",
+                    "active milestone run disagrees with blocked retry evidence",
+                )
             if len(candidates) != 1:
                 raise ProjectWorkflowError(
                     "execution_recovery_ambiguous",
