@@ -266,7 +266,7 @@ class ProjectCenterWindow(QMainWindow):
         page = QWidget(); layout = QVBoxLayout(page)
         title = QLabel("Bartosz Dev Bridge"); title.setObjectName("ProjectCenterTitle"); layout.addWidget(title)
         prompt = QLabel("Co chcesz zrobić?"); prompt.setObjectName("ProjectCenterPrompt"); layout.addWidget(prompt)
-        buttons = QHBoxLayout(); new_button = QPushButton("＋ Nowy projekt"); new_button.setObjectName("NewProjectButton"); new_button.clicked.connect(self._new_project); open_button = QPushButton("Otwórz istniejący projekt"); open_button.setObjectName("OpenProjectButton"); open_button.clicked.connect(self._open_existing_project); buttons.addWidget(new_button); buttons.addWidget(open_button); buttons.addStretch(1); layout.addLayout(buttons)
+        buttons = QHBoxLayout(); self._new_button = QPushButton("＋ Nowy projekt"); self._new_button.setObjectName("NewProjectButton"); self._new_button.clicked.connect(self._new_project); self._open_button = QPushButton("Otwórz istniejący projekt"); self._open_button.setObjectName("OpenProjectButton"); self._open_button.clicked.connect(self._open_existing_project); buttons.addWidget(self._new_button); buttons.addWidget(self._open_button); buttons.addStretch(1); layout.addLayout(buttons)
         layout.addWidget(QLabel("Ostatnie projekty")); self._recent = QListWidget(); self._recent.setObjectName("RecentProjectsList"); self._recent.itemDoubleClicked.connect(self._open_recent); layout.addWidget(self._recent, 1); return page
 
     def _make_projects_page(self) -> QWidget:
@@ -494,11 +494,18 @@ class ProjectCenterWindow(QMainWindow):
             self._env_summary_label.setText(vm.project_summary.summary_text)
             self._env_task_delta_label.setText(vm.task_delta.explanation if vm.task_delta else "Brak aktywnego zadania.")
             self._env_stale_label.setText(f"[PRZEDAWNIONE] {vm.stale_reason}" if vm.is_stale else "[AKTUALNY] Digest zgodny")
-            self._env_disabled_reason.setText(vm.prepare_disabled_reason or "Akcja Prepare dozwolona.")
+            is_ro = self._is_read_only()
+            read_only_tip = f"BDB jest w trybie tylko do odczytu (read-only): {self._read_only_reason()}."
             self._env_refresh_button.setEnabled(vm.can_refresh)
-            self._env_prepare_button.setEnabled(vm.can_prepare)
-            self._env_prepare_button.setToolTip(vm.prepare_disabled_reason or "Przygotuj środowisko lokalne.")
-            self._env_prepare_button.setAccessibleDescription(vm.prepare_disabled_reason or "Przygotuj środowisko lokalne.")
+            self._env_prepare_button.setEnabled(vm.can_prepare and not is_ro)
+            if is_ro:
+                self._env_prepare_button.setToolTip(read_only_tip)
+                self._env_prepare_button.setAccessibleDescription(read_only_tip)
+                self._env_disabled_reason.setText(read_only_tip)
+            else:
+                self._env_disabled_reason.setText(vm.prepare_disabled_reason or "Akcja Prepare dozwolona.")
+                self._env_prepare_button.setToolTip(vm.prepare_disabled_reason or "Przygotuj środowisko lokalne.")
+                self._env_prepare_button.setAccessibleDescription(vm.prepare_disabled_reason or "Przygotuj środowisko lokalne.")
             self._env_details_toggle_button.setEnabled(True)
             self._env_details_view.setPlainText(vm.diagnostic_details)
         else:
@@ -507,7 +514,16 @@ class ProjectCenterWindow(QMainWindow):
             self._env_summary_label.setText("Oczekiwanie na resolver.")
             self._env_task_delta_label.setText("—")
             self._env_stale_label.setText("—")
-            self._env_disabled_reason.setText("Brak danych środowiskowych.")
+            is_ro = self._is_read_only()
+            if is_ro:
+                read_only_tip = f"BDB jest w trybie tylko do odczytu (read-only): {self._read_only_reason()}."
+                self._env_disabled_reason.setText(read_only_tip)
+                self._env_prepare_button.setToolTip(read_only_tip)
+                self._env_prepare_button.setAccessibleDescription(read_only_tip)
+            else:
+                self._env_disabled_reason.setText("Brak danych środowiskowych.")
+                self._env_prepare_button.setToolTip("Przygotuj środowisko lokalne.")
+                self._env_prepare_button.setAccessibleDescription("Przygotuj środowisko lokalne.")
             self._env_refresh_button.setEnabled(True)
             self._env_prepare_button.setEnabled(False)
             self._env_details_toggle_button.setEnabled(False)
@@ -521,6 +537,9 @@ class ProjectCenterWindow(QMainWindow):
         self._render_environment(project)
 
     def _prepare_environment_from_gui(self) -> None:
+        if self._is_read_only():
+            self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
+            return
         project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
         if project is None or self._environment_view_model is None or not self._environment_view_model.can_prepare:
             return
@@ -609,14 +628,40 @@ class ProjectCenterWindow(QMainWindow):
         if name not in PROJECT_PAGE_NAMES: raise ValueError(f"unknown project page: {name}")
         self._sidebar.setCurrentRow(PROJECT_PAGE_NAMES.index(name))
 
+    def _is_read_only(self) -> bool:
+        if self._snapshot is not None:
+            return bool(getattr(self._snapshot, "read_only", True))
+        return self._bootstrap_completed
+
+    def _read_only_reason(self) -> str:
+        if self._snapshot is None:
+            return "canonical snapshot niedostępny"
+        return str(self._snapshot.reason_code or "canonical mutation authority jest niedostępny")
+
     def start_bootstrap(self) -> None:
         self._bootstrap_completed = False; self._bootstrap_ok = False; self._bootstrap_error_code = None; self._status.setText("BDB: odczyt canonical state…")
+        try:
+            from bdb_vnext.m9b_reconciliation import ensure_post_active_m9b_reconciled
+            config_path = self._runtime_root / "config" / "native-host.json"
+            if config_path.is_file():
+                try:
+                    config = json.loads(config_path.read_text(encoding="utf-8"))
+                    auth_root = config.get("bootstrap_authority_root")
+                    if auth_root:
+                        ensure_post_active_m9b_reconciled(authority_root=auth_root, deployed_runtime_root=self._runtime_root)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         try:
             self._snapshot = self._snapshot_loader(self._runtime_root)
             self._projects = self._catalog.read()
         except (ControlCenterQueryError, ProjectCatalogError) as exc:
             self._bootstrap_completed = True; self._bootstrap_error_code = getattr(exc, "code", "project_catalog_unavailable"); self._status.setText(f"BDB: DEGRADED — {self._bootstrap_error_code}"); self._render_catalog(()); self.dashboard_ready.emit(); return
-        self._bootstrap_completed = True; self._bootstrap_ok = True; self._status.setText(f"BDB: {self._snapshot.system_state} | {len(self._projects)} projekt(ów) | read-only"); self._render_catalog(self._projects); self.dashboard_ready.emit()
+        self._bootstrap_completed = True; self._bootstrap_ok = True
+        status_suffix = " | read-only" if self._is_read_only() else ""
+        self._status.setText(f"BDB: {self._snapshot.system_state} | {len(self._projects)} projekt(ów){status_suffix}")
+        self._render_catalog(self._projects); self.dashboard_ready.emit()
 
     def _render_catalog(self, projects: tuple[ProjectRecord, ...]) -> None:
         self._recent.clear(); self._project_table.setRowCount(len(projects))
@@ -626,6 +671,21 @@ class ProjectCenterWindow(QMainWindow):
             for column, value in enumerate(values): self._project_table.setItem(row, column, QTableWidgetItem(str(value)))
             recent = QListWidgetItem(f"{project.display_name} · {progress}"); recent.setData(32, project.project_id); self._recent.addItem(recent)
         self._project_table.resizeColumnsToContents()
+        is_ro = self._is_read_only()
+        if hasattr(self, "_new_button") and hasattr(self, "_open_button"):
+            self._new_button.setEnabled(not is_ro)
+            self._open_button.setEnabled(not is_ro)
+            if is_ro:
+                tip = f"BDB jest w trybie tylko do odczytu (read-only): {self._read_only_reason()}."
+                self._new_button.setToolTip(tip)
+                self._open_button.setToolTip(tip)
+                self._new_button.setAccessibleDescription(tip)
+                self._open_button.setAccessibleDescription(tip)
+            else:
+                self._new_button.setToolTip("Utwórz nowy projekt")
+                self._open_button.setToolTip("Otwórz istniejący projekt z dysku")
+                self._new_button.setAccessibleDescription("Utwórz nowy projekt")
+                self._open_button.setAccessibleDescription("Otwórz istniejący projekt z dysku")
         if projects and self._current_project_id is None: self._select_project(projects[0].project_id)
         elif not projects: self._select_project(None)
 
@@ -661,16 +721,38 @@ class ProjectCenterWindow(QMainWindow):
     def _set_project_action_state(self) -> None:
         project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
         has_project = project is not None; has_plan = bool(project and project.plan_imported)
-        self._import_plan_button.setEnabled(has_project); self._import_plan_button.setText("Wczytaj aktualizację planu" if has_plan else "Wczytaj plan"); self._plan_prompt_button.setEnabled(has_project); self._work_prompt_button.setEnabled(has_project); self._start_button.setEnabled(has_plan); self._continue_button.setEnabled(has_plan); self._handoff_mode.setEnabled(has_project); self._handoff_button.setEnabled(has_project)
-        self._start_button.setToolTip("Wymagany import bdb-project-plan-v1" if not has_plan else "Wstaw bounded prompt do pustego composera ChatGPT")
-        self._continue_button.setToolTip(self._start_button.toolTip())
+        is_ro = self._is_read_only()
+        read_only_tip = f"BDB jest w trybie tylko do odczytu (read-only): {self._read_only_reason()}."
+        self._import_plan_button.setEnabled(has_project and not is_ro)
+        self._import_plan_button.setText("Wczytaj aktualizację planu" if has_plan else "Wczytaj plan")
+        self._plan_prompt_button.setEnabled(has_project and not is_ro)
+        self._work_prompt_button.setEnabled(has_project and not is_ro)
+        self._start_button.setEnabled(has_plan and not is_ro)
+        self._continue_button.setEnabled(has_plan and not is_ro)
+        self._handoff_mode.setEnabled(has_project and not is_ro)
+        self._handoff_button.setEnabled(has_project and not is_ro)
+        if is_ro:
+            for btn in (self._import_plan_button, self._plan_prompt_button, self._work_prompt_button, self._start_button, self._continue_button, self._handoff_button):
+                btn.setToolTip(read_only_tip)
+                btn.setAccessibleDescription(read_only_tip)
+        else:
+            self._start_button.setToolTip("Wymagany import bdb-project-plan-v1" if not has_plan else "Wstaw bounded prompt do pustego composera ChatGPT")
+            self._continue_button.setToolTip(self._start_button.toolTip())
+            self._start_button.setAccessibleDescription(self._start_button.toolTip())
+            self._continue_button.setAccessibleDescription(self._continue_button.toolTip())
         review = False
-        if has_project:
+        if has_project and not is_ro:
             try:
                 review = self._workflow.execution.snapshot(project.project_id).get("task_statuses", {}).get(project.current_task or "") == "review"
             except Exception:
                 review = False
-        self._approve_review_button.setEnabled(review); self._changes_review_button.setEnabled(review); self._project_review_button.setEnabled(has_project)
+        self._approve_review_button.setEnabled(review and not is_ro)
+        self._changes_review_button.setEnabled(review and not is_ro)
+        self._project_review_button.setEnabled(has_project and not is_ro)
+        if is_ro:
+            for btn in (self._approve_review_button, self._changes_review_button, self._project_review_button):
+                btn.setToolTip(read_only_tip)
+                btn.setAccessibleDescription(read_only_tip)
         self._render_auto(project)
         self._render_environment(project)
 
@@ -772,8 +854,18 @@ class ProjectCenterWindow(QMainWindow):
         self._auto_premium_state.setText(premium)
         self._auto_blocker_reason.setText(f"{canonical.reason_code}: {self._auto_view_model.blocker_reason}")
 
+        is_ro = self._is_read_only()
+        read_only_tip = f"BDB jest w trybie tylko do odczytu (read-only): {self._read_only_reason()}."
+
         prerequisite_error = canonical.prerequisite_error
-        if prerequisite_error:
+        if is_ro:
+            self._auto_milestone_gate_button.setEnabled(False)
+            self._auto_planning_gate_button.setEnabled(False)
+            self._auto_open_question_button.setEnabled(False)
+            for button in (self._auto_milestone_gate_button, self._auto_planning_gate_button, self._auto_open_question_button):
+                button.setToolTip(read_only_tip)
+                button.setAccessibleDescription(read_only_tip)
+        elif prerequisite_error:
             unavailable = f"Stan kanoniczny niedostępny: {prerequisite_error}"
             self._auto_milestone_gate_label.setText(unavailable)
             self._auto_planning_gate_label.setText(unavailable)
@@ -813,13 +905,21 @@ class ProjectCenterWindow(QMainWindow):
             self._auto_open_question_button.setToolTip("Wymaga jawnego potwierdzenia; stan zostanie sprawdzony ponownie przed zapisem." if question_enabled else "Brak oczekującego open question.")
 
         for action, button in (("start", self._auto_start_button), ("stop", self._auto_stop_button), ("continue", self._auto_continue_button), ("resume", self._auto_resume_button)):
-            enabled = {"start": self._auto_view_model.can_start, "stop": self._auto_view_model.can_stop, "continue": self._auto_view_model.can_continue, "resume": self._auto_view_model.can_resume}[action]
-            reason = self._auto_view_model.disabled_reason(action)
-            button.setEnabled(enabled)
-            button.setToolTip(reason or "Dostępne; wykonanie przejdzie przez canonical command boundary.")
-            button.setAccessibleDescription(reason or "Dostępne; wykonanie przejdzie przez canonical command boundary.")
-        disabled = [self._auto_view_model.disabled_reason(action) for action in ("start", "stop", "continue", "resume") if self._auto_view_model.disabled_reason(action)]
-        self._auto_disabled_reason.setText(disabled[0] if disabled else "Brak zablokowanej akcji.")
+            if is_ro:
+                button.setEnabled(False)
+                button.setToolTip(read_only_tip)
+                button.setAccessibleDescription(read_only_tip)
+            else:
+                enabled = {"start": self._auto_view_model.can_start, "stop": self._auto_view_model.can_stop, "continue": self._auto_view_model.can_continue, "resume": self._auto_view_model.can_resume}[action]
+                reason = self._auto_view_model.disabled_reason(action)
+                button.setEnabled(enabled)
+                button.setToolTip(reason or "Dostępne; wykonanie przejdzie przez canonical command boundary.")
+                button.setAccessibleDescription(reason or "Dostępne; wykonanie przejdzie przez canonical command boundary.")
+        if is_ro:
+            self._auto_disabled_reason.setText(read_only_tip)
+        else:
+            disabled = [self._auto_view_model.disabled_reason(action) for action in ("start", "stop", "continue", "resume") if self._auto_view_model.disabled_reason(action)]
+            self._auto_disabled_reason.setText(disabled[0] if disabled else "Brak zablokowanej akcji.")
 
     def _auto_scope_selection_changed(self, index: int) -> None:
         if not (0 <= index < len(AUTO_SCOPE_OPTIONS)):
@@ -889,6 +989,9 @@ class ProjectCenterWindow(QMainWindow):
             self._select_project(project_id)
 
     def _approve_auto_prerequisite(self, kind: str) -> None:
+        if self._is_read_only():
+            self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
+            return
         project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
         canonical = self._auto_view_model.canonical
         if project is None or canonical.prerequisite_error:
@@ -964,6 +1067,9 @@ class ProjectCenterWindow(QMainWindow):
             pass
 
     def _start_auto_from_gui(self) -> None:
+        if self._is_read_only():
+            self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
+            return
         project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
         if project is None:
             self._status.setText(AUTO_STATUS_REASON_TEXT["PROJECT_NOT_SELECTED"])
@@ -986,6 +1092,9 @@ class ProjectCenterWindow(QMainWindow):
         self._render_auto(project)
 
     def _stop_auto_from_gui(self) -> None:
+        if self._is_read_only():
+            self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
+            return
         project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
         if project is None or not self._auto_view_model.can_stop:
             self._status.setText(self._auto_view_model.disabled_reason("stop") or AUTO_STATUS_REASON_TEXT["PROJECT_NOT_SELECTED"])
@@ -1008,6 +1117,9 @@ class ProjectCenterWindow(QMainWindow):
         self._render_auto(project)
 
     def _continue_auto_from_gui(self) -> None:
+        if self._is_read_only():
+            self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
+            return
         project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
         if project is None or not self._auto_view_model.can_continue:
             self._status.setText(self._auto_view_model.disabled_reason("continue") or AUTO_STATUS_REASON_TEXT["PROJECT_NOT_SELECTED"])
@@ -1025,6 +1137,9 @@ class ProjectCenterWindow(QMainWindow):
         self._render_auto(project)
 
     def _resume_auto_from_gui(self) -> None:
+        if self._is_read_only():
+            self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
+            return
         project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
         if project is None or not self._auto_view_model.can_resume:
             self._status.setText(self._auto_view_model.disabled_reason("resume") or AUTO_STATUS_REASON_TEXT["PROJECT_NOT_SELECTED"])
@@ -1078,6 +1193,9 @@ class ProjectCenterWindow(QMainWindow):
             self._execution_status.setText(f"Wykonanie: stan niedostępny ({getattr(exc, 'code', 'unavailable')})")
 
     def _approve_review(self) -> None:
+        if self._is_read_only():
+            self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
+            return
         if self._current_project_id is None: return
         project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
         if project is None or not project.current_task: return
@@ -1090,6 +1208,9 @@ class ProjectCenterWindow(QMainWindow):
         self.start_bootstrap(); self._select_project(project.project_id)
 
     def _request_changes(self) -> None:
+        if self._is_read_only():
+            self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
+            return
         if self._current_project_id is None: return
         project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
         if project is None or not project.current_task: return
@@ -1102,6 +1223,9 @@ class ProjectCenterWindow(QMainWindow):
         self.start_bootstrap(); self._select_project(project.project_id)
 
     def _request_project_review(self) -> None:
+        if self._is_read_only():
+            self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
+            return
         if self._current_project_id is None: return
         try:
             self._workflow.execution.request_project_review(self._current_project_id)
@@ -1131,6 +1255,9 @@ class ProjectCenterWindow(QMainWindow):
             for view in views: view.setPlainText(f"Project Memory niedostępna: {getattr(exc, 'code', 'memory_unavailable')}")
 
     def _queue_handoff(self) -> None:
+        if self._is_read_only():
+            self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
+            return
         if self._current_project_id is None: return
         try:
             launch = self._workflow.queue_handoff_prompt(self._current_project_id, self._handoff_mode.currentText())
@@ -1154,6 +1281,9 @@ class ProjectCenterWindow(QMainWindow):
         dialog.exec()
 
     def _new_project(self) -> None:
+        if self._is_read_only():
+            self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
+            return
         dialog = _NewProjectDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted: return
         brief = dialog.brief(); alias = slugify_project_alias(brief.name); result = self._workflow.create_new(display_name=brief.name, repo_alias=alias, projects_root=Path.home() / "BDB Projects", brief=brief, github_name=alias)
@@ -1162,6 +1292,9 @@ class ProjectCenterWindow(QMainWindow):
         self.start_bootstrap(); self._select_project(result.project.project_id if result.project else None); self.select_page("Current project")
 
     def _open_existing_project(self) -> None:
+        if self._is_read_only():
+            self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
+            return
         source = QFileDialog.getExistingDirectory(self, "Wybierz istniejący Git checkout")
         if not source: return
         name = Path(source).name or "Projekt"; brief = ProjectBrief(name, "Kontynuacja istniejącego projektu", "Projekt zarejestrowany przez BDB vNext.", "jeszcze nie wiem")
@@ -1170,6 +1303,9 @@ class ProjectCenterWindow(QMainWindow):
         self.start_bootstrap(); self._select_project(project.project_id); self.select_page("Current project")
 
     def _import_plan(self) -> None:
+        if self._is_read_only():
+            self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
+            return
         if self._current_project_id is None: return
         path, _ = QFileDialog.getOpenFileName(self, "Wybierz project-plan.json", "", "Project Plan (*.json)")
         if not path: return
@@ -1193,6 +1329,9 @@ class ProjectCenterWindow(QMainWindow):
         self.start_bootstrap(); self._select_project(project.project_id); self.select_page("Current project")
 
     def _queue_prompt(self, kind: str) -> None:
+        if self._is_read_only():
+            self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
+            return
         if self._current_project_id is None: return
         try:
             launch = {"plan": self._workflow.queue_plan_prompt, "start": self._workflow.queue_start_prompt, "continue": self._workflow.queue_continue_prompt}[kind](self._current_project_id)

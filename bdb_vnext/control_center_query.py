@@ -94,11 +94,11 @@ class ControlCenterWorkProjection:
 
 @dataclass(frozen=True)
 class ControlCenterSnapshot:
-    runtime_root: str; system_state: str; writer_state: str; activation_state: str; store_state: str; store_instance_id: str | None; works: tuple[ControlCenterWorkProjection, ...]; action_predicates: tuple[ActionPredicate, ...]; reason_code: str | None = None; schema: str = CC1_QUERY_SCHEMA; authority: str = CC1_AUTHORITY_ID; generation: str = GENERATION_ID; authority_summary: Mapping[str, Any] = field(default_factory=dict)
+    runtime_root: str; system_state: str; writer_state: str; activation_state: str; store_state: str; store_instance_id: str | None; works: tuple[ControlCenterWorkProjection, ...]; action_predicates: tuple[ActionPredicate, ...]; reason_code: str | None = None; schema: str = CC1_QUERY_SCHEMA; authority: str = CC1_AUTHORITY_ID; generation: str = GENERATION_ID; authority_summary: Mapping[str, Any] = field(default_factory=dict); read_only: bool = True
     def __post_init__(self) -> None:
         if self.system_state not in SYSTEM_STATES: raise ValueError("unsupported Control Center system state")
     def as_dict(self) -> dict[str, Any]:
-        payload = {"schema": self.schema, "authority": self.authority, "generation": self.generation, "runtime_root": self.runtime_root, "status_vector": {"system": self.system_state, "writer": self.writer_state, "activation": self.activation_state, "control_store": self.store_state}, "store_instance_id": self.store_instance_id, "reason_code": self.reason_code, "works": [item.as_dict() for item in self.works], "actions": [item.as_dict() for item in self.action_predicates], "authority_summary": dict(self.authority_summary), "read_only": True, "legacy_fallback": False, "mutation_operations_invoked": 0}
+        payload = {"schema": self.schema, "authority": self.authority, "generation": self.generation, "runtime_root": self.runtime_root, "status_vector": {"system": self.system_state, "writer": self.writer_state, "activation": self.activation_state, "control_store": self.store_state}, "store_instance_id": self.store_instance_id, "reason_code": self.reason_code, "works": [item.as_dict() for item in self.works], "actions": [item.as_dict() for item in self.action_predicates], "authority_summary": dict(self.authority_summary), "read_only": self.read_only, "legacy_fallback": False, "mutation_operations_invoked": 0}
         payload["projection_digest"] = semantic_digest(payload); return payload
 
 
@@ -191,13 +191,17 @@ def read_control_center_authority_summary(
         m3c_kill_doc = _read_json_file(m3c_kill) if m3c_kill.is_file() else {}
         m3c_enabled = m3c_kill_doc.get("admission_enabled")
         route_ok = routes.get("target_registered") is True and routes.get("target_conflict") is False and routes.get("legacy_route_present") is False
-        m9b_ok = m9b.get("state") == "ACTIVE" and m9b.get("writer_enabled") is True and m9b.get("intake_enabled") is True
+        active_commit = (bootstrap.get("slots", {}).get("ACTIVE") or {}).get("source_commit")
+        m9b_matches = bool(active_commit and m9b.get("source_head") == active_commit)
+        m9b_ok = m9b.get("state") == "ACTIVE" and m9b.get("writer_enabled") is True and m9b.get("intake_enabled") is True and m9b_matches
         production_acceptance = route_ok and m9b_ok and m3c_enabled is True and bootstrap.get("status") == "ACTIVE"
         warnings: list[str] = []
         if not route_ok:
             warnings.append("native_route_not_ready")
         if not m9b_ok:
             warnings.append("m9b_not_active")
+        if not m9b_matches:
+            warnings.append("m9b_source_head_mismatch")
         if m3c_enabled is not True:
             warnings.append("m3c_admission_not_enabled")
         return {
@@ -234,6 +238,9 @@ def read_control_center_authority_summary(
 
 def _read_only_actions() -> tuple[ActionPredicate, ...]:
     return tuple(ActionPredicate(action=action) for action in ("resume", "apply_effect", "publish", "activate"))
+
+def _active_actions() -> tuple[ActionPredicate, ...]:
+    return tuple(ActionPredicate(action=action, enabled=True, reason_code="canonical_active", explanation="Canonical mutation authority is active.") for action in ("resume", "apply_effect", "publish", "activate"))
 
 def _off_snapshot(root: Path) -> ControlCenterSnapshot:
     return ControlCenterSnapshot(str(root), "OFF", "OFF", "OFF", "ABSENT", None, (), _read_only_actions(), "control_store_absent", authority_summary=_unavailable_authority_summary("control_store_absent"))
@@ -298,7 +305,39 @@ def read_control_center_snapshot(root: str | Path | None = None) -> ControlCente
         works = tuple(_work_projection(connection, item.as_dict()) for item in queries)
         if connection.total_changes != before_changes: _fail("read_only_violation", "Control Center query unexpectedly mutated the Control DB")
         instance_id = str(seal.get("instance_id")) if seal.get("instance_id") else None
-        return ControlCenterSnapshot(str(runtime_root), "OFF", "OFF", "OFF", "SEALED", instance_id, works, _read_only_actions(), "cc1_build_only", authority_summary=read_control_center_authority_summary(runtime_root))
+        authority_summary = read_control_center_authority_summary(runtime_root)
+        prod_acc = authority_summary.get("production_acceptance") or {}
+        if prod_acc.get("value") is True:
+            return ControlCenterSnapshot(
+                str(runtime_root),
+                "ON",
+                "ON",
+                "ACTIVE",
+                "SEALED",
+                instance_id,
+                works,
+                _active_actions(),
+                "production_acceptance_pass",
+                authority_summary=authority_summary,
+                read_only=False,
+            )
+        reason = prod_acc.get("reason_code") or (authority_summary.get("warnings", ["cc1_read_only"])[0] if authority_summary.get("warnings") else "cc1_read_only")
+        activation_state = authority_summary.get("bootstrap", {}).get("status", "OFF")
+        if activation_state not in SYSTEM_STATES and activation_state != "ACTIVE":
+            activation_state = "OFF"
+        return ControlCenterSnapshot(
+            str(runtime_root),
+            "OFF",
+            "OFF",
+            activation_state,
+            "SEALED",
+            instance_id,
+            works,
+            _read_only_actions(),
+            reason,
+            authority_summary=authority_summary,
+            read_only=True,
+        )
     except M4aReadQueryError as exc:
         raise ControlCenterQueryError(exc.code, str(exc)) from exc
     except sqlite3.DatabaseError as exc:

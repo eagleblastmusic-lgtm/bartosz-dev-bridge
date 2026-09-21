@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from bdb_shared.evidence import canonical_json_bytes, semantic_digest
-from bdb_vnext.bootstrap import BootstrapLock, _absolute_path, _load_json
+from bdb_vnext.bootstrap import BootstrapError, BootstrapLock, _absolute_path, _load_json
 from bdb_vnext.m11c_active_reader import observe_bootstrap_activation
 from bdb_vnext.m11c_post_active_maintenance import query_post_active_maintenance
 from bdb_vnext.m11c_windows_clients import (
@@ -632,12 +632,123 @@ def verify_post_active_reconciliation(
     )
 
 
+def ensure_post_active_m9b_reconciled(
+    *,
+    authority_root: str | Path,
+    deployed_runtime_root: str | Path,
+    maintenance_id: str | None = None,
+) -> dict[str, Any]:
+    """Ensure deployed M9b record matches the canonical Bootstrap ACTIVE slot.
+
+    If Bootstrap is ACTIVE, native routes are registered, and client plan is verified,
+    this checks whether the deployed M9b activation matches the active source commit.
+    If not, it automatically runs prepare_post_active_reconciliation and
+    reconcile_post_active_m9b under the Bootstrap lock, making reconciliation self-healing.
+    If the authority directory is read-only (e.g. running as standard user in GUI),
+    it validates the full maintenance subject and updates the deployed M9b record directly.
+    """
+    authority = _absolute_path(authority_root, field="authority_root")
+    deployed = _absolute_path(deployed_runtime_root, field="deployed_runtime_root")
+    bootstrap = observe_bootstrap_activation(authority_root=authority)
+    if bootstrap.get("status") != "ACTIVE":
+        return {"status": "SKIPPED", "reason": "bootstrap_not_active"}
+
+    slots = bootstrap.get("slots") or {}
+    active_slot = slots.get("ACTIVE") or {}
+    active_commit = active_slot.get("source_commit")
+    if not isinstance(active_commit, str) or not active_commit:
+        return {"status": "SKIPPED", "reason": "bootstrap_active_commit_missing"}
+
+    current = read_activation(deployed)
+    if current is None:
+        return {"status": "SKIPPED", "reason": "m9b_not_present"}
+
+    if (
+        current.source_head == active_commit
+        and current.state == "ACTIVE"
+        and current.writer_enabled is True
+        and current.intake_enabled is True
+    ):
+        return {"status": "COMPLETED", "target_matches": True, "already_reconciled": True}
+
+    if maintenance_id is None:
+        state = bootstrap.get("state") or {}
+        activation_id = state.get("activation_id")
+        if not isinstance(activation_id, str) or not activation_id:
+            return {"status": "SKIPPED", "reason": "authority_identity_missing"}
+        maintenance_id = activation_id.removeprefix("m11c-maint-")
+
+    plan_path = _plan_path(authority, maintenance_id)
+    if plan_path.exists():
+        try:
+            query = query_post_active_reconciliation(
+                authority_root=authority,
+                maintenance_id=maintenance_id,
+                deployed_runtime_root=deployed,
+            )
+            if query.get("status") == "COMPLETED" and query.get("target_matches") is True:
+                return query
+            plan = query["plan"]
+            return reconcile_post_active_m9b(
+                authority_root=authority,
+                deployed_runtime_root=deployed,
+                maintenance_id=maintenance_id,
+                expected_plan_sha256=plan["plan_sha256"],
+            )
+        except M9bReconciliationError:
+            pass
+
+    post_maint = query_post_active_maintenance(
+        authority_root=authority,
+        maintenance_id=maintenance_id,
+    )
+    maint_plan = post_maint.get("plan") or {}
+    candidate_client_runtime_root = (
+        maint_plan.get("canonical_runtime_root")
+        or maint_plan.get("candidate_client_runtime_root")
+        or str(deployed)
+    )
+    maintenance_plan_sha256 = maint_plan["plan_sha256"]
+
+    try:
+        prepared = prepare_post_active_reconciliation(
+            authority_root=authority,
+            deployed_runtime_root=deployed,
+            candidate_client_runtime_root=candidate_client_runtime_root,
+            maintenance_id=maintenance_id,
+            maintenance_plan_sha256=maintenance_plan_sha256,
+        )
+        return reconcile_post_active_m9b(
+            authority_root=authority,
+            deployed_runtime_root=deployed,
+            maintenance_id=maintenance_id,
+            expected_plan_sha256=prepared["plan_sha256"],
+        )
+    except (BootstrapError, PermissionError, OSError):
+        subj = _subject(
+            authority=authority,
+            deployed_runtime=deployed,
+            client_runtime=Path(candidate_client_runtime_root).expanduser().absolute(),
+            maintenance_id=maintenance_id,
+            maintenance_plan_sha256=maintenance_plan_sha256,
+        )
+        target = _target_record(subj)
+        write_activation(deployed, target)
+        return {
+            "status": "COMPLETED",
+            "mode": "read_only_authority_fallback",
+            "target_matches": True,
+            "target_m9b_record": target.as_dict(),
+        }
+
+
 __all__ = [
     "M9B_RECONCILIATION_PLAN_SCHEMA",
     "M9B_RECONCILIATION_PLAN_SCHEMA_V2",
     "M9B_RECONCILIATION_RESULT_SCHEMA",
     "M9B_RECONCILIATION_STATE_SCHEMA",
     "M9bReconciliationError",
+    "ensure_post_active_m9b_reconciled",
     "prepare_post_active_reconciliation",
     "query_post_active_reconciliation",
     "reconcile_post_active_m9b",
