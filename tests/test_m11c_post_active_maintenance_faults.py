@@ -9,6 +9,105 @@ import bdb_vnext.m11c_post_active_maintenance as maintenance
 from test_m11c_post_active_maintenance import HEAD, SHA, TREE, _active, _patch_common, _prepare
 
 
+def test_cli_retries_protected_bootstrap_through_explicit_uac(monkeypatch, tmp_path, capsys):
+    import bdb_vnext.m11c_post_active_maintenance_cli as cli
+
+    authority = tmp_path / "authority"
+    authority.mkdir()
+    lock = authority / "bootstrap.lock"
+    original_open = Path.open
+
+    def denied_lock(path, *args, **kwargs):
+        if path == lock:
+            raise PermissionError("protected Bootstrap authority")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", denied_lock)
+    monkeypatch.setattr(cli, "_uac_available", lambda: True)
+    monkeypatch.setattr(cli, "is_elevated", lambda: False)
+
+    observed: dict[str, object] = {}
+
+    def fake_retry(raw):
+        observed["raw"] = list(raw)
+        return 0, {
+            "status": "ACTIVE",
+            "production_activation_performed": True,
+            "source_head": HEAD,
+        }
+
+    monkeypatch.setattr(cli, "_retry_elevated", fake_retry)
+
+    code = cli.main([
+        "prepare", "--authority-root", str(authority),
+        "--candidate-bundle-root", str(tmp_path / "bundle"),
+        "--candidate-bundle-sha256", SHA,
+        "--candidate-client-runtime-root", str(tmp_path / "client"),
+        "--source-head", HEAD, "--source-tree", TREE,
+        "--native-artifact-manifest-sha256", SHA,
+        "--maintenance-id", "lock-elevated",
+        "--elevate-on-lock",
+    ])
+
+    output = capsys.readouterr()
+    assert code == 0
+    assert json.loads(output.out) == {
+        "status": "ACTIVE",
+        "production_activation_performed": True,
+        "source_head": HEAD,
+    }
+    assert "--elevate-on-lock" in observed["raw"]
+    assert output.err == ""
+    assert list(authority.iterdir()) == []
+
+
+def test_cli_reports_uac_cancellation_as_stable_blocked_result(monkeypatch, tmp_path, capsys):
+    import bdb_vnext.m11c_post_active_maintenance_cli as cli
+    from bdb_vnext.windows_elevation import ElevationError
+
+    authority = tmp_path / "authority"
+    authority.mkdir()
+    lock = authority / "bootstrap.lock"
+    original_open = Path.open
+
+    def denied_lock(path, *args, **kwargs):
+        if path == lock:
+            raise PermissionError("protected Bootstrap authority")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", denied_lock)
+    monkeypatch.setattr(cli, "_uac_available", lambda: True)
+    monkeypatch.setattr(cli, "is_elevated", lambda: False)
+    monkeypatch.setattr(
+        cli,
+        "_retry_elevated",
+        lambda _raw: (_ for _ in ()).throw(
+            ElevationError("elevation_cancelled", "Windows UAC elevation was cancelled")
+        ),
+    )
+
+    code = cli.main([
+        "prepare", "--authority-root", str(authority),
+        "--candidate-bundle-root", str(tmp_path / "bundle"),
+        "--candidate-bundle-sha256", SHA,
+        "--candidate-client-runtime-root", str(tmp_path / "client"),
+        "--source-head", HEAD, "--source-tree", TREE,
+        "--native-artifact-manifest-sha256", SHA,
+        "--maintenance-id", "lock-uac-cancelled",
+        "--elevate-on-lock",
+    ])
+
+    output = capsys.readouterr()
+    assert code == 2
+    assert json.loads(output.out) == {
+        "status": "BLOCKED",
+        "error_code": "elevation_cancelled",
+        "error": "Windows UAC elevation was cancelled",
+    }
+    assert output.err == ""
+    assert list(authority.iterdir()) == []
+
+
 def test_cli_reports_real_bootstrap_lock_failure_without_publication(monkeypatch, tmp_path, capsys):
     from bdb_vnext.m11c_post_active_maintenance_cli import main
 
