@@ -28,6 +28,10 @@ _ELEVATED_RESULT_SCHEMA = "bdb-vnext-elevated-maintenance-result-v1"
 _ELEVATION_FLAGS = frozenset({"--elevate-on-lock", "--elevated-child"})
 
 
+def _uac_available() -> bool:
+    return os.name == "nt"
+
+
 def _add_elevation_flags(command: argparse.ArgumentParser) -> None:
     command.add_argument(
         "--elevate-on-lock",
@@ -198,7 +202,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             getattr(exc, "code", None) == "authority_lock_failed"
             and args.elevate_on_lock
             and not args.elevated_child
-            and os.name == "nt"
+            and _uac_available()
             and not is_elevated()
         ):
             try:
