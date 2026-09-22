@@ -1,11 +1,46 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 import bdb_vnext.m11c_post_active_maintenance as maintenance
 from test_m11c_post_active_maintenance import HEAD, SHA, TREE, _active, _patch_common, _prepare
+
+
+def test_cli_reports_real_bootstrap_lock_failure_without_publication(monkeypatch, tmp_path, capsys):
+    from bdb_vnext.m11c_post_active_maintenance_cli import main
+
+    authority = tmp_path / "authority"
+    authority.mkdir()
+    lock = authority / "bootstrap.lock"
+    original_open = Path.open
+
+    def denied_lock(path, *args, **kwargs):
+        if path == lock:
+            raise PermissionError("protected Bootstrap authority")
+        return original_open(path, *args, **kwargs)
+
+    # Inject the filesystem failure; CLI, prepare and BootstrapLock are real.
+    monkeypatch.setattr(Path, "open", denied_lock)
+    code = main([
+        "prepare", "--authority-root", str(authority),
+        "--candidate-bundle-root", str(tmp_path / "bundle"),
+        "--candidate-bundle-sha256", SHA,
+        "--candidate-client-runtime-root", str(tmp_path / "client"),
+        "--source-head", HEAD, "--source-tree", TREE,
+        "--native-artifact-manifest-sha256", SHA,
+        "--maintenance-id", "lock-denied",
+    ])
+    output = capsys.readouterr()
+    assert code == 2
+    assert json.loads(output.out) == {
+        "status": "BLOCKED", "error_code": "authority_lock_failed",
+        "error": "bootstrap authority lock cannot be opened",
+    }
+    assert output.err == ""
+    assert list(authority.iterdir()) == []
 
 
 PREPARE_FAULTS = {

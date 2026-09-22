@@ -6,6 +6,7 @@ import argparse
 from typing import Sequence
 
 from bdb_shared.evidence import canonical_json_bytes
+from bdb_vnext.bootstrap import BootstrapError
 from bdb_vnext.m11c_post_active_maintenance import (
     M11cMaintenanceError,
     apply_post_active_maintenance,
@@ -59,7 +60,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         print(canonical_json_bytes(result).decode("utf-8"))
         return 0
-    except (M11cMaintenanceError, OSError, ValueError) as exc:
+    except (M11cMaintenanceError, BootstrapError, OSError, ValueError) as exc:
         print(canonical_json_bytes({"status": "BLOCKED", "error_code": getattr(exc, "code", "maintenance_failed"), "error": str(exc)}).decode("utf-8"))
         return 2
 
