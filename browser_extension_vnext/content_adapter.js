@@ -82,6 +82,11 @@ function parseProjectExecutionResult(block) {
     if (required.some((field) => !(field in value))) return null;
     if (typeof value.project_id !== "string" || typeof value.task_id !== "string" || typeof value.execution_binding_id !== "string") return null;
     if (!Array.isArray(value.evidence_refs) || !Array.isArray(value.criteria)) return null;
+    // Project Plan may carry an integer version. The execution submission
+    // contract is text, so normalize at the Browser result boundary.
+    if (typeof value.plan_version === "number" && Number.isSafeInteger(value.plan_version) && value.plan_version >= 0) {
+      return { ...value, plan_version: String(value.plan_version) };
+    }
     return value;
   } catch (_error) {
     // YAML and prose are intentionally not accepted as a canonical result.
@@ -263,12 +268,6 @@ function decorate(block, submission) {
   mountPanel(block, panel, panelClass, panelKind, panelKey, decoratedPanels, decorated);
 }
 
-async function projectExecutionBindingForConversation(conversationId, result) {
-  if (!conversationId || !result || typeof result.project_id !== "string" || typeof result.execution_binding_id !== "string") return null;
-  const bindings = await projectReadBindings();
-  return Object.values(bindings).find((value) => value && value.conversation_id === conversationId && value.project_id === result.project_id && value.execution_binding_id === result.execution_binding_id && typeof value.launch_id === "string" && value.launch_id.length > 0) || null;
-}
-
 async function projectExecutionStatusFor(projectId, executionBindingId, conversationId) {
   if (!projectId || !executionBindingId || !conversationId) return null;
   try {
@@ -319,8 +318,43 @@ function projectAutoGateMatches(status, result, conversationId) {
   );
 }
 
+function projectCanonicalHandoffSentMatches(status, launch, conversationId) {
+  const binding = status && status.binding;
+  const handoff = status && status.launch_handoff;
+  return Boolean(
+    status && status.current_binding_id === launch.execution_binding_id && status.current_task_id === launch.task_id &&
+    binding && binding.status === "ACTIVE" && binding.superseded !== true &&
+    binding.project_id === launch.project_id && binding.execution_binding_id === launch.execution_binding_id &&
+    binding.plan_version === String(launch.plan_version) && binding.task_id === launch.task_id &&
+    binding.launch_id === launch.launch_id && binding.correlation_id === launch.correlation_id &&
+    binding.command_id === launch.command_id && binding.repo_alias === launch.repo_alias &&
+    binding.expected_repo_head_before === launch.expected_repo_head_before &&
+    binding.conversation_id === conversationId &&
+    handoff && handoff.status === "SENT" && handoff.project_id === launch.project_id &&
+    handoff.execution_binding_id === launch.execution_binding_id && handoff.task_id === launch.task_id &&
+    handoff.launch_id === launch.launch_id && handoff.conversation_id === conversationId &&
+    (status.launch_outbox_status === "PUBLISHED" || status.launch_outbox_status === "ACKNOWLEDGED")
+  );
+}
+
+function projectCanonicalDeliveryAckMatches(status, launch, conversationId) {
+  return projectCanonicalHandoffSentMatches(status, launch, conversationId) && status.launch_outbox_status === "ACKNOWLEDGED";
+}
+
 function projectExecutionResultRefs(panel, button, output) {
   return { panel, button, output };
+}
+
+function projectResultFailureText(response) {
+  const code = response && typeof response.error_code === "string" ? response.error_code : null;
+  const message = response && typeof response.error === "string" ? response.error : "project execution result rejected";
+  if (code === "execution_result_non_terminal") {
+    return `${code}: ${message}. Final submission was withheld; wait for validation and submit a final result on this binding.`;
+  }
+  if (code === "execution_field_invalid" || code === "execution_schema_invalid" || code === "execution_status_invalid") {
+    return `${code}: ${message}. Correct the result JSON and retry; the rejected result did not change Project Memory.`;
+  }
+  return code ? `${code}: ${message}. Check canonical execution status before retrying.` : message;
 }
 
 async function submitProjectExecutionResult(block, result, refs, { automatic = false, gate = null } = {}) {
@@ -330,7 +364,6 @@ async function submitProjectExecutionResult(block, result, refs, { automatic = f
     setResult(output, "Project execution requires a canonical conversation.", "error");
     return false;
   }
-  let binding = await projectExecutionBindingForConversation(conversationId, result);
   if (automatic && !projectAutoGateMatches(gate, result, conversationId)) {
     projectAutoStop("canonical_auto_gate_rejected");
     return false;
@@ -342,7 +375,8 @@ async function submitProjectExecutionResult(block, result, refs, { automatic = f
     result,
     conversation_id: conversationId
   };
-  if (binding) request.launch_id = binding.launch_id;
+  // Native resolves the launch from the canonical binding; local Browser
+  // projections may disappear on reload and must not supply authority.
   button.disabled = true;
   setResult(output, automatic ? "BDB vNext: Submitting…" : "Submitting project result through canonical vNext transport…");
   try {
@@ -381,7 +415,7 @@ async function submitProjectExecutionResult(block, result, refs, { automatic = f
         }
         projectAutoState = {
           phase: "result_accepted",
-          launch_id: binding ? binding.launch_id : null,
+          launch_id: gate && gate.binding ? gate.binding.launch_id : null,
           execution_binding_id: result.execution_binding_id,
           token: receipt.replayed ? "replayed" : "accepted"
         };
@@ -397,7 +431,13 @@ async function submitProjectExecutionResult(block, result, refs, { automatic = f
       }
       return true;
     }
-    throw new Error(response && response.error ? response.error : "project execution result rejected");
+    if (response && response.error_code === "execution_result_non_terminal") {
+      setResult(output, projectResultFailureText(response), "warning");
+      button.textContent = "BDB vNext: Await validation";
+      if (automatic) projectAutoState.phase = "waiting_external";
+      return false;
+    }
+    throw new Error(projectResultFailureText(response));
   } catch (error) {
     setResult(output, error instanceof Error ? error.message : String(error), "error");
     button.textContent = "BDB vNext: Retry result";
@@ -611,7 +651,7 @@ async function projectWriteBinding(launch, claimId, conversationId, state, extra
     claim_id: claimId,
     repo_alias: launch.repo_alias,
     project_id: launch.project_id || null,
-    plan_version: launch.plan_version || null,
+    plan_version: launch.plan_version !== undefined && launch.plan_version !== null ? String(launch.plan_version) : null,
     task_id: launch.task_id || null,
     execution_binding_id: launch.execution_binding_id || null,
     correlation_id: launch.correlation_id || null,
@@ -877,8 +917,22 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
   }
   const bindings = await projectReadBindings();
   const existing = conversationId ? projectBindingFor(bindings, launch.launch_id, conversationId) : null;
-  if ((!existing || (existing.state === "ACKED" && existing.auto_send !== true)) && autoMode && projectExactUserMessageCount(launch.prompt) > 0 && projectComposerText(composer) === "") {
-    projectAnnounce("BDB AUTO zatrzymane: istnieje wysłana identyczna wiadomość bez lokalnego dowodu próby.", "warning");
+  const canonicalBeforeClaim = autoMode
+    ? await projectExecutionStatusFor(launch.project_id, launch.execution_binding_id, conversationId)
+    : null;
+  if (autoMode && projectCanonicalDeliveryAckMatches(canonicalBeforeClaim, launch, conversationId)) {
+    const claimId = existing ? existing.claim_id : projectClaimId(launch.launch_id);
+    // Native consumes any stale queue projection when the canonical outbox is
+    // already acknowledged. The Browser cache is rebuilt only as a cache.
+    await projectClaim(launch, claimId, conversationId);
+    try { await projectWriteBinding(launch, claimId, conversationId, "ACKED"); } catch (_error) { /* canonical ACK is sufficient */ }
+    projectAutoState = { phase: "sent", launch_id: launch.launch_id, execution_binding_id: launch.execution_binding_id, token: "canonical-ack" };
+    projectAnnounce("BDB AUTO: kanoniczny ACK potwierdza wysyłkę; wznowiono bez ponownego Send.", "success");
+    return projectLaunchResult(true, "project_prompt_inserted", launchId);
+  }
+  const localSendProof = existing && (existing.state === "SEND_ATTEMPTED" || existing.state === "SEND_CONFIRMED");
+  if (autoMode && !localSendProof && !projectCanonicalHandoffSentMatches(canonicalBeforeClaim, launch, conversationId) && projectExactUserMessageCount(launch.prompt) > 0 && projectComposerText(composer) === "") {
+    projectAnnounce("BDB AUTO zatrzymane: prompt jest w rozmowie, lecz brak kanonicznego ACK. Ponowny Send jest niebezpieczny; wymagane uzgodnienie dostawy.", "warning");
     return projectLaunchResult(false, "project_auto_duplicate_guard", launchId);
   }
   if (!existing && projectComposerHasForeignState(composer)) {
@@ -913,7 +967,7 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
       return projectLaunchResult(false, "project_auto_gate_rejected", claimedLaunchId);
     }
   }
-  if (autoMode && canonicalStatus?.launch_handoff?.status === "SENT") {
+  if (autoMode && projectCanonicalHandoffSentMatches(canonicalStatus, claimed, conversationId)) {
     const acknowledged = await projectAck(claimed.launch_id, claimId, conversationId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
     return projectLaunchResult(acknowledged, acknowledged ? "project_prompt_inserted" : "project_prompt_ack_failed", claimedLaunchId);
   }
@@ -970,7 +1024,7 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
       return projectLaunchResult(false, "project_prompt_inserted_unverified", claimedLaunchId);
     }
     if (autoMode) {
-      if (canonicalStatus?.launch_handoff?.status === "SENT") {
+      if (projectCanonicalHandoffSentMatches(canonicalStatus, claimed, conversationId)) {
         projectAutoState = { phase: "sent", launch_id: claimed.launch_id, execution_binding_id: claimed.execution_binding_id, token: "recovered-sent" };
         const acknowledged = await projectAck(claimed.launch_id, claimId, conversationId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
         if (acknowledged) {

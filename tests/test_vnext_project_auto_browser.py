@@ -62,6 +62,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               execution_binding_id: "binding-2",
               correlation_id: "corr-2",
               command_id: "command-2",
+              expected_repo_head_before: "b".repeat(40),
               created_at: "2026-01-01T00:00:00Z",
               expires_at: "2999-01-01T00:00:00Z"
             };
@@ -75,13 +76,13 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
             let codeText = "";
             const userMessages = [];
             const localStorage = {};
-            if (mode === "manual-acked" || mode === "auto-acked") {
+            if (["manual-acked", "auto-acked", "restart-acked", "claimed-visible-noack"].includes(mode)) {
               localStorage.bdbVnextProjectLaunchBindingsV1 = {
                 [nextLaunchId]: {
                   launch_id: nextLaunchId, conversation_id: conversationId,
-                  tab_instance_id: "33333333-3333-4333-8333-333333333333",
+                  tab_instance_id: mode === "restart-acked" ? "44444444-4444-4444-8444-444444444444" : "33333333-3333-4333-8333-333333333333",
                   claim_id: "33333333-3333-4333-8333-333333333333",
-                  state: "ACKED", auto_send: mode === "auto-acked", updated_at: Date.now()
+                  state: mode === "claimed-visible-noack" ? "CLAIMED" : "ACKED", auto_send: mode === "auto-acked" || mode === "claimed-visible-noack", updated_at: Date.now()
                 }
               };
             }
@@ -196,6 +197,11 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
             }
             const documentElement = new Element("html");
             documentElement.append(assistant);
+            if (["canonical-acked", "restart-acked", "visible-noack", "claimed-visible-noack"].includes(mode)) {
+              const visiblePrompt = new Element("user", prompt);
+              userMessages.push(visiblePrompt);
+              documentElement.append(visiblePrompt);
+            }
             const context = {
               console,
               HTMLElement: Element,
@@ -253,9 +259,10 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                       const next = message.execution_binding_id === "binding-2";
                       return { ok: true, response: {
                         status: "project_execution_status", current_binding_id: next ? "binding-2" : bindingId, current_task_id: next ? "P0-02" : taskId,
-                        binding: { project_id: projectId, execution_binding_id: next ? "binding-2" : bindingId, task_id: next ? "P0-02" : taskId, launch_id: next ? nextLaunchId : launchId, conversation_id: mode === "unbound" && next ? null : conversationId, status: "ACTIVE", superseded: false },
+                        binding: { project_id: projectId, plan_version: "1", execution_binding_id: next ? "binding-2" : bindingId, task_id: next ? "P0-02" : taskId, launch_id: next ? nextLaunchId : launchId, correlation_id: next ? "corr-2" : "corr-1", command_id: next ? "command-2" : "command-1", repo_alias: "execution-fixture", expected_repo_head_before: next ? "b".repeat(40) : "a".repeat(40), conversation_id: mode === "unbound" && next ? null : conversationId, status: "ACTIVE", superseded: false },
                         milestone_auto: { status: "RUNNABLE", milestone_run_id: "run-1", current_task_id: next ? "P0-02" : taskId },
-                        launch_handoff: mode === "sent" && next ? { status: "SENT" } : { status: "PENDING" }
+                        launch_handoff: ["sent", "canonical-acked", "restart-acked"].includes(mode) && next ? { status: "SENT", project_id: projectId, execution_binding_id: "binding-2", task_id: "P0-02", launch_id: nextLaunchId, conversation_id: conversationId } : { status: "PENDING" },
+                        launch_outbox_status: ["canonical-acked", "restart-acked"].includes(mode) && next ? "ACKNOWLEDGED" : mode === "sent" && next ? "PUBLISHED" : "PENDING"
                       }};
                     }
                     if (message.type === "bdb-vnext-project-execution-submit") {
@@ -283,6 +290,16 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
             observerCallback(mutation);
             observerCallback(mutation);
             sweepCallback();
+            let resumedTaskAccepted = false;
+            if (mode === "restart-acked") setTimeout(async () => {
+              const button = { disabled: false, textContent: "" };
+              const output = { textContent: "", dataset: {} };
+              await context.submitProjectExecutionResult(null, {
+                ...result, task_id: "P0-02", execution_binding_id: "binding-2",
+                correlation_id: "corr-2", command_id: "command-2", head_before: "b".repeat(40)
+              }, { button, output });
+              resumedTaskAccepted = output.dataset.state === "success";
+            }, 500);
             setTimeout(() => {
               const submitMessages = messages.filter((message) => message.type === "bdb-vnext-project-execution-submit");
               const claimMessages = messages.filter((message) => message.type === "bdb-vnext-project-launch-claim");
@@ -311,6 +328,21 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                 assert.equal(sendClicks, 0, "already-sent handoff must not send twice");
                 assert.equal(composer.value, "", "SENT recovery must not reinsert an already delivered prompt");
                 assert.deepEqual(events, ["ack"]);
+              } else if (mode === "canonical-acked" || mode === "restart-acked") {
+                assert.equal(submitMessages.length, mode === "restart-acked" ? 2 : 1);
+                assert.equal(sendClicks, 0, "canonical delivery ACK must prevent duplicate Send after Browser state loss");
+                assert.equal(ackMessages.length, 0, "canonical ACK requires no new handoff mutation");
+                assert.equal(claimMessages.length, 1, "stale queue projection may be consumed once");
+                assert.equal(localStorage.bdbVnextProjectLaunchBindingsV1[nextLaunchId].state, "ACKED");
+                assert.equal(localStorage.bdbVnextProjectLaunchBindingsV1[nextLaunchId].tab_instance_id, "33333333-3333-4333-8333-333333333333");
+                if (mode === "restart-acked") assert.equal(resumedTaskAccepted, true, "next task result can continue after Browser restart");
+              } else if (mode === "visible-noack" || mode === "claimed-visible-noack") {
+                assert.equal(submitMessages.length, 1);
+                assert.equal(claimMessages.length, 0, "visible prompt without canonical ACK must not claim or resend");
+                assert.equal(ackMessages.length, 0);
+                assert.equal(sendClicks, 0);
+                const notice = composer.children.find((item) => item.className === "bdb-vnext-project-launch-status");
+                assert.match(notice?.textContent || "", /brak kanonicznego ACK/);
               } else if (mode === "nonempty") {
                 assert.equal(submitMessages.length, 1);
                 assert.equal(claimMessages.length, 0, "foreign composer must prevent claim");
@@ -356,7 +388,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
         ),
         encoding="utf-8",
     )
-    for mode in ("happy", "collapsed", "completed", "nonempty", "edited", "stopped", "nosend", "noeffect", "sent", "manual-acked", "auto-acked", "unbound", "fail", "replay-fail", "stale", "wrong"):
+    for mode in ("happy", "collapsed", "completed", "nonempty", "edited", "stopped", "nosend", "noeffect", "sent", "canonical-acked", "restart-acked", "visible-noack", "claimed-visible-noack", "manual-acked", "auto-acked", "unbound", "fail", "replay-fail", "stale", "wrong"):
         completed = subprocess.run(
             [node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js"), mode],
             capture_output=True,

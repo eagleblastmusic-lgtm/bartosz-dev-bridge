@@ -46,10 +46,13 @@ jobs:
           tests/test_project_center_write_capability_regression.py
           tests/test_project_execution_integration.py
           tests/test_project_execution_submission.py
+          tests/test_vnext_project_result_reliability_runtime.py
+          tests/test_vnext_project_reliability_e2e.py
           tests/test_auto_delivery_native_process.py
           tests/test_nx006_launch_outbox.py
           tests/test_auto_prerequisite_graph.py
           tests/test_vnext_project_auto_browser.py
+          tests/test_vnext_project_launch_browser_bridge.py
           tests/test_m9b_project_launch_durable_ack.py
           tests/test_m9b_project_launch_legacy_ack_compat.py
 
