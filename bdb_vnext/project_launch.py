@@ -421,6 +421,15 @@ class ProjectLaunchQueueAdapter:
             self._write_state_unlocked(candidate, None)
             return candidate
 
+    def discard_projection(self, expected: ProjectLaunch) -> bool:
+        """Remove only the exact observed, unclaimed projection under the queue lock."""
+        with self._lock():
+            pending, claim = self._normalize_expiry(*self._read_state_unlocked())
+            if pending != expected or claim is not None:
+                return False
+            self._write_state_unlocked(None, None)
+            return True
+
     def claim(self, *, launch_id: str, claim_id: str, lease_seconds: int = 30) -> ProjectLaunchClaim | None:
         if lease_seconds <= 0 or lease_seconds > 600:
             raise ProjectLaunchQueueError("queue_lease_invalid", "lease_seconds must be positive and bounded")

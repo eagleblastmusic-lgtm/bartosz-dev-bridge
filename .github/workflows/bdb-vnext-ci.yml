@@ -28,7 +28,30 @@ jobs:
           cache: pip
 
       - name: Install test dependencies
-        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+        run: python -m pip install --disable-pip-version-check -e ".[dev,gui]"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Qt runtime libraries on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0
+
+      - name: Verify production AUTO orchestration and recovery
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -m pytest -q
+          tests/test_project_center_write_capability_regression.py
+          tests/test_project_execution_integration.py
+          tests/test_project_execution_submission.py
+          tests/test_auto_delivery_native_process.py
+          tests/test_nx006_launch_outbox.py
+          tests/test_auto_prerequisite_graph.py
+          tests/test_vnext_project_auto_browser.py
+          tests/test_m9b_project_launch_durable_ack.py
+          tests/test_m9b_project_launch_legacy_ack_compat.py
 
       - name: Compile vNext sources
         run: python -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for p in pathlib.Path('bdb_vnext').glob('*.py')]"

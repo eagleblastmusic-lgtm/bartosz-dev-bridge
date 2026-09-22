@@ -90,7 +90,8 @@ def test_execution_binding_selects_single_runnable_task_when_plan_cursor_is_empt
     assert coordinator.snapshot(project_id)["current_task_id"] == "t1"
 
 
-def test_operator_continue_rearms_acknowledged_unfinished_auto_launch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("manual_before_auto", [False, True])
+def test_operator_continue_rearms_acknowledged_unfinished_auto_launch(tmp_path: Path, manual_before_auto: bool) -> None:
     catalog, _coordinator, project_id = _fixture(tmp_path, all_deterministic=True)
 
     class _HeadRunner:
@@ -102,16 +103,18 @@ def test_operator_continue_rearms_acknowledged_unfinished_auto_launch(tmp_path: 
         catalog=catalog,
         command_runner=_HeadRunner(),
     )
+    first = workflow.queue_continue_prompt(project_id) if manual_before_auto else None
     workflow.execution.begin_milestone_auto(
         project_id,
         milestone_id="m1",
         milestone_run_id="milestone-run-rearm",
     )
 
-    first = workflow.queue_continue_prompt(project_id)
-    assert first.auto_send is True
+    first = first or workflow.queue_continue_prompt(project_id)
+    assert first.auto_send is (not manual_before_auto)
     binding_id = first.execution_binding_id
     assert binding_id is not None
+    workflow.execution.mark_launch_handoff_pending(project_id, workflow.execution.binding(project_id, binding_id))
 
     # Reproduce the production state that triggered the bug: Browser ACKed the
     # transport projection, but no execution result arrived and the canonical
@@ -140,6 +143,8 @@ def test_operator_continue_rearms_acknowledged_unfinished_auto_launch(tmp_path: 
     assert recovered is not None
     assert recovered.launch_id == first.launch_id
     assert recovered.execution_binding_id == binding_id
+    assert recovered.auto_send is True
+    assert recovered.prompt == first.prompt
     assert workflow.queue.peek() is not None
     assert workflow.queue.peek().launch_id == first.launch_id
     assert workflow.execution.launch_outbox_record(project_id, first.launch_id).status == "PUBLISHED"

@@ -1087,6 +1087,17 @@ class ProjectExecutionCoordinator:
             if task_status in {"completed", "skipped"}:
                 _fail("task_already_complete", "completed task cannot be re-armed")
 
+            run = execution.get("active_milestone_run")
+            if (
+                not isinstance(run, Mapping)
+                or run.get("status") != "running"
+                or run.get("milestone_id") != task.milestone_id
+                or execution.get("current_task_id") != binding.task_id
+                or task_status not in {"pending", "active"}
+                or task_prerequisite_blockers(plan, state, task)
+            ):
+                _fail("launch_rearm_not_runnable", "AUTO must be running on this unblocked task before re-arming")
+
             if any(
                 item.get("execution_binding_id") == binding_id
                 for item in execution.get("attempts", [])
@@ -1119,6 +1130,7 @@ class ProjectExecutionCoordinator:
             updated_rec = replace(
                 current,
                 status=OUTBOX_STATUS_PENDING,
+                auto_send=True,
                 updated_at=now_iso,
                 expires_at=expires_iso,
             )
@@ -1160,7 +1172,12 @@ class ProjectExecutionCoordinator:
         results = []
         for raw in execution.get("launch_outbox", {}).values():
             rec = ProjectLaunchOutboxRecord.from_dict(raw)
-            if rec.status == OUTBOX_STATUS_PENDING:
+            handoff = execution.get("launch_handoffs", {}).get(rec.execution_binding_id, {})
+            if (
+                rec.status in {OUTBOX_STATUS_PENDING, OUTBOX_STATUS_PUBLISHED}
+                and execution.get("current_binding_id") == rec.execution_binding_id
+                and handoff.get("status") != "SENT"
+            ):
                 results.append(rec)
         return results
 
@@ -1331,6 +1348,14 @@ class ProjectExecutionCoordinator:
         selected_run = run_id or (active.get("milestone_run_id") if active else None)
         run = execution.get("milestone_runs", {}).get(selected_run) if selected_run else active
         progress = self._milestone_auto_projection(plan, state, run)
+        # A GUI crash between durable v2 STOP and the v1 projection update must
+        # not leave the Browser admitted by the old running milestone record.
+        from .project_center_auto import CanonicalProjectCenterAutoCommands
+        scope = CanonicalProjectCenterAutoCommands(self.runtime_root, project_id)
+        if scope.db_path.is_file():
+            scope_state = scope.snapshot(plan_available=True, plan_version=plan.plan_version)
+            if scope_state.stop_fenced:
+                progress = {**progress, "status": "STOPPED", "runnable_task_ids": [], "blocker": {"kind": "stop", "id": project_id, "status": "STOPPED"}}
         return {
             "schema": "bdb-milestone-auto-v1",
             "project_id": project_id,

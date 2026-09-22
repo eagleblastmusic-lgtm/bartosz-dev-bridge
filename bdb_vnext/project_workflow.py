@@ -439,7 +439,7 @@ class ProjectWorkflow:
     def _ensure_auto_next_launch(self, project_id: str, *, completed_task_id: str | None = None) -> tuple[ProjectLaunch | None, str]:
         """Reconcile one canonical AUTO handoff without using Browser state as authority."""
         snapshot = self.execution.snapshot(project_id)
-        auto = snapshot.get("milestone_auto") or {}
+        auto = self.execution.milestone_auto_snapshot(project_id)
         state = self.memory(project_id).read_state()
         active_run = state.execution.get("active_milestone_run") if isinstance(state.execution, Mapping) else None
         if not isinstance(active_run, Mapping) or active_run.get("status") != "running" or auto.get("status") != "RUNNABLE":
@@ -617,16 +617,14 @@ class ProjectWorkflow:
             # Check if existing queue item is an orphan
             is_orphan = True
             if pending.project_id and pending.execution_binding_id:
-                try:
+                if self.catalog.get(pending.project_id) is not None:
                     q_outbox = self.execution.launch_outbox_record(pending.project_id, pending.launch_id)
                     if q_outbox is not None and q_outbox.status in {"PENDING", "PUBLISHED"}:
                         is_orphan = False
-                except Exception:
-                    pass
             if is_orphan:
                 # Clear orphan projection fail-closed
-                with self.queue._lock():
-                    self.queue._write_state_unlocked(None, None)
+                if not self.queue.discard_projection(pending):
+                    raise ProjectWorkflowError("queue_projection_changed", "launch changed or was claimed during recovery; retry Continue")
             else:
                 raise ProjectWorkflowError("queue_pending", "project launch queue already contains another canonical binding")
 
@@ -672,6 +670,8 @@ class ProjectWorkflow:
                         if q_current is not None and q_current.launch_id == rec.launch_id:
                             self.execution.mark_outbox_published(project.project_id, rec.launch_id)
                             reconciled_count += 1
+                        else:
+                            raise
                 elif q_pending.launch_id == rec.launch_id:
                     self.execution.mark_outbox_published(project.project_id, rec.launch_id)
                     reconciled_count += 1
@@ -681,16 +681,12 @@ class ProjectWorkflow:
         if q_pending is not None:
             orphan = True
             if q_pending.project_id and q_pending.execution_binding_id:
-                try:
+                if self.catalog.get(q_pending.project_id) is not None:
                     outbox = self.execution.launch_outbox_record(q_pending.project_id, q_pending.launch_id)
                     if outbox is not None:
                         orphan = False
-                except Exception:
-                    orphan = True
             if orphan:
-                with self.queue._lock():
-                    self.queue._write_state_unlocked(None, None)
-                orphans_cleared += 1
+                orphans_cleared += int(self.queue.discard_projection(q_pending))
 
         return {
             "status": "reconciled",
@@ -716,6 +712,22 @@ class ProjectWorkflow:
                 isinstance(auto.get("milestone_run_id"), str) and
                 bool(auto.get("milestone_run_id"))
             )
+            if auto_send and binding.conversation_id is None:
+                # Preserve the canonical conversation across tasks. Browser tab
+                # visibility is not authority to choose another conversation.
+                previous_bindings = state.execution.get("bindings", [])
+                previous_pass = next((
+                    attempt for attempt in reversed(state.execution.get("attempts", []))
+                    if attempt.get("result_status") == "PASS"
+                    and str(attempt.get("plan_version")) == str(binding.plan_version)
+                ), None)
+                if previous_pass is not None:
+                    previous = next((
+                        item for item in previous_bindings
+                        if item.get("execution_binding_id") == previous_pass.get("execution_binding_id")
+                    ), None)
+                    if previous and previous.get("conversation_id"):
+                        binding = replace(binding, conversation_id=previous["conversation_id"])
             # Step 1: ATOMIC PREPARE (binding + PENDING outbox) in Project Memory
             persisted_binding, outbox_rec = self.execution.prepare_launch(
                 project_id,

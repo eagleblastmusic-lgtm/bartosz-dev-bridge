@@ -107,6 +107,7 @@ def test_project_execution_auto_accepts_once_and_queues_next_task(tmp_path: Path
     assert receipt["current_task_id"] == "t2"
     assert receipt["milestone_run_id"] == "milestone-run-submit"
     assert receipt["next_launch"]["task_id"] == "t2"
+    assert coordinator.binding(project_id, receipt["next_launch"]["execution_binding_id"]).conversation_id == "chatgpt-conversation-1"
 
     replay = workflow.submit_project_execution_result(_result(project_id, binding), conversation_id="chatgpt-conversation-1", launch_id=launch.launch_id)
     assert replay["replayed"] is True

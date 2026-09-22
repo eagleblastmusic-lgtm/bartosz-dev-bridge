@@ -112,6 +112,8 @@ class ProjectLaunchCanonicalState:
         outbox = self.execution.launch_outbox_record(identity["project_id"], launch.launch_id)
         if outbox is None:
             _fail("project_launch_outbox_missing", "canonical launch outbox record is missing")
+        if outbox.prompt != launch.prompt or outbox.auto_send != launch.auto_send:
+            _fail("project_launch_payload_mismatch", "queued prompt or delivery mode differs from canonical outbox")
         for field in (
             "project_id",
             "plan_version",
@@ -221,6 +223,8 @@ class ProjectLaunchCanonicalState:
             raw_outbox = raw_outboxes.get(identity["launch_id"])
             if not isinstance(raw_outbox, Mapping):
                 _fail("project_launch_outbox_missing", "canonical launch outbox record is missing")
+            if raw_outbox.get("prompt") != launch.prompt or raw_outbox.get("auto_send") != launch.auto_send:
+                _fail("project_launch_payload_mismatch", "queued payload changed before claim activation")
             for field in (
                 "project_id",
                 "plan_version",
