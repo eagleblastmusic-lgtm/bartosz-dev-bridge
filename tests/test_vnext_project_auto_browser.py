@@ -75,6 +75,16 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
             let codeText = "";
             const userMessages = [];
             const localStorage = {};
+            if (mode === "manual-acked" || mode === "auto-acked") {
+              localStorage.bdbVnextProjectLaunchBindingsV1 = {
+                [nextLaunchId]: {
+                  launch_id: nextLaunchId, conversation_id: conversationId,
+                  tab_instance_id: "33333333-3333-4333-8333-333333333333",
+                  claim_id: "33333333-3333-4333-8333-333333333333",
+                  state: "ACKED", auto_send: mode === "auto-acked", updated_at: Date.now()
+                }
+              };
+            }
 
             class Element {
               constructor(kind = "div", text = "") {
@@ -243,7 +253,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                       const next = message.execution_binding_id === "binding-2";
                       return { ok: true, response: {
                         status: "project_execution_status", current_binding_id: next ? "binding-2" : bindingId, current_task_id: next ? "P0-02" : taskId,
-                        binding: { project_id: projectId, execution_binding_id: next ? "binding-2" : bindingId, task_id: next ? "P0-02" : taskId, launch_id: next ? nextLaunchId : launchId, conversation_id: conversationId, status: "ACTIVE", superseded: false },
+                        binding: { project_id: projectId, execution_binding_id: next ? "binding-2" : bindingId, task_id: next ? "P0-02" : taskId, launch_id: next ? nextLaunchId : launchId, conversation_id: mode === "unbound" && next ? null : conversationId, status: "ACTIVE", superseded: false },
                         milestone_auto: { status: "RUNNABLE", milestone_run_id: "run-1", current_task_id: next ? "P0-02" : taskId },
                         launch_handoff: mode === "sent" && next ? { status: "SENT" } : { status: "PENDING" }
                       }};
@@ -277,7 +287,17 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               const submitMessages = messages.filter((message) => message.type === "bdb-vnext-project-execution-submit");
               const claimMessages = messages.filter((message) => message.type === "bdb-vnext-project-launch-claim");
               const ackMessages = messages.filter((message) => message.type === "bdb-vnext-project-launch-ack");
-              if (mode === "happy" || mode === "collapsed" || mode === "completed") {
+              if (mode === "unbound") {
+                assert.equal(submitMessages.length, 1);
+                assert.equal(claimMessages.length, 0, "visible tabs cannot automatically choose conversation ownership");
+                assert.equal(sendClicks, 0);
+              } else if (mode === "manual-acked") {
+                assert.equal(sendClicks, 1, "manual insertion ACK cannot suppress newly authorized AUTO Send");
+                assert.deepEqual(events, ["send", "ack"]);
+              } else if (mode === "auto-acked") {
+                assert.equal(sendClicks, 0, "uncertain previous AUTO ACK must not resend");
+                assert.equal(ackMessages.length, 0);
+              } else if (mode === "happy" || mode === "collapsed" || mode === "completed") {
                 assert.equal(submitMessages.length, 1, "one result submit despite observer+sweep");
                 assert.equal(claimMessages.length, mode === "completed" ? 0 : 1);
                 assert.equal(ackMessages.length, mode === "completed" ? 0 : 1);
@@ -289,6 +309,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                 assert.equal(claimMessages.length, 1);
                 assert.equal(ackMessages.length, 1);
                 assert.equal(sendClicks, 0, "already-sent handoff must not send twice");
+                assert.equal(composer.value, "", "SENT recovery must not reinsert an already delivered prompt");
                 assert.deepEqual(events, ["ack"]);
               } else if (mode === "nonempty") {
                 assert.equal(submitMessages.length, 1);
@@ -335,7 +356,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
         ),
         encoding="utf-8",
     )
-    for mode in ("happy", "collapsed", "completed", "nonempty", "edited", "stopped", "nosend", "noeffect", "sent", "fail", "replay-fail", "stale", "wrong"):
+    for mode in ("happy", "collapsed", "completed", "nonempty", "edited", "stopped", "nosend", "noeffect", "sent", "manual-acked", "auto-acked", "unbound", "fail", "replay-fail", "stale", "wrong"):
         completed = subprocess.run(
             [node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js"), mode],
             capture_output=True,

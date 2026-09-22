@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import struct
@@ -38,13 +39,15 @@ from bdb_vnext.m3a_submission import M3aError, ShadowSubmissionRequest
 from bdb_vnext.m3c_admission import CanonicalVNextAdmissionAuthority, M3cError
 from bdb_vnext.m9b_activation import M9bActivationError, read_activation, require_active
 from bdb_vnext.project_catalog import ProjectCatalog
+from bdb_vnext.project_memory import ProjectMemoryError
 from bdb_vnext.project_execution import (
     OUTBOX_STATUS_ACKNOWLEDGED,
     ProjectExecutionCoordinator,
     ProjectExecutionError,
     ProjectExecutionSubmission,
 )
-from bdb_vnext.project_workflow import ProjectWorkflow, ProjectWorkflowError
+from bdb_vnext.project_workflow import ProjectWorkflowError
+from bdb_vnext.resilient_project_workflow import ResilientProjectWorkflow as ProjectWorkflow
 from bdb_vnext.project_launch import (
     ProjectLaunchQueueAdapter,
     ProjectLaunchQueueError,
@@ -412,10 +415,9 @@ def handle_message(
                     conversation_id = _conversation_id(conversation_id)
                     preview = queue.peek()
                     if preview is not None and preview.launch_id == launch_id and preview.project_id and preview.execution_binding_id:
-                        try:
-                            ProjectExecutionCoordinator(config.runtime_root, catalog=ProjectCatalog(config.runtime_root)).bind_conversation(preview.project_id, preview.execution_binding_id, conversation_id)
-                        except ProjectExecutionError as exc:
-                            raise M9bNativeError(exc.code, str(exc)) from exc
+                        binding = ProjectExecutionCoordinator(config.runtime_root).binding(preview.project_id, preview.execution_binding_id)
+                        if binding.conversation_id not in (None, conversation_id):
+                            _fail("execution_conversation_mismatch", "launch belongs to another conversation")
                 launch = queue.claim(launch_id=launch_id, claim_id=claim_id, lease_seconds=30)
                 if launch is not None:
                     canonical = ProjectLaunchCanonicalState(config.runtime_root)
@@ -436,7 +438,13 @@ def handle_message(
                         # Explicit stalled-launch recovery re-publishes the same
                         # binding. Browser ownership is the bounded point at
                         # which that exact binding becomes active again.
+                        if launch.auto_send:
+                            auto = canonical.execution.milestone_auto_snapshot(launch.project_id)
+                            if auto.get("status") != "RUNNABLE":
+                                _fail("auto_launch_not_runnable", "canonical AUTO scope is stopped or blocked")
                         canonical.activate_claimed(launch)
+                        if conversation_id is not None:
+                            canonical.execution.bind_conversation(launch.project_id, launch.execution_binding_id, conversation_id)
                 return _project_launch_response(
                     config,
                     request_id,
@@ -478,12 +486,14 @@ def handle_message(
                             and outbox.status == OUTBOX_STATUS_ACKNOWLEDGED
                         ):
                             acknowledged = True
-                    except Exception:
-                        acknowledged = False
+                    except (ProjectExecutionError, ProjectMemoryError) as exc:
+                        raise M9bNativeError(exc.code, str(exc)) from exc
             else:
                 canonical = ProjectLaunchCanonicalState(config.runtime_root)
                 if canonical.is_canonical_launch(queued_launch):
                     conversation_id = _conversation_id(message.get("conversation_id"))
+                    if queued_launch.auto_send and handoff_status != "SENT":
+                        _fail("launch_send_confirmation_required", "AUTO delivery requires confirmed Send before ACK")
                     if handoff_status == "SENT":
                         project_id = _bounded_text(message.get("project_id"), field="project_id", maximum=128)
                         binding_id = _bounded_text(message.get("execution_binding_id"), field="execution_binding_id", maximum=128)
@@ -519,7 +529,7 @@ def handle_message(
                 launch_id=launch_id,
                 claim_id=claim_id,
             )
-        except (ProjectLaunchQueueError, ProjectLaunchCanonicalError, ProjectExecutionError) as exc:
+        except (ProjectLaunchQueueError, ProjectLaunchCanonicalError, ProjectExecutionError, ProjectMemoryError) as exc:
             raise M9bNativeError(exc.code, str(exc)) from exc
 
     try:
@@ -606,6 +616,7 @@ def serve(
             try:
                 response = handle_message(config, message, caller_origin=caller_origin)
             except (M9bNativeError, M3aError, M3cError, M9bActivationError, M11cActiveReadError, M11cClientError) as exc:
+                logging.getLogger(__name__).warning("Native request failed: %s", getattr(exc, "code", "internal_error"))
                 response = _error_response(config, request_id, exc)
             write_native_message(stdout, response)
         except M9bNativeError:

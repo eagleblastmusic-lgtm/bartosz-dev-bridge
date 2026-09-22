@@ -1028,7 +1028,7 @@ def test_project_center_auto_start_synchronizes_milestone_run_and_launch_queue(t
 
     state = workflow.memory(PROJECT_ID).read_state()
     active_run = state.execution.get("active_milestone_run")
-    assert isinstance(active_run, Mapping)
+    assert isinstance(active_run, Mapping), window._status.text()
     assert active_run.get("status") == "running"
     assert active_run.get("milestone_id") == "P0"
 
@@ -1107,7 +1107,7 @@ def test_project_center_milestone_transition_and_gate_approval_launches_next_mil
         workflow=workflow,
         auto_start_confirmation=lambda _vm: True,
         auto_gate_confirmation=lambda _kind, _identifier, _description: True,
-        snapshot_loader=lambda root: ControlCenterSnapshot(str(root), "OFF", "OFF", "OFF", "OFF", None, (), ()),
+        snapshot_loader=lambda root: ControlCenterSnapshot(str(root), "ON", "ON", "ACTIVE", "SEALED", "fixture", (), (), read_only=False),
     )
     window._projects = (record,)
     window._select_project(PROJECT_ID)
@@ -1122,7 +1122,7 @@ def test_project_center_milestone_transition_and_gate_approval_launches_next_mil
     window._start_auto_from_gui()
     state_after = memory.read_state()
     active_run = state_after.execution.get("active_milestone_run")
-    assert isinstance(active_run, Mapping)
+    assert isinstance(active_run, Mapping), window._status.text()
     assert active_run.get("status") == "running"
     assert active_run.get("milestone_id") == "P1"
 
@@ -1134,4 +1134,3 @@ def test_project_center_milestone_transition_and_gate_approval_launches_next_mil
 
     window.close()
     app.processEvents()
-

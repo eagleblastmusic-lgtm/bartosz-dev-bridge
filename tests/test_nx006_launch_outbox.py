@@ -451,3 +451,51 @@ def test_nx006_machine_gate_execution(tmp_path: Path) -> None:
     passed, report = run_nx006_machine_gate(tmp_path)
     assert passed is True, f"Machine gate failed: {report}"
     assert report["status"] == "PASS"
+
+
+def test_published_projection_recovers_after_expiry_and_process_restart(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+    workflow, project_id = _setup_project(tmp_path)
+    clock = [datetime.now(timezone.utc)]
+    workflow.queue.now_fn = lambda: clock[0]
+    binding = workflow.execution.new_binding(project_id, task_id="T1-01")
+    workflow.execution.prepare_launch(project_id, binding=binding, prompt="Exact original prompt")
+    first = workflow.publish_outbox_launch(project_id, binding.launch_id)
+    clock[0] += timedelta(minutes=11)
+    assert workflow.queue.peek() is None
+    restarted = ProjectWorkflow(workflow.catalog.runtime_root)
+    restarted.reconcile_launch_outbox(project_id)
+    recovered = restarted.queue.peek()
+    assert recovered.launch_id == first.launch_id
+    assert recovered.prompt == first.prompt
+    assert len(restarted.execution.snapshot(project_id)["bindings"]) == 1
+
+
+def test_authority_read_failure_preserves_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from bdb_vnext.project_memory import ProjectMemoryError
+    workflow, project_id = _setup_project(tmp_path)
+    binding = workflow.execution.new_binding(project_id, task_id="T1-01")
+    workflow.execution.prepare_launch(project_id, binding=binding, prompt="Original")
+    launch = workflow.publish_outbox_launch(project_id, binding.launch_id)
+    original_read = workflow.execution.launch_outbox_record
+    def unavailable(*args):
+        raise ProjectMemoryError("memory_unavailable", "temporary read failure")
+    monkeypatch.setattr(workflow.execution, "launch_outbox_record", unavailable)
+    # Orphan detection must not reinterpret an unavailable authority as absence.
+    with pytest.raises(ProjectMemoryError, match="temporary read failure"):
+        workflow.reconcile_launch_outbox(project_id)
+    assert workflow.queue.peek() == launch
+    monkeypatch.setattr(workflow.execution, "launch_outbox_record", original_read)
+
+
+def test_orphan_cleanup_does_not_remove_claimed_or_replaced_projection(tmp_path: Path) -> None:
+    workflow, _ = _setup_project(tmp_path)
+    queue = workflow.queue
+    old = queue.enqueue(repo_alias="orphan", prompt="orphan")
+    claim_id = str(uuid.uuid4())
+    queue.claim(launch_id=old.launch_id, claim_id=claim_id)
+    assert queue.discard_projection(old) is False
+    queue.acknowledge(launch_id=old.launch_id, claim_id=claim_id)
+    new = queue.enqueue(repo_alias="other", prompt="new")
+    assert queue.discard_projection(old) is False
+    assert queue.peek() == new

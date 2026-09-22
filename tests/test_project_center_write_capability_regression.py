@@ -175,230 +175,59 @@ def test_read_only_mode_disables_all_mutating_buttons_and_guards_execution(tmp_p
     window.close()
 
 
-def test_canonical_active_makes_project_center_writable_and_continue_queues_launch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("delivery_failure", [False, True])
+def test_real_gui_continue_uses_canonical_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delivery_failure: bool) -> None:
+    from test_project_execution_integration import _fixture, HEAD
+    from bdb_vnext.project_workflow import CommandResult
+    from bdb_vnext.resilient_project_workflow import ResilientProjectWorkflow
+    from bdb_vnext.project_launch import ProjectLaunchQueueError
     app = _app()
-    runtime = tmp_path / "runtime"
-    runtime.mkdir(parents=True)
-    catalog = ProjectCatalog(runtime)
-    project = _fake_project()
-    catalog.upsert(project)
-
-    active_snapshot = ControlCenterSnapshot(
-        runtime_root=str(runtime),
-        system_state="ON",
-        writer_state="ON",
-        activation_state="ACTIVE",
-        store_state="SEALED",
-        store_instance_id="store-active",
-        works=(),
-        action_predicates=(
-            ActionPredicate("resume", enabled=True),
-            ActionPredicate("apply_effect", enabled=True),
-            ActionPredicate("publish", enabled=True),
-            ActionPredicate("activate", enabled=True),
-        ),
-        reason_code="production_acceptance_pass",
-        read_only=False,
+    catalog, _, project_id = _fixture(tmp_path, all_deterministic=True)
+    class HeadRunner:
+        def run(self, args, **kwargs):
+            return CommandResult(tuple(args), 0, HEAD + "\n", "")
+    workflow = ResilientProjectWorkflow(catalog.runtime_root, catalog=catalog, command_runner=HeadRunner())
+    commands = CanonicalProjectCenterAutoCommands(
+        catalog.runtime_root, project_id,
+        project_provider=lambda: catalog.get(project_id),
+        plan_provider=lambda: workflow.memory(project_id).current_plan(),
+        memory_provider=lambda: workflow.memory(project_id),
     )
-
-    queue_path = runtime / "control" / "project-launch-queue.json"
-    queue = ProjectLaunchQueueAdapter(queue_path)
-
-    class FakeWorkflow:
-        def __init__(self, rt: Path, cat: ProjectCatalog) -> None:
-            self.runtime_root = rt
-            self.catalog = cat
-            self.queue = queue
-            self.execution = MagicMock()
-            memory = MagicMock()
-            memory.read_state.return_value = SimpleNamespace(
-                execution={
-                    "active_milestone_run": {
-                        "status": "running",
-                        "milestone_id": "P3",
-                        "current_task_id": "P3-03",
-                    }
-                }
-            )
-            self.memory = MagicMock(return_value=memory)
-
-        def ensure_auto_current_launch(self, project_id: str) -> tuple[Any, str]:
-            launch = queue.enqueue(
-                repo_alias="premium-calculator",
-                prompt=f"Continue prompt for {project_id} / P3-03",
-                project_id=project_id,
-                task_id="P3-03",
-            )
-            return launch, "ready"
-
-    workflow = FakeWorkflow(runtime, catalog)
-
-    auto_state = CanonicalAutoState(
-        project_id=project.project_id,
-        scope=AutoScope.MILESTONE,
-        current_milestone_id="P3",
-        current_task_id="P3-03",
-        scope_status="ACTIVE",
-        continuation_status="CONTINUE_AVAILABLE",
-        reentry_status="NONE",
-        reason="ACTIVE",
-        plan_available=True,
-        p2_completed=True,
-        p3_started=True,
+    commands.start_auto(AutoScope.MILESTONE, confirmed=True)
+    active = ControlCenterSnapshot(
+        runtime_root=str(catalog.runtime_root), system_state="ON", writer_state="ON",
+        activation_state="ACTIVE", store_state="SEALED", store_instance_id="fixture",
+        works=(), action_predicates=(), reason_code="production_acceptance_pass", read_only=False,
     )
-    commands = MagicMock()
-    commands.snapshot.return_value = auto_state
-
-    receipt = MagicMock()
-    receipt.reason_code = "TASK_IN_PROGRESS"
-    receipt.explanation = "Current task P3-03 is in progress."
-    receipt.current_milestone_id = "P3"
-    receipt.current_task_id = "P3-03"
-
-    commands.continue_auto.return_value = receipt
-
     window = ProjectCenterWindow(
-        runtime_root=runtime,
-        catalog=catalog,
-        workflow=workflow,
-        snapshot_loader=lambda _root: active_snapshot,
-        auto_commands_factory=lambda _proj: commands,
+        runtime_root=catalog.runtime_root, catalog=catalog, workflow=workflow,
+        snapshot_loader=lambda _: active, auto_commands_factory=lambda _: commands,
     )
     window.start_bootstrap()
     app.processEvents()
-
-    # 1. Top bar must NOT say read-only
-    status_text = window._status.text()
-    assert "BDB: ON" in status_text
-    assert "read-only" not in status_text
-    assert window._is_read_only() is False
-
-    # 2. Mutating buttons in AUTO must be active
-    assert window._auto_continue_button.isEnabled() is True
-
-    # 3. Click "Kontynuuj" in AUTO
-    window._continue_auto_from_gui()
-    app.processEvents()
-
-    # 4. Verify launch was queued in project-launch-queue.json
-    pending_launch = queue.peek()
-    assert pending_launch is not None
-    assert pending_launch.project_id == project.project_id
-    assert pending_launch.task_id == "P3-03"
-    assert "Continue prompt" in pending_launch.prompt
-
-    # 5. Verify Native Host sees the launch via project_launch_peek
-    config_doc = {
-        "schema": "bdb-vnext-native-host-config-v2",
-        "generation_id": GENERATION_ID,
-        "protocol_generation": PROTOCOL_GENERATION,
-        "native_host_name": NATIVE_HOST_NAME,
-        "browser_extension_id": BROWSER_EXTENSION_ID,
-        "runtime_root": str(runtime),
-        "legacy_runtime_root": str(tmp_path / "legacy"),
-        "bootstrap_authority_root": str(tmp_path / "bootstrap"),
-    }
-    (tmp_path / "legacy").mkdir()
-    (tmp_path / "bootstrap").mkdir()
-    config_path = runtime / "config" / "native-host.json"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(config_doc), encoding="utf-8")
-
-    native_config = VNextNativeConfig.from_json(config_path)
-    response = handle_message(
-        native_config,
-        {
-            "schema": M9B_NATIVE_REQUEST_SCHEMA,
-            "request_id": "test-req-1",
-            "action": "project_launch_peek",
-            "protocol_generation": PROTOCOL_GENERATION,
-        },
-    )
-    assert response["status"] == "project_launch"
-    assert response["launch"]["project_id"] == project.project_id
-    assert response["launch"]["task_id"] == "P3-03"
-
-    window.close()
-
-
-def test_auto_continue_surfaces_launch_synchronization_failure(tmp_path: Path) -> None:
-    app = _app()
-    runtime = tmp_path / "runtime"
-    runtime.mkdir(parents=True)
-    catalog = ProjectCatalog(runtime)
-    project = _fake_project()
-    catalog.upsert(project)
-
-    active_snapshot = ControlCenterSnapshot(
-        runtime_root=str(runtime),
-        system_state="ON",
-        writer_state="ON",
-        activation_state="ACTIVE",
-        store_state="SEALED",
-        store_instance_id="store-active",
-        works=(),
-        action_predicates=(ActionPredicate("resume", enabled=True),),
-        reason_code="production_acceptance_pass",
-        read_only=False,
-    )
-
-    class FailingWorkflow:
-        def __init__(self) -> None:
-            self.queue = ProjectLaunchQueueAdapter(runtime / "control" / "project-launch-queue.json")
-            memory = MagicMock()
-            memory.read_state.return_value = SimpleNamespace(
-                execution={
-                    "active_milestone_run": {
-                        "status": "running",
-                        "milestone_id": "P3",
-                        "current_task_id": "P3-03",
-                    }
-                }
-            )
-            self.memory = MagicMock(return_value=memory)
-            self.execution = MagicMock()
-
-        def ensure_auto_current_launch(self, _project_id: str):
-            from bdb_vnext.project_workflow import ProjectWorkflowError
-            raise ProjectWorkflowError("queue_pending", "different canonical launch is already pending")
-
-    workflow = FailingWorkflow()
-    auto_state = CanonicalAutoState(
-        project_id=project.project_id,
-        scope=AutoScope.MILESTONE,
-        current_milestone_id="P3",
-        current_task_id="P3-03",
-        scope_status="ACTIVE",
-        continuation_status="CONTINUE_AVAILABLE",
-        reason="ACTIVE",
-        plan_available=True,
-        p2_completed=True,
-        p3_started=True,
-    )
-    commands = MagicMock()
-    commands.snapshot.return_value = auto_state
-    commands.continue_auto.return_value = MagicMock(
-        reason_code="TASK_IN_PROGRESS",
-        explanation="Current task P3-03 is in progress.",
-        current_milestone_id="P3",
-        current_task_id="P3-03",
-    )
-
-    window = ProjectCenterWindow(
-        runtime_root=runtime,
-        catalog=catalog,
-        workflow=workflow,
-        snapshot_loader=lambda _root: active_snapshot,
-        auto_commands_factory=lambda _proj: commands,
-    )
-    window.start_bootstrap()
-    app.processEvents()
-    window._continue_auto_from_gui()
-    app.processEvents()
-
-    assert "queue_pending" in window._status.text()
-    assert "TASK_IN_PROGRESS" not in window._status.text()
-    window.close()
+    if delivery_failure:
+        def fail_write(*args, **kwargs):
+            raise ProjectLaunchQueueError("queue_write_failed", "injected disk write failure")
+        monkeypatch.setattr(workflow.queue, "_write_state_unlocked", fail_write)
+    try:
+        assert window._auto_continue_button.isEnabled()
+        window._auto_continue_button.click()
+        app.processEvents()
+        if delivery_failure:
+            assert "queue_write_failed" in window._status.text()
+            assert "TASK_IN_PROGRESS" not in window._status.text()
+            assert workflow.queue.peek() is None
+            assert len(workflow.execution.pending_outbox_records(project_id)) == 1
+        else:
+            launch = workflow.queue.peek()
+            assert launch is not None and launch.auto_send
+            assert workflow.execution.snapshot(project_id)["current_binding_id"] == launch.execution_binding_id
+            assert "QUEUED" in window._status.text()
+            window._auto_continue_button.click()
+            assert workflow.queue.peek().launch_id == launch.launch_id
+            assert len(workflow.execution.snapshot(project_id)["bindings"]) == 1
+    finally:
+        window.close()
 
 
 def test_ensure_post_active_m9b_reconciled_self_heals(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

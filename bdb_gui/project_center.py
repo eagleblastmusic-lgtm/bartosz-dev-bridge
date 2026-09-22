@@ -7,6 +7,7 @@ technical CC3 window remains available as an explicit Advanced view.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -1033,18 +1034,8 @@ class ProjectCenterWindow(QMainWindow):
         else:
             self._status.setText("BDB AUTO: polecenie zapisane w canonical authority")
 
-    def _synchronize_auto_execution_on_start(self, project: ProjectRecord, receipt: AutoCommandReceipt) -> None:
-        milestone_id = getattr(receipt, "current_milestone_id", None)
-        if not milestone_id:
-            return
-        try:
-            snapshot = self._workflow.execution.begin_milestone_auto(project.project_id, milestone_id=milestone_id)
-            if snapshot.get("status") == "RUNNABLE" and snapshot.get("current_task_id"):
-                pending = self._workflow.queue.peek()
-                if pending is None or pending.project_id != project.project_id or pending.task_id != snapshot.get("current_task_id"):
-                    self._workflow.queue_continue_prompt(project.project_id)
-        except Exception:
-            pass
+    def _synchronize_auto_execution_on_start(self, project: ProjectRecord, receipt: AutoCommandReceipt) -> str:
+        return self._synchronize_auto_execution_on_continue(project, receipt)
 
     def _synchronize_auto_execution_on_continue(self, project: ProjectRecord, receipt: AutoCommandReceipt) -> str:
         milestone_id = getattr(receipt, "current_milestone_id", None)
@@ -1058,11 +1049,13 @@ class ProjectCenterWindow(QMainWindow):
             _launch, launch_status = self._workflow.ensure_auto_current_launch(project.project_id)
             return launch_status
         except (ProjectExecutionError, ProjectWorkflowError) as exc:
+            logging.getLogger(__name__).exception("AUTO launch synchronization: %s", exc.code)
             raise ProjectWorkflowError(
                 getattr(exc, "code", "auto_launch_sync_failed"),
                 str(exc),
             ) from exc
         except Exception as exc:
+            logging.getLogger(__name__).exception("auto_launch_sync_failed")
             raise ProjectWorkflowError(
                 "auto_launch_sync_failed",
                 f"AUTO launch synchronization failed: {exc}",
@@ -1103,16 +1096,15 @@ class ProjectCenterWindow(QMainWindow):
             return
         try:
             receipt = self._auto_commands_for_project(project).stop_auto()
-            try:
-                exec_snapshot = self._workflow.execution.snapshot(project.project_id)
-                auto = exec_snapshot.get("milestone_auto") or {}
-                run_id = auto.get("milestone_run_id")
-                if run_id and auto.get("status") in {"RUNNABLE", "running"}:
-                    self._workflow.execution.stop_milestone_auto(project.project_id, run_id=run_id)
-            except Exception:
-                pass
-        except (ProjectCenterAutoCommandError, ProjectExecutionError, ProjectWorkflowError) as exc:
-            self._status.setText(f"BDB AUTO STOP zatrzymany — {getattr(exc, 'code', 'auto_stop_failed')}")
+            exec_snapshot = self._workflow.execution.snapshot(project.project_id)
+            auto = exec_snapshot.get("milestone_auto") or {}
+            run_id = auto.get("milestone_run_id")
+            if run_id and auto.get("status") in {"RUNNABLE", "running"}:
+                self._workflow.execution.stop_milestone_auto(project.project_id, run_id=run_id)
+        except Exception as exc:
+            code = getattr(exc, 'code', 'auto_stop_sync_failed')
+            logging.getLogger(__name__).exception("AUTO STOP: %s", code)
+            self._status.setText(f"BDB AUTO STOP wymaga ponowienia — {code}: {exc}")
             return
         self._mutation_operations_invoked += 1
         self._set_auto_status_from_receipt(receipt)
@@ -1139,8 +1131,10 @@ class ProjectCenterWindow(QMainWindow):
         self._mutation_operations_invoked += 1
         if launch_status in {"ready", "rearmed"}:
             self._status.setText(
-                f"BDB AUTO: {receipt.reason_code} — launch {launch_status}; przekazano do kolejki Browser/Native"
+                "BDB AUTO: QUEUED — prompt czeka na przekazanie do właściwej rozmowy ChatGPT. Wysyłka nie jest jeszcze potwierdzona."
             )
+        elif launch_status == "already_sent":
+            self._status.setText("BDB AUTO: WAITING_FOR_RESULT — wysyłka potwierdzona; oczekiwanie na wynik zadania.")
         else:
             self._set_auto_status_from_receipt(receipt)
         self._render_auto(project)

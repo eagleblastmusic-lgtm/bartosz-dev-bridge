@@ -877,7 +877,7 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
   }
   const bindings = await projectReadBindings();
   const existing = conversationId ? projectBindingFor(bindings, launch.launch_id, conversationId) : null;
-  if (!existing && autoMode && projectExactUserMessageCount(launch.prompt) > 0 && projectComposerText(composer) === "") {
+  if ((!existing || (existing.state === "ACKED" && existing.auto_send !== true)) && autoMode && projectExactUserMessageCount(launch.prompt) > 0 && projectComposerText(composer) === "") {
     projectAnnounce("BDB AUTO zatrzymane: istnieje wysłana identyczna wiadomość bez lokalnego dowodu próby.", "warning");
     return projectLaunchResult(false, "project_auto_duplicate_guard", launchId);
   }
@@ -891,6 +891,13 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
     }
   }
   const claimId = existing ? existing.claim_id : projectClaimId(launch.launch_id);
+  if (autoMode && !selectedByUser) {
+    const ownership = await projectExecutionStatusFor(launch.project_id, launch.execution_binding_id, conversationId);
+    if (!ownership?.binding || ownership.binding.conversation_id !== conversationId) {
+      projectAnnounce("BDB AUTO: wybierz rozmowę przez przycisk rozszerzenia; automatyczny odbiór wymaga kanonicznego przypisania rozmowy.", "warning");
+      return projectLaunchResult(false, "project_conversation_selection_required", launchId);
+    }
+  }
   const claimed = await projectClaim(launch, claimId, conversationId);
   if (!claimed) return projectLaunchResult(false, "project_prompt_not_inserted", launchId);
   const claimedLaunchId = claimed.launch_id || launchId;
@@ -906,8 +913,16 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
       return projectLaunchResult(false, "project_auto_gate_rejected", claimedLaunchId);
     }
   }
-  if (existing?.state === "ACKED") {
+  if (autoMode && canonicalStatus?.launch_handoff?.status === "SENT") {
+    const acknowledged = await projectAck(claimed.launch_id, claimId, conversationId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
+    return projectLaunchResult(acknowledged, acknowledged ? "project_prompt_inserted" : "project_prompt_ack_failed", claimedLaunchId);
+  }
+  if (existing?.state === "ACKED" && !autoMode) {
     return projectLaunchResult(true, "project_prompt_inserted", claimedLaunchId);
+  }
+  if (existing?.state === "ACKED" && existing.auto_send === true) {
+    projectAnnounce("BDB AUTO: RECOVERY_REQUIRED — lokalny ACK nie zgadza się z potwierdzeniem wysyłki. Ponowna wysyłka zablokowana.", "warning");
+    return projectLaunchResult(false, "project_auto_send_uncertain", claimedLaunchId);
   }
   if (autoMode && existing?.state === "SEND_CONFIRMED") {
     const acknowledged = await projectAck(claimed.launch_id, claimId, conversationId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });

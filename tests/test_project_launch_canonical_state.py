@@ -65,6 +65,8 @@ class _Memory:
                 ],
                 "launch_outbox": {
                     launch.launch_id: {
+                        "prompt": launch.prompt,
+                        "auto_send": launch.auto_send,
                         "project_id": launch.project_id,
                         "plan_version": launch.plan_version,
                         "task_id": launch.task_id,
@@ -107,6 +109,8 @@ class _Execution:
             conversation_id=None,
         )
         self.outbox_value = SimpleNamespace(
+            prompt=launch.prompt,
+            auto_send=launch.auto_send,
             project_id=launch.project_id,
             plan_version=launch.plan_version,
             task_id=launch.task_id,

@@ -275,6 +275,28 @@ the currently installed production client.
 
 ## 16. Legacy distinction
 
+### Production audit delta (2026-09-22)
+
+Explicit Continue re-arms an acknowledged insertion-only launch for a running,
+unblocked AUTO task with `auto_send=true`, keeping the exact prompt, binding,
+launch ID and generation. `EXECUTION_LAUNCH_REARMED` is a supported Memory event.
+An old manual browser ACK does not count as confirmed AUTO Send. An inconsistent
+previous AUTO ACK blocks resend for operator recovery. A canonical SENT handoff
+is acknowledged without reinserting its prompt.
+
+Native requires confirmed-send metadata for AUTO ACK. A losing claim cannot bind
+the conversation, and queue prompt bytes/delivery mode must match the canonical
+outbox. Automatic Browser polling requires a pre-bound conversation; first use
+selects the conversation explicitly through the extension. Subsequent AUTO tasks
+inherit conversation ownership from the canonical accepted result binding.
+
+Expired PUBLISHED projections can be rebuilt for the current unsent binding.
+Authority read failures do not authorize orphan deletion, and orphan removal
+compares the exact projection under lock and refuses a live claim. Native status
+honors durable Project Memory v2 STOP even if GUI crashed before updating the
+milestone execution projection. These source changes require separate deployment
+and real Chrome acceptance; test fixtures are not production E2E evidence.
+
 Nie mylić z usuniętymi z aktywnej dokumentacji opisami:
 
 ```text
