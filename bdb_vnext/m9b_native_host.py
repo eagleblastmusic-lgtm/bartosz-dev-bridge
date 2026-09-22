@@ -349,6 +349,7 @@ def handle_message(
             if snapshot.get("current_binding_id") != binding.execution_binding_id:
                 _fail("execution_binding_stale", "execution binding is not the current canonical binding")
             auto = coordinator.milestone_auto_snapshot(project_id)
+            outbox = coordinator.launch_outbox_record(project_id, binding.launch_id)
             response = _base_response(config, request_id)
             response.update({
                 "status": "project_execution_status",
@@ -361,11 +362,16 @@ def handle_message(
                     "plan_version": binding.plan_version,
                     "task_id": binding.task_id,
                     "launch_id": binding.launch_id,
+                    "correlation_id": binding.correlation_id,
+                    "command_id": binding.command_id,
+                    "repo_alias": binding.repo_alias,
+                    "expected_repo_head_before": binding.expected_repo_head_before,
                     "conversation_id": binding.conversation_id,
                     "status": binding.status,
                     "superseded": binding.superseded,
                 },
                 "launch_handoff": coordinator.launch_handoff(project_id, binding.execution_binding_id),
+                "launch_outbox_status": outbox.status if outbox is not None and outbox.execution_binding_id == binding.execution_binding_id else None,
                 "milestone_auto": dict(auto) if isinstance(auto, Mapping) else None,
                 "legacy_fallback": False,
             })

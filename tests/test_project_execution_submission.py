@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import io
 from pathlib import Path
 import uuid
 
@@ -12,7 +13,7 @@ from bdb_vnext.project_execution import (
 )
 from bdb_vnext.project_workflow import CommandResult, ProjectWorkflow
 from bdb_vnext.composition import BROWSER_EXTENSION_ID, PROTOCOL_GENERATION
-from bdb_vnext.m9b_native_host import M9B_NATIVE_REQUEST_SCHEMA, VNextNativeConfig, handle_message
+from bdb_vnext.m9b_native_host import M9B_NATIVE_REQUEST_SCHEMA, VNextNativeConfig, handle_message, read_native_message, serve, write_native_message
 
 from test_project_execution_integration import HEAD, _fixture
 
@@ -77,6 +78,57 @@ def test_project_execution_submission_is_strict_json_contract() -> None:
         ProjectExecutionSubmission.from_mapping({key: value for key, value in parsed.to_dict().items() if key != "criteria"})
     with pytest.raises(ProjectExecutionError):
         ProjectExecutionSubmission.from_mapping({**parsed.to_dict(), "repo_alias": "Not-An-Alias"})
+    with pytest.raises(ProjectExecutionError) as numeric:
+        ProjectExecutionSubmission.from_mapping({**parsed.to_dict(), "plan_version": 1})
+    assert numeric.value.code == "execution_field_invalid"
+    assert str(numeric.value) == "plan_version must be text"
+
+
+def test_native_messaging_preserves_strict_result_error_code_and_message(tmp_path: Path) -> None:
+    catalog, coordinator, project_id = _fixture(tmp_path)
+    binding = coordinator.start(project_id, expected_repo_head_before=HEAD)
+    config = VNextNativeConfig(runtime_root=catalog.runtime_root, legacy_runtime_root=tmp_path / "legacy", bootstrap_authority_root=tmp_path / "bootstrap")
+    request = {
+        "schema": M9B_NATIVE_REQUEST_SCHEMA, "request_id": "numeric-plan-version",
+        "action": "project_execution_submit", "protocol_generation": PROTOCOL_GENERATION,
+        "browser_extension_id": BROWSER_EXTENSION_ID, "conversation_id": "chatgpt-conversation-1",
+        "result": {**_result(project_id, binding), "plan_version": 1},
+    }
+    source = io.BytesIO()
+    write_native_message(source, request)
+    source.seek(0)
+    output = io.BytesIO()
+    assert serve(config, source, output, caller_origin=f"chrome-extension://{BROWSER_EXTENSION_ID}/") == 0
+    output.seek(0)
+    response = read_native_message(output)
+    assert response["status"] == "failed"
+    assert response["error_code"] == "execution_field_invalid"
+    assert response["error"] == "plan_version must be text"
+    assert coordinator.snapshot(project_id)["attempts"] == []
+
+
+def test_native_waiting_result_preserves_binding_then_accepts_later_pass(tmp_path: Path) -> None:
+    catalog, coordinator, project_id = _fixture(tmp_path)
+    binding = coordinator.start(project_id, expected_repo_head_before=HEAD)
+    coordinator.bind_conversation(project_id, binding.execution_binding_id, "chatgpt-conversation-1")
+    config = VNextNativeConfig(runtime_root=catalog.runtime_root, legacy_runtime_root=tmp_path / "legacy", bootstrap_authority_root=tmp_path / "bootstrap")
+    request = {
+        "schema": M9B_NATIVE_REQUEST_SCHEMA, "request_id": "waiting-result",
+        "action": "project_execution_submit", "protocol_generation": PROTOCOL_GENERATION,
+        "browser_extension_id": BROWSER_EXTENSION_ID, "conversation_id": "chatgpt-conversation-1",
+        "result": {**_result(project_id, binding), "execution_status": "WAITING_EXTERNAL", "validation_status": "WAITING_EXTERNAL"},
+    }
+    with pytest.raises(Exception) as waiting:
+        handle_message(config, request)
+    assert getattr(waiting.value, "code", None) == "execution_result_non_terminal"
+    snapshot = coordinator.snapshot(project_id)
+    assert snapshot["attempts"] == []
+    assert snapshot["current_binding_id"] == binding.execution_binding_id
+    assert coordinator.binding(project_id, binding.execution_binding_id).status == "ACTIVE"
+    assert snapshot["task_statuses"].get(binding.task_id) != "blocked"
+    accepted = handle_message(config, {**request, "request_id": "final-pass", "result": _result(project_id, binding)})
+    assert accepted["receipt"]["accepted"] is True
+    assert len(coordinator.snapshot(project_id)["attempts"]) == 1
 
 
 def test_project_execution_auto_accepts_once_and_queues_next_task(tmp_path: Path) -> None:
@@ -192,6 +244,12 @@ def test_native_project_execution_status_exposes_only_current_auto_gate(tmp_path
     assert response["current_binding_id"] == binding.execution_binding_id
     assert response["current_task_id"] == binding.task_id
     assert response["binding"]["conversation_id"] == "chatgpt-conversation-status"
+    assert response["binding"]["plan_version"] == "1"
+    assert response["binding"]["launch_id"] == launch.launch_id
+    assert response["binding"]["correlation_id"] == binding.correlation_id
+    assert response["binding"]["command_id"] == binding.command_id
+    assert response["binding"]["expected_repo_head_before"] == binding.expected_repo_head_before
+    assert response["launch_outbox_status"] == "PUBLISHED"
     assert response["milestone_auto"]["status"] == "RUNNABLE"
     assert response["milestone_auto"]["milestone_run_id"] == "milestone-run-status"
 
@@ -441,6 +499,8 @@ def test_execution_prompt_requires_one_versioned_json_result_and_cost_aware_poli
     assert "lokalnie" in launch.prompt
     assert "Nie ma globalnego limitu czasu taska" in launch.prompt
     assert "trzech kolejnych status polls" in launch.prompt
+    assert 'Plan version (JSON string): "1"' in launch.prompt
+    assert "WAITING_EXTERNAL/PENDING/RUNNING/VALIDATING/AWAITING_CI nie są finalnym wynikiem" in launch.prompt
     assert launch.execution_binding_id in launch.prompt
     assert binding.task_id in launch.prompt
     assert binding.correlation_id in launch.prompt
