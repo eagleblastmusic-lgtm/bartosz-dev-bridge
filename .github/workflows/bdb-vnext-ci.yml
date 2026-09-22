@@ -34,6 +34,10 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Install Qt runtime libraries on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0
+
       - name: Verify production AUTO orchestration and recovery
         env:
           QT_QPA_PLATFORM: offscreen
