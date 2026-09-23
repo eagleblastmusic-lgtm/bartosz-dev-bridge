@@ -89,6 +89,7 @@ if (mode === "waiting") {
   result.validation_status = "WAITING_EXTERNAL";
 }
 if (mode === "invalid") result.head_before = "invalid-head";
+if (mode === "invalid-criteria") result.criteria = "not-an-array";
 
 async function submit(value) {
   const parsed = content.parseProjectExecutionResult({ textContent: JSON.stringify(value) });

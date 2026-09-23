@@ -81,7 +81,8 @@ function parseProjectExecutionResult(block) {
     ];
     if (required.some((field) => !(field in value))) return null;
     if (typeof value.project_id !== "string" || typeof value.task_id !== "string" || typeof value.execution_binding_id !== "string") return null;
-    if (!Array.isArray(value.evidence_refs) || !Array.isArray(value.criteria)) return null;
+    // A complete result with malformed list fields still gets a panel so the
+    // worker's final-result gate can explain the rejection before Native.
     // Project Plan may carry an integer version. The execution submission
     // contract is text, so normalize at the Browser result boundary.
     if (typeof value.plan_version === "number" && Number.isSafeInteger(value.plan_version) && value.plan_version >= 0) {

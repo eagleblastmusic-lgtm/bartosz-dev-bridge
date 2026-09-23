@@ -63,6 +63,14 @@ def test_browser_pre_submit_gate_rejects_known_invalid_head_before_native() -> N
     assert "execution_field_invalid" in observed["first"]["text"]
 
 
+def test_parseable_bad_criteria_reaches_gate_and_displays_error_without_native_submit() -> None:
+    observed = _browser("invalid-criteria")
+    assert observed["first"]["parsed"]["criteria"] == "not-an-array"
+    assert observed["beforeFinal"] == 0
+    assert observed["first"]["state"] == "error"
+    assert "criteria must be a bounded criterion list" in observed["first"]["text"]
+
+
 def test_worker_rejects_direct_numeric_plan_version_before_native() -> None:
     observed = _browser("direct-numeric")
     assert observed["response"]["ok"] is False
