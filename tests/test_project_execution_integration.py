@@ -210,22 +210,28 @@ def test_milestone_auto_stops_for_review_and_can_resume_same_run(tmp_path: Path)
     assert resumed_again["milestone_run_id"] == "milestone-review-run"
 
 
-def test_blocked_auto_keeps_blocking_cursor_and_never_projects_runnable(tmp_path: Path) -> None:
+def test_waiting_external_keeps_same_active_binding_until_final_pass(tmp_path: Path) -> None:
     _catalog, coordinator, project_id = _fixture(tmp_path, all_deterministic=True, independent_next=True)
     coordinator.begin_milestone_auto(project_id, milestone_id="m1", milestone_run_id="milestone-blocked-run")
     binding = coordinator.start(project_id, expected_repo_head_before=HEAD)
-    coordinator.record_result(project_id, {"execution_binding_id": binding.execution_binding_id, "command_id": binding.command_id, "correlation_id": binding.correlation_id, "head_before": HEAD, "head_after": HEAD, "execution_status": "PASS", "validation_status": "WAITING_EXTERNAL", "promotion_status": "NOT_RUN"})
+    waiting = {"execution_binding_id": binding.execution_binding_id, "command_id": binding.command_id, "correlation_id": binding.correlation_id, "head_before": HEAD, "head_after": HEAD, "execution_status": "WAITING_EXTERNAL", "validation_status": "WAITING_EXTERNAL", "promotion_status": "NOT_RUN"}
+    with pytest.raises(ProjectExecutionError) as error:
+        coordinator.record_result(project_id, waiting)
+    assert error.value.code == "execution_result_non_terminal"
 
     snapshot = coordinator.snapshot(project_id)
-    assert snapshot["task_statuses"]["t1"] == "blocked"
+    assert snapshot["attempts"] == []
+    assert coordinator.binding(project_id, binding.execution_binding_id).status == "ACTIVE"
+    assert snapshot["task_statuses"].get("t1") != "blocked"
     assert snapshot["current_task_id"] == "t1"
-    assert snapshot["milestone_auto"]["status"] == "BLOCKED"
-    assert snapshot["milestone_auto"]["next_task_id"] == "t1"
-    assert snapshot["milestone_auto"]["status"] != "RUNNABLE"
+    assert snapshot["milestone_auto"]["status"] == "RUNNABLE"
     coordinator.reconcile(project_id)
     reconciled = coordinator.snapshot(project_id)
     assert reconciled["current_task_id"] == "t1"
-    assert reconciled["milestone_auto"]["status"] == "BLOCKED"
+    assert reconciled["milestone_auto"]["status"] == "RUNNABLE"
+    coordinator.record_result(project_id, {**waiting, "execution_status": "PASS", "validation_status": "PASS"})
+    assert coordinator.binding(project_id, binding.execution_binding_id).status == "ACCEPTED"
+    assert coordinator.snapshot(project_id)["current_task_id"] == "t2"
 
 
 def test_manual_review_and_retry_then_project_completion(tmp_path: Path) -> None:

@@ -251,8 +251,7 @@ def test_vnext_project_execution_submit_uses_canonical_recovery_without_local_bi
               const submit = messages.find((message) => message.type === "bdb-vnext-project-execution-submit");
               assert.ok(submit, "project result must reach Native even without local binding");
               assert.equal(submit.conversation_id, "abcdef12-3456-4789-abcd-abcdef123456");
-              if (mode === "empty") assert.equal(Object.hasOwn(submit, "launch_id"), false);
-              else assert.equal(submit.launch_id, "launch-1");
+              assert.equal(Object.hasOwn(submit, "launch_id"), false, "Native resolves launch from canonical binding, not local Browser cache");
             }, 25);
             '''
         ),

@@ -51,6 +51,11 @@ OUTBOX_STATUS_PENDING = "PENDING"
 OUTBOX_STATUS_PUBLISHED = "PUBLISHED"
 OUTBOX_STATUS_ACKNOWLEDGED = "ACKNOWLEDGED"
 OUTBOX_STATUS_VALUES = frozenset({OUTBOX_STATUS_PENDING, OUTBOX_STATUS_PUBLISHED, OUTBOX_STATUS_ACKNOWLEDGED})
+RESULT_STATUS_SUCCESS = frozenset({"PASS", "SUCCEEDED", "SUCCESS"})
+RESULT_STATUS_FAILURE = frozenset({"FAIL", "FAILED", "BLOCKED", "REVIEW_REQUIRED"})
+RESULT_STATUS_NON_TERMINAL = frozenset({"WAITING_EXTERNAL", "PENDING", "RUNNING", "VALIDATING", "AWAITING_CI", "UNKNOWN"})
+PROMOTION_STATUS_SUCCESS = RESULT_STATUS_SUCCESS | frozenset({"PROMOTED"})
+PROMOTION_STATUS_FAILURE = RESULT_STATUS_FAILURE | frozenset({"NOT_RUN", "SKIPPED"})
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HEAD_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _CONVERSATION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
@@ -104,6 +109,18 @@ def _parse_checkpoint_time(value: object) -> datetime:
 def _status(value: object, field: str) -> str:
     value = _text(value, field, max_length=32).upper()
     return value
+
+
+def _final_result_status(value: object, field: str) -> str:
+    """Only completed execution results may cross the final-result boundary."""
+    status = _status(value, field)
+    success = PROMOTION_STATUS_SUCCESS if field == "promotion_status" else RESULT_STATUS_SUCCESS
+    failure = PROMOTION_STATUS_FAILURE if field == "promotion_status" else RESULT_STATUS_FAILURE
+    if status in success or status in failure:
+        return status
+    if status in RESULT_STATUS_NON_TERMINAL:
+        _fail("execution_result_non_terminal", f"{field}={status} is intermediate; keep this binding active until validation finishes")
+    _fail("execution_status_invalid", f"{field}={status} is not a supported final status")
 
 
 def _head(value: object, field: str, *, allow_unknown: bool = False) -> str | None:
@@ -222,9 +239,9 @@ class ProjectExecutionSubmission:
             repo_alias=repo_alias,
             head_before=_head(value.get("head_before"), "head_before", allow_unknown=True) or "unknown",
             head_after=_head(value.get("head_after"), "head_after", allow_unknown=True),
-            execution_status=_status(value.get("execution_status"), "execution_status"),
-            validation_status=_status(value.get("validation_status"), "validation_status"),
-            promotion_status=_status(value.get("promotion_status"), "promotion_status"),
+            execution_status=_final_result_status(value.get("execution_status"), "execution_status"),
+            validation_status=_final_result_status(value.get("validation_status"), "validation_status"),
+            promotion_status=_final_result_status(value.get("promotion_status"), "promotion_status"),
             result_summary=_text(value.get("result_summary", ""), "result_summary", max_length=4_000, required=False),
             evidence_refs=tuple(_text(item, "evidence_refs[]", max_length=512) for item in refs),
             criteria=tuple(normalized_criteria),
@@ -1432,6 +1449,9 @@ class ProjectExecutionCoordinator:
         return TaskAcceptanceResult(project_id, plan_version, task.task_id, attempt_id, tuple(normalized), overall, _utc_now())
 
     def record_result(self, project_id: str, result: Mapping[str, Any]) -> ProjectExecutionAttempt:
+        for field in ("execution_status", "validation_status"):
+            _final_result_status(result.get(field, "UNKNOWN"), field)
+        _final_result_status(result.get("promotion_status", "NOT_RUN"), "promotion_status")
         project, plan, memory = self._project(project_id)
         binding_id = _identifier(result.get("execution_binding_id"), "execution_binding_id")
         binding: ProjectExecutionBinding | None = None
@@ -1529,9 +1549,9 @@ class ProjectExecutionCoordinator:
 
             if task is None:
                 _fail("task_not_found", "bound task does not exist")
-            validation_ok = _status(result.get("validation_status", "UNKNOWN"), "validation_status") in {"PASS", "SUCCEEDED", "SUCCESS"}
+            validation_ok = _status(result.get("validation_status", "UNKNOWN"), "validation_status") in RESULT_STATUS_SUCCESS
             acceptance = self._evaluate_acceptance(task, project_id=project.project_id, plan_version=plan.plan_version, attempt_id=attempt_id, validation_ok=validation_ok, criteria=result.get("criteria"))
-            execution_ok = _status(result.get("execution_status", "UNKNOWN"), "execution_status") in {"PASS", "SUCCEEDED", "SUCCESS"}
+            execution_ok = _status(result.get("execution_status", "UNKNOWN"), "execution_status") in RESULT_STATUS_SUCCESS
             overall = acceptance.overall if execution_ok else "FAIL"
             attempt = ProjectExecutionAttempt(
                 attempt_id,

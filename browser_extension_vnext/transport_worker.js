@@ -13,6 +13,14 @@ const BROWSER_BUNDLE_SCHEMA = "bdb-vnext-m11c-browser-bundle-v1";
 const CLIENT_FILES_SCHEMA = "bdb-vnext-browser-client-files-v1";
 const MAX_ENTRIES = 128;
 const MAX_REQUEST_BYTES = 256 * 1024;
+const PROJECT_RESULT_SCHEMA = "bdb-project-execution-submission-v1";
+const RESULT_STATUS_SUCCESS = new Set(["PASS", "SUCCEEDED", "SUCCESS"]);
+const RESULT_STATUS_FAILURE = new Set(["FAIL", "FAILED", "BLOCKED", "REVIEW_REQUIRED"]);
+const RESULT_STATUS_NON_TERMINAL = new Set(["WAITING_EXTERNAL", "PENDING", "RUNNING", "VALIDATING", "AWAITING_CI", "UNKNOWN"]);
+const PROMOTION_STATUS_SUCCESS = new Set([...RESULT_STATUS_SUCCESS, "PROMOTED"]);
+const PROMOTION_STATUS_FAILURE = new Set([...RESULT_STATUS_FAILURE, "NOT_RUN", "SKIPPED"]);
+const PROJECT_RESULT_REQUIRED = ["schema", "project_id", "plan_version", "task_id", "execution_binding_id", "correlation_id", "command_id", "repo_alias", "head_before", "head_after", "execution_status", "validation_status", "promotion_status", "result_summary", "evidence_refs", "criteria"];
+const PROJECT_RESULT_ALLOWED = new Set([...PROJECT_RESULT_REQUIRED, "canonical_refs", "failure_code"]);
 const TYPES = new Set([
   "bdb-vnext-status",
   "bdb-vnext-submit",
@@ -37,6 +45,67 @@ function object(value, field) {
     throw new Error(`${field} must be an object`);
   }
   return value;
+}
+
+class ProjectResultError extends Error {
+  constructor(code, message, details = null) {
+    super(message);
+    this.name = "ProjectResultError";
+    this.code = code;
+    this.details = details;
+  }
+}
+
+function resultField(condition, field, message) {
+  if (!condition) throw new ProjectResultError("execution_field_invalid", `${field} ${message}`);
+}
+
+function finalStatus(value, field) {
+  resultField(typeof value === "string" && value.length > 0 && value.length <= 32, field, "must be bounded text");
+  const status = value.toUpperCase();
+  const success = field === "promotion_status" ? PROMOTION_STATUS_SUCCESS : RESULT_STATUS_SUCCESS;
+  const failure = field === "promotion_status" ? PROMOTION_STATUS_FAILURE : RESULT_STATUS_FAILURE;
+  if (success.has(status)) return "TERMINAL_SUCCESS";
+  if (failure.has(status)) return "TERMINAL_FAILURE";
+  if (RESULT_STATUS_NON_TERMINAL.has(status)) {
+    throw new ProjectResultError("execution_result_non_terminal", `${field}=${status} is intermediate; the same binding can be submitted after validation finishes`);
+  }
+  throw new ProjectResultError("execution_status_invalid", `${field}=${status} is not a supported final status`);
+}
+
+function finalProjectResult(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.schema !== PROJECT_RESULT_SCHEMA) {
+    throw new ProjectResultError("execution_schema_invalid", "project execution result schema differs");
+  }
+  for (const field of PROJECT_RESULT_REQUIRED) resultField(Object.hasOwn(value, field), field, "is required");
+  for (const field of Object.keys(value)) resultField(PROJECT_RESULT_ALLOWED.has(field), field, "is unsupported");
+  const identifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+  for (const field of ["project_id", "task_id", "execution_binding_id", "correlation_id", "command_id"]) {
+    resultField(typeof value[field] === "string" && identifier.test(value[field]), field, "has an unsafe identity");
+  }
+  resultField(typeof value.plan_version === "string" && value.plan_version.trim().length > 0 && value.plan_version.length <= 32, "plan_version", "must be text");
+  resultField(typeof value.repo_alias === "string" && /^[a-z][a-z0-9-]{0,31}$/.test(value.repo_alias), "repo_alias", "has an unsafe format");
+  const git = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+  resultField(typeof value.head_before === "string" && (git.test(value.head_before) || value.head_before === "unknown"), "head_before", "is not a Git identity");
+  resultField(value.head_after === null || (typeof value.head_after === "string" && (git.test(value.head_after) || value.head_after === "unknown")), "head_after", "is not a Git identity");
+  for (const field of ["execution_status", "validation_status", "promotion_status"]) finalStatus(value[field], field);
+  resultField(typeof value.result_summary === "string" && value.result_summary.length <= 4000, "result_summary", "must be bounded text");
+  resultField(Array.isArray(value.evidence_refs) && value.evidence_refs.length <= 128 && value.evidence_refs.every((ref) => typeof ref === "string" && ref.trim().length > 0 && ref.length <= 512), "evidence_refs", "must be a bounded text list");
+  resultField(Array.isArray(value.criteria) && value.criteria.length <= 128 && value.criteria.every((item) => item && typeof item === "object" && !Array.isArray(item) && typeof item.criterion === "string" && item.criterion.trim().length > 0 && item.criterion.length <= 2000 && Object.keys(item).every((key) => ["criterion", "type", "status", "evidence_ref"].includes(key)) && ["type", "status"].every((key) => item[key] === undefined || (typeof item[key] === "string" && item[key].trim().length > 0 && item[key].length <= 32)) && (item.evidence_ref === undefined || item.evidence_ref === null || (typeof item.evidence_ref === "string" && item.evidence_ref.trim().length > 0 && item.evidence_ref.length <= 512))), "criteria", "must be a bounded criterion list");
+  if (value.failure_code !== undefined) resultField(typeof value.failure_code === "string" && value.failure_code.length > 0 && value.failure_code.length <= 128, "failure_code", "must be bounded text");
+  if (value.canonical_refs !== undefined) {
+    const allowedRefs = ["task_id", "work_id", "candidate_id", "candidate_view_id", "candidate_tree_digest", "base_commit_oid", "validation_id", "evidence_id", "evaluation_id", "publication_id"];
+    resultField(value.canonical_refs && typeof value.canonical_refs === "object" && !Array.isArray(value.canonical_refs) && Object.entries(value.canonical_refs).every(([key, ref]) => allowedRefs.includes(key) && (ref === null || (typeof ref === "string" && ref.trim().length > 0 && ref.length <= 128))), "canonical_refs", "must contain supported bounded references");
+  }
+  resultField(new TextEncoder().encode(JSON.stringify(value)).byteLength <= MAX_REQUEST_BYTES, "result", "exceeds the Browser bound");
+  return value;
+}
+
+function failureEnvelope(error) {
+  const response = { ok: false, error: error instanceof Error ? error.message : String(error) };
+  if (error && typeof error.code === "string") response.error_code = error.code;
+  if (error && error.details && typeof error.details === "object" && !Array.isArray(error.details)) response.details = error.details;
+  return response;
 }
 
 function canonicalJson(value) {
@@ -119,7 +188,15 @@ function sendNative(message) {
       const runtimeError = chrome.runtime.lastError;
       if (runtimeError) return reject(new Error(runtimeError.message || "vNext Native Host unavailable"));
       try {
-        resolve(validateNativeResponse(response));
+        const value = validateNativeResponse(response);
+        if (value.status === "failed") {
+          throw new ProjectResultError(
+            typeof value.error_code === "string" ? value.error_code : "native_failed",
+            typeof value.error === "string" ? value.error : "vNext Native Host rejected the request",
+            value.details && typeof value.details === "object" && !Array.isArray(value.details) ? value.details : null
+          );
+        }
+        resolve(value);
       } catch (error) {
         reject(error);
       }
@@ -348,9 +425,7 @@ async function projectLaunchAck(launchId, claimId, conversationId = null, handof
 }
 
 async function projectExecutionSubmit(result, conversationId, launchId) {
-  if (!result || typeof result !== "object" || Array.isArray(result) || result.schema !== "bdb-project-execution-submission-v1") {
-    throw new Error("project execution result schema is invalid");
-  }
+  finalProjectResult(result);
   if (typeof conversationId !== "string" || !conversationId) {
     throw new Error("project execution conversation identity is required");
   }
@@ -391,7 +466,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     : projectExecutionSubmit(message.result, message.conversation_id, message.launch_id);
   operation.then(
     (result) => sendResponse(result),
-    (error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) })
+    (error) => sendResponse(failureEnvelope(error))
   );
   return true;
 });
