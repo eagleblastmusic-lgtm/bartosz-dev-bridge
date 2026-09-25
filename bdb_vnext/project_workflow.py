@@ -456,7 +456,17 @@ class ProjectWorkflow:
                 return None, "current_task_not_advanced"
         if snapshot.get("task_statuses", {}).get(current_task_id) in {"completed", "skipped"}:
             return None, "milestone_completed"
-        if any(item.get("task_id") == current_task_id and item.get("result_status") not in {"STALE_RESULT"} for item in snapshot.get("attempts", [])):
+        invalidated_attempt_ids = {
+            item["attempt_id"]
+            for item in snapshot.get("completion_invalidations", [])
+            if isinstance(item, Mapping) and item.get("attempt_id")
+        }
+        if any(
+            item.get("task_id") == current_task_id
+            and item.get("attempt_id") not in invalidated_attempt_ids
+            and item.get("result_status") not in {"STALE_RESULT"}
+            for item in snapshot.get("attempts", [])
+        ):
             return None, "attempt_exists"
 
         pending = self.queue.peek()
@@ -597,6 +607,32 @@ class ProjectWorkflow:
             "next_launch_status": next_launch_status,
         }
 
+    def invalidate_task_completion(
+        self,
+        project_id: str,
+        task_id: str,
+        *,
+        attempt_id: str | None = None,
+        expected_result_digest: str | None = None,
+        reason: str,
+        invalidated_by: str = "operator",
+    ) -> dict[str, Any]:
+        """Invalidate a previously accepted task completion and reconcile downstream state."""
+        try:
+            receipt = self.execution.invalidate_task_completion(
+                project_id,
+                task_id,
+                attempt_id=attempt_id,
+                expected_result_digest=expected_result_digest,
+                reason=reason,
+                invalidated_by=invalidated_by,
+            )
+        except ProjectExecutionError as exc:
+            raise ProjectWorkflowError(exc.code, str(exc)) from exc
+
+        self.reconcile_launch_outbox(project_id)
+        return receipt
+
     def current_repo_head(self, project: ProjectRecord) -> str:
         result = self.runner.run(("git", "rev-parse", "HEAD"), cwd=Path(project.local_repo_path), timeout_seconds=30)
         if result.returncode != 0 or not re.fullmatch(r"[0-9a-fA-F]{40,64}", result.stdout.strip()):
@@ -620,7 +656,12 @@ class ProjectWorkflow:
                 if self.catalog.get(pending.project_id) is not None:
                     q_outbox = self.execution.launch_outbox_record(pending.project_id, pending.launch_id)
                     if q_outbox is not None and q_outbox.status in {"PENDING", "PUBLISHED"}:
-                        is_orphan = False
+                        try:
+                            q_binding = self.execution.binding(pending.project_id, pending.execution_binding_id)
+                            if not q_binding.superseded and q_binding.status == "ACTIVE":
+                                is_orphan = False
+                        except Exception:
+                            pass
             if is_orphan:
                 # Clear orphan projection fail-closed
                 if not self.queue.discard_projection(pending):
@@ -683,8 +724,13 @@ class ProjectWorkflow:
             if q_pending.project_id and q_pending.execution_binding_id:
                 if self.catalog.get(q_pending.project_id) is not None:
                     outbox = self.execution.launch_outbox_record(q_pending.project_id, q_pending.launch_id)
-                    if outbox is not None:
-                        orphan = False
+                    if outbox is not None and outbox.status in {"PENDING", "PUBLISHED"}:
+                        try:
+                            b = self.execution.binding(q_pending.project_id, q_pending.execution_binding_id)
+                            if not b.superseded and b.status == "ACTIVE":
+                                orphan = False
+                        except Exception:
+                            pass
             if orphan:
                 orphans_cleared += int(self.queue.discard_projection(q_pending))
 
