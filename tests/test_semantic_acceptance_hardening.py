@@ -111,6 +111,102 @@ def _fixture(
     return catalog, coordinator, project_id, repo, head_init
 
 
+def _write_candidate_control_db(
+    runtime_root: Path,
+    *,
+    candidates: list[tuple[str, str | None, str, str | None, str | None]],
+    validations: list[tuple[str, str | None, str]],
+) -> None:
+    control_dir = runtime_root / "control"
+    control_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(control_dir / "control.db")
+    conn.executescript(
+        """
+        CREATE TABLE m4b_candidate_effects (
+            candidate_id TEXT PRIMARY KEY,
+            task_id TEXT,
+            state TEXT,
+            observed_tree_digest TEXT,
+            planned_tree_digest TEXT
+        );
+        CREATE TABLE p1_validation_runs (
+            validation_id TEXT PRIMARY KEY,
+            candidate_id TEXT,
+            status TEXT
+        );
+        """
+    )
+    conn.executemany("INSERT INTO m4b_candidate_effects VALUES (?, ?, ?, ?, ?)", candidates)
+    conn.executemany("INSERT INTO p1_validation_runs VALUES (?, ?, ?)", validations)
+    conn.commit()
+    conn.close()
+
+
+def _candidate_result_payload(project_id: str, binding: object, head: str, refs: dict[str, str]) -> dict[str, object]:
+    return {
+        "schema": "bdb-project-execution-submission-v1",
+        "project_id": project_id,
+        "plan_version": "1",
+        "task_id": "P3-03",
+        "execution_binding_id": binding.execution_binding_id,
+        "correlation_id": binding.correlation_id,
+        "command_id": binding.command_id,
+        "repo_alias": "test-project",
+        "head_before": head,
+        "head_after": head,
+        "execution_status": "PASS",
+        "validation_status": "PASS",
+        "promotion_status": "NOT_RUN",
+        "result_summary": "candidate lineage verification",
+        "canonical_refs": refs,
+        "criteria": [{"criterion": "test:deterministic", "type": "DETERMINISTIC", "status": "PASS"}],
+    }
+
+
+def _write_task_bound_promotion(runtime_root: Path, *, task_id: str) -> None:
+    control_dir = runtime_root / "control"
+    control_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(control_dir / "control.db")
+    conn.executescript(
+        """
+        CREATE TABLE m7c_promotion_cutovers (
+            flow_id TEXT PRIMARY KEY,
+            flow_revision_id TEXT NOT NULL,
+            state TEXT NOT NULL
+        );
+        CREATE TABLE m7c_promotion_bindings (
+            effect_id TEXT PRIMARY KEY,
+            flow_id TEXT NOT NULL,
+            flow_revision_id TEXT NOT NULL
+        );
+        CREATE TABLE m7a_git_effects (
+            effect_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            work_id TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            effect_certainty TEXT NOT NULL,
+            observed_ref_oid TEXT,
+            prepared_commit_oid TEXT NOT NULL
+        );
+        CREATE TABLE m4b_candidate_effects (
+            candidate_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            work_id TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute("INSERT INTO m7c_promotion_cutovers VALUES (?, ?, ?)", ("flow-001", "revision-001", "ACTIVE"))
+    conn.execute("INSERT INTO m7c_promotion_bindings VALUES (?, ?, ?)", ("effect-001", "flow-001", "revision-001"))
+    conn.execute(
+        "INSERT INTO m7a_git_effects VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("effect-001", task_id, "work-001", "candidate-001", "AFTER", "AFTER", "a" * 40, "a" * 40),
+    )
+    conn.execute("INSERT INTO m4b_candidate_effects VALUES (?, ?, ?)", ("candidate-001", task_id, "work-001"))
+    conn.commit()
+    conn.close()
+
+
 def test_p3_03_incident_semantic_false_pass_rejected(tmp_path: Path) -> None:
     """Incident reproduction: code deliverable with head_before == head_after, NOT_RUN, no canonical_refs must FAIL."""
     catalog, coordinator, project_id, repo, head_init = _fixture(tmp_path)
@@ -190,6 +286,75 @@ def test_code_deliverable_with_real_commit_passes(tmp_path: Path) -> None:
 
     updated_binding = coordinator.binding(project_id, binding.execution_binding_id)
     assert updated_binding.status == "ACCEPTED"
+
+
+@pytest.mark.parametrize(
+    ("changed_path", "expected_status"),
+    [("src/bar.ts", "FAIL"), ("src/foo.ts", "PASS")],
+)
+def test_git_delivery_must_match_explicit_deliverable_path(
+    tmp_path: Path, changed_path: str, expected_status: str
+) -> None:
+    task_spec = {
+        "id": "P3-03",
+        "milestone_id": "m1",
+        "title": "Explicit file delivery",
+        "description": "change the declared source file",
+        "status": "active",
+        "dependencies": [],
+        "acceptance_criteria": ["test:deterministic"],
+        "deliverables": ["src/foo.ts"],
+    }
+    catalog, coordinator, project_id, repo, head_init = _fixture(tmp_path, tasks=[task_spec])
+    binding = coordinator.start(project_id, expected_repo_head_before=head_init)
+    head_after = _commit_file(repo, changed_path)
+    result_payload = {
+        "schema": "bdb-project-execution-submission-v1",
+        "project_id": project_id,
+        "plan_version": "1",
+        "task_id": "P3-03",
+        "execution_binding_id": binding.execution_binding_id,
+        "correlation_id": binding.correlation_id,
+        "command_id": binding.command_id,
+        "repo_alias": "test-project",
+        "head_before": head_init,
+        "head_after": head_after,
+        "execution_status": "PASS",
+        "validation_status": "PASS",
+        "promotion_status": "NOT_RUN",
+        "result_summary": "explicit deliverable path verification",
+        "criteria": [{"criterion": "test:deterministic", "type": "DETERMINISTIC", "status": "PASS"}],
+    }
+
+    attempt = coordinator.record_result(project_id, result_payload)
+    assert attempt.result_status == expected_status
+    if expected_status == "FAIL":
+        assert attempt.failure_code == "missing_code_deliverable_evidence"
+
+
+def test_nonexistent_head_before_closes_git_evidence_channel(tmp_path: Path) -> None:
+    _, _, _, repo, _ = _fixture(tmp_path)
+    head_after = _commit_file(repo, "src/premium/calculator.ts")
+    task = ProjectTask(
+        task_id="P3-03",
+        milestone_id="m1",
+        title="Premium Calculation Engine",
+        description="implement engine",
+        status="active",
+        dependencies=(),
+        acceptance_criteria=("test:deterministic",),
+        deliverables=("src/premium/calculator.ts",),
+    )
+
+    verified, reason = verify_authoritative_code_delivery(
+        head_before="f" * 40,
+        head_after=head_after,
+        local_repo_path=repo,
+        task=task,
+    )
+    assert verified is False
+    assert reason is not None
+    assert "git:head_before_not_found_in_git:" in reason
 
 
 def test_adversarial_fake_commit_hash_rejected(tmp_path: Path) -> None:
@@ -439,24 +604,88 @@ def test_authoritative_candidate_store_in_control_db_passes(tmp_path: Path) -> N
     assert coordinator.snapshot(project_id)["task_statuses"]["P3-03"] == "completed"
 
 
-def test_authoritative_promotion_in_control_db_passes(tmp_path: Path) -> None:
-    """Promotion verified authoritatively in control.db succeeds without immediate git head change."""
+def test_validation_only_for_other_task_candidate_fails(tmp_path: Path) -> None:
     catalog, coordinator, project_id, repo, head_init = _fixture(tmp_path)
     binding = coordinator.start(project_id, expected_repo_head_before=head_init)
-
-    ctrl_dir = catalog.runtime_root / "control"
-    ctrl_dir.mkdir(parents=True, exist_ok=True)
-    db_path = ctrl_dir / "control.db"
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS m7c_promotion_cutovers (
-            flow_id TEXT PRIMARY KEY,
-            state TEXT
-        )"""
+    _write_candidate_control_db(
+        catalog.runtime_root,
+        candidates=[("candidate-other", "OTHER-TASK", "SEALED", "sha256:" + "d" * 64, "sha256:" + "d" * 64)],
+        validations=[("validation-other", "candidate-other", "PASS")],
     )
-    conn.execute("INSERT INTO m7c_promotion_cutovers VALUES (?, ?)", ("flow-001", "ACTIVE"))
-    conn.commit()
-    conn.close()
+
+    attempt = coordinator.record_result(
+        project_id,
+        _candidate_result_payload(project_id, binding, head_init, {"validation_id": "validation-other"}),
+    )
+    assert attempt.result_status == "FAIL"
+    assert attempt.failure_code == "missing_code_deliverable_evidence"
+
+
+def test_candidate_tree_digest_for_other_task_fails(tmp_path: Path) -> None:
+    catalog, coordinator, project_id, repo, head_init = _fixture(tmp_path)
+    binding = coordinator.start(project_id, expected_repo_head_before=head_init)
+    digest = "sha256:" + "e" * 64
+    _write_candidate_control_db(
+        catalog.runtime_root,
+        candidates=[("candidate-other", "OTHER-TASK", "SEALED", digest, digest)],
+        validations=[],
+    )
+
+    attempt = coordinator.record_result(
+        project_id,
+        _candidate_result_payload(project_id, binding, head_init, {"candidate_tree_digest": digest}),
+    )
+    assert attempt.result_status == "FAIL"
+    assert attempt.failure_code == "missing_code_deliverable_evidence"
+
+
+def test_candidate_with_null_task_id_fails_closed(tmp_path: Path) -> None:
+    catalog, coordinator, project_id, repo, head_init = _fixture(tmp_path)
+    binding = coordinator.start(project_id, expected_repo_head_before=head_init)
+    _write_candidate_control_db(
+        catalog.runtime_root,
+        candidates=[("candidate-unbound", None, "SEALED", "sha256:" + "f" * 64, "sha256:" + "f" * 64)],
+        validations=[],
+    )
+
+    attempt = coordinator.record_result(
+        project_id,
+        _candidate_result_payload(project_id, binding, head_init, {"candidate_id": "candidate-unbound"}),
+    )
+    assert attempt.result_status == "FAIL"
+    assert attempt.failure_code == "missing_code_deliverable_evidence"
+
+
+def test_candidate_and_validation_must_reference_same_candidate(tmp_path: Path) -> None:
+    catalog, coordinator, project_id, repo, head_init = _fixture(tmp_path)
+    binding = coordinator.start(project_id, expected_repo_head_before=head_init)
+    _write_candidate_control_db(
+        catalog.runtime_root,
+        candidates=[
+            ("candidate-p3-03", "P3-03", "SEALED", "sha256:" + "1" * 64, "sha256:" + "1" * 64),
+            ("candidate-other", "OTHER-TASK", "SEALED", "sha256:" + "2" * 64, "sha256:" + "2" * 64),
+        ],
+        validations=[("validation-other", "candidate-other", "PASS")],
+    )
+
+    attempt = coordinator.record_result(
+        project_id,
+        _candidate_result_payload(
+            project_id,
+            binding,
+            head_init,
+            {"candidate_id": "candidate-p3-03", "validation_id": "validation-other"},
+        ),
+    )
+    assert attempt.result_status == "FAIL"
+    assert attempt.failure_code == "missing_code_deliverable_evidence"
+
+
+def test_authoritative_promotion_in_control_db_passes(tmp_path: Path) -> None:
+    """Task-bound M7c -> M7a -> candidate promotion evidence succeeds."""
+    catalog, coordinator, project_id, repo, head_init = _fixture(tmp_path)
+    binding = coordinator.start(project_id, expected_repo_head_before=head_init)
+    _write_task_bound_promotion(catalog.runtime_root, task_id="P3-03")
 
     result_payload = {
         "schema": "bdb-project-execution-submission-v1",
@@ -479,6 +708,34 @@ def test_authoritative_promotion_in_control_db_passes(tmp_path: Path) -> None:
     attempt = coordinator.record_result(project_id, result_payload)
     assert attempt.result_status == "PASS"
     assert coordinator.snapshot(project_id)["task_statuses"]["P3-03"] == "completed"
+
+
+def test_other_task_m7c_promotion_does_not_prove_p3_03(tmp_path: Path) -> None:
+    catalog, coordinator, project_id, repo, head_init = _fixture(tmp_path)
+    binding = coordinator.start(project_id, expected_repo_head_before=head_init)
+    _write_task_bound_promotion(catalog.runtime_root, task_id="OTHER-TASK")
+
+    result_payload = {
+        "schema": "bdb-project-execution-submission-v1",
+        "project_id": project_id,
+        "plan_version": "1",
+        "task_id": "P3-03",
+        "execution_binding_id": binding.execution_binding_id,
+        "correlation_id": binding.correlation_id,
+        "command_id": binding.command_id,
+        "repo_alias": "test-project",
+        "head_before": head_init,
+        "head_after": head_init,
+        "execution_status": "PASS",
+        "validation_status": "PASS",
+        "promotion_status": "PROMOTED",
+        "result_summary": "other task promotion must not satisfy P3-03",
+        "criteria": [{"criterion": "test:deterministic", "type": "DETERMINISTIC", "status": "PASS"}],
+    }
+
+    attempt = coordinator.record_result(project_id, result_payload)
+    assert attempt.result_status == "FAIL"
+    assert attempt.failure_code == "missing_code_deliverable_evidence"
 
 
 def test_legitimate_no_code_deliverables_pass_without_commit(tmp_path: Path) -> None:

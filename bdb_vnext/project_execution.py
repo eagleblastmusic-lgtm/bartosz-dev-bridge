@@ -351,6 +351,25 @@ def _has_code_file_indicator(deliverable: str) -> bool:
     return False
 
 
+def _explicit_code_deliverable_paths(deliverables: Sequence[str]) -> tuple[str, ...]:
+    extensions = "|".join(re.escape(extension) for extension in sorted(_CODE_FILE_EXTENSIONS, key=len, reverse=True))
+    file_path = re.compile(
+        rf"(?<![A-Za-z0-9_.-])(?:[A-Za-z0-9_.-]+[/\\])*[A-Za-z0-9_.-]+(?:{extensions})(?![A-Za-z0-9_.-])",
+        re.IGNORECASE,
+    )
+    paths: list[str] = []
+    for deliverable in deliverables:
+        clean = deliverable.strip().replace("\\", "/")
+        if not clean:
+            continue
+        paths.extend(match.group(0).removeprefix("./") for match in file_path.finditer(clean))
+        if not any(char.isspace() for char in clean) and "/" in clean and _has_code_file_indicator(clean):
+            directory = clean.removeprefix("./").strip("/")
+            if directory and directory not in paths:
+                paths.append(directory)
+    return tuple(dict.fromkeys(path for path in paths if path))
+
+
 def task_requires_code_delivery(task: ProjectTask) -> bool:
     """Determine whether a task requires material code delivery in the repository.
 
@@ -444,36 +463,34 @@ def _verify_git_code_delivery(
             return False, "head_not_advanced"
 
         cat_before = _run_git(local_repo_path, ["cat-file", "-e", f"{hb}^{{commit}}"])
-        if cat_before.returncode == 0:
-            anc = _run_git(local_repo_path, ["merge-base", "--is-ancestor", hb, ha])
-            if anc.returncode != 0:
-                return False, f"head_after_not_ancestor:{hb}..{ha}"
+        if cat_before.returncode != 0:
+            return False, f"head_before_not_found_in_git:{hb}"
 
-            diff = _run_git(local_repo_path, ["diff", "--name-only", hb, ha])
-            if diff.returncode != 0:
-                return False, f"git_diff_failed:{hb}..{ha}"
-            changed_files = [line.strip().replace("\\", "/") for line in diff.stdout.splitlines() if line.strip()]
-            if not changed_files:
-                return False, f"empty_git_diff:{hb}..{ha}"
+        anc = _run_git(local_repo_path, ["merge-base", "--is-ancestor", hb, ha])
+        if anc.returncode != 0:
+            return False, f"head_after_not_ancestor:{hb}..{ha}"
 
-            if task and task.deliverables:
-                declared_code_paths = [
-                    d.strip().replace("\\", "/") for d in task.deliverables
-                    if _has_code_file_indicator(d)
-                ]
-                if declared_code_paths:
-                    matched = any(
-                        any(dec == f or f.endswith(dec) or dec.endswith(f) for f in changed_files)
-                        for dec in declared_code_paths
-                    )
-                    if not matched:
-                        if not any(_has_code_file_indicator(f) for f in changed_files):
-                            return False, f"git_diff_lacks_code_changes:{changed_files}"
-            else:
-                if not any(_has_code_file_indicator(f) for f in changed_files):
-                    return False, f"git_diff_lacks_code_changes:{changed_files}"
+        diff = _run_git(local_repo_path, ["diff", "--name-only", hb, ha])
+        if diff.returncode != 0:
+            return False, f"git_diff_failed:{hb}..{ha}"
+        changed_files = [line.strip().replace("\\", "/") for line in diff.stdout.splitlines() if line.strip()]
+        if not changed_files:
+            return False, f"empty_git_diff:{hb}..{ha}"
 
-            return True, None
+        explicit_paths = _explicit_code_deliverable_paths(task.deliverables) if task else ()
+        if explicit_paths:
+            def path_matches(declared: str, changed: str) -> bool:
+                normalized = declared.removeprefix("./").strip("/")
+                if Path(normalized).suffix.lower() in _CODE_FILE_EXTENSIONS:
+                    return changed == normalized
+                return changed == normalized or changed.startswith(normalized + "/")
+
+            if not any(path_matches(declared, changed) for declared in explicit_paths for changed in changed_files):
+                return False, f"git_diff_lacks_declared_code_path:{changed_files}"
+        elif not any(_has_code_file_indicator(path) for path in changed_files):
+            return False, f"git_diff_lacks_code_changes:{changed_files}"
+
+        return True, None
 
     ls = _run_git(local_repo_path, ["diff-tree", "--no-commit-id", "--name-only", "-r", ha])
     if ls.returncode == 0 and ls.stdout.strip():
@@ -499,6 +516,9 @@ def _verify_candidate_code_delivery(
     if not cand_id and not val_id and not tree_digest:
         return False, "canonical_refs_empty"
 
+    if not task or not task.task_id:
+        return False, "candidate_task_binding_missing"
+
     if not runtime_root:
         return False, "runtime_root_missing_for_candidate_verification"
 
@@ -516,27 +536,16 @@ def _verify_candidate_code_delivery(
         return False, f"control_db_open_failed:{exc}"
 
     try:
-        if cand_id:
-            cand_str = str(cand_id).strip()
-            table_check = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='m4b_candidate_effects'"
-            ).fetchone()
-            if not table_check:
-                return False, "m4b_candidate_effects_table_missing"
-            row = conn.execute(
-                "SELECT candidate_id, task_id, state, observed_tree_digest, planned_tree_digest FROM m4b_candidate_effects WHERE candidate_id = ?",
-                (cand_str,),
-            ).fetchone()
-            if not row:
-                return False, f"candidate_id_not_found:{cand_str}"
-            state = str(row[2]).upper()
-            if state not in {"SEALED", "OBSERVED", "PROMOTED", "APPLIED"}:
-                return False, f"candidate_state_invalid:{cand_str}:{state}"
-            if task and row[1] and row[1] != task.task_id:
-                return False, f"candidate_task_id_mismatch:{cand_str}:{row[1]}!={task.task_id}"
-            if tree_digest and str(tree_digest).strip() not in {row[3], row[4]}:
-                return False, f"candidate_tree_digest_mismatch:{cand_str}"
+        table_check = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='m4b_candidate_effects'"
+        ).fetchone()
+        if not table_check:
+            return False, "m4b_candidate_effects_table_missing"
+        candidate_columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(m4b_candidate_effects)").fetchall()}
+        if not {"candidate_id", "task_id", "state", "observed_tree_digest", "planned_tree_digest"}.issubset(candidate_columns):
+            return False, "m4b_candidate_effects_columns_missing"
 
+        cand_str = str(cand_id).strip() if cand_id else None
         if val_id:
             val_str = str(val_id).strip()
             table_check = conn.execute(
@@ -544,6 +553,9 @@ def _verify_candidate_code_delivery(
             ).fetchone()
             if not table_check:
                 return False, "p1_validation_runs_table_missing"
+            validation_columns = {str(item[1]) for item in conn.execute("PRAGMA table_info(p1_validation_runs)").fetchall()}
+            if not {"validation_id", "candidate_id", "status"}.issubset(validation_columns):
+                return False, "p1_validation_runs_columns_missing"
             row = conn.execute(
                 "SELECT validation_id, candidate_id, status FROM p1_validation_runs WHERE validation_id = ?",
                 (val_str,),
@@ -553,25 +565,44 @@ def _verify_candidate_code_delivery(
             status = str(row[2]).upper()
             if status != "PASS":
                 return False, f"validation_status_not_pass:{val_str}:{status}"
-            if cand_id and row[1] and str(cand_id).strip() != row[1]:
+            validation_candidate = str(row[1]).strip() if row[1] is not None else ""
+            if not validation_candidate:
+                return False, f"validation_candidate_missing:{val_str}"
+            if cand_str and cand_str != validation_candidate:
                 return False, f"validation_candidate_mismatch:{val_str}:{row[1]}!={cand_id}"
+            cand_str = validation_candidate
 
-        if not cand_id and not val_id and tree_digest:
+        if not cand_str and tree_digest:
             td_str = str(tree_digest).strip()
-            table_check = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='m4b_candidate_effects'"
-            ).fetchone()
-            if not table_check:
-                return False, "m4b_candidate_effects_table_missing"
-            row = conn.execute(
-                "SELECT candidate_id, state FROM m4b_candidate_effects WHERE observed_tree_digest = ? OR planned_tree_digest = ?",
+            rows = conn.execute(
+                "SELECT candidate_id, task_id, state, observed_tree_digest, planned_tree_digest "
+                "FROM m4b_candidate_effects WHERE observed_tree_digest = ? OR planned_tree_digest = ?",
                 (td_str, td_str),
-            ).fetchone()
-            if not row:
+            ).fetchall()
+            if not rows:
                 return False, f"candidate_tree_digest_not_found:{td_str}"
-            state = str(row[1]).upper()
-            if state not in {"SEALED", "OBSERVED", "PROMOTED", "APPLIED"}:
-                return False, f"candidate_tree_state_invalid:{row[0]}:{state}"
+            if len(rows) != 1:
+                return False, f"candidate_tree_digest_ambiguous:{td_str}"
+            cand_str = str(rows[0][0]).strip()
+
+        if not cand_str:
+            return False, "candidate_reference_missing"
+
+        row = conn.execute(
+            "SELECT candidate_id, task_id, state, observed_tree_digest, planned_tree_digest "
+            "FROM m4b_candidate_effects WHERE candidate_id = ?",
+            (cand_str,),
+        ).fetchone()
+        if not row:
+            return False, f"candidate_id_not_found:{cand_str}"
+        state = str(row[2]).upper()
+        if state not in {"SEALED", "OBSERVED", "PROMOTED", "APPLIED"}:
+            return False, f"candidate_state_invalid:{cand_str}:{state}"
+        candidate_task_id = str(row[1]).strip() if row[1] is not None else ""
+        if not candidate_task_id or candidate_task_id != task.task_id:
+            return False, f"candidate_task_id_mismatch:{cand_str}:{candidate_task_id or 'NULL'}!={task.task_id}"
+        if tree_digest and str(tree_digest).strip() not in {row[3], row[4]}:
+            return False, f"candidate_tree_digest_mismatch:{cand_str}"
 
         return True, None
     finally:
@@ -603,37 +634,92 @@ def _verify_promotion_code_delivery(
         return False, f"control_db_open_failed:{exc}"
 
     try:
-        tbl_m7c = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='m7c_promotion_cutovers'"
-        ).fetchone()
-        if tbl_m7c:
-            row = conn.execute(
-                "SELECT flow_id, state FROM m7c_promotion_cutovers WHERE state IN ('ACTIVE', 'APPLIED', 'PROMOTED')"
-            ).fetchone()
-            if row:
-                return True, None
+        if task is None or not task.task_id:
+            return False, "promotion_task_binding_missing"
+
+        def has_table(name: str) -> bool:
+            return conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+            ).fetchone() is not None
+
+        # M7c is a policy cutover, not a task completion record.  It can prove
+        # promotion only through its exact effect binding to an applied M7a
+        # Git effect whose canonical candidate and work belong to this task.
+        if all(has_table(name) for name in (
+            "m7c_promotion_cutovers", "m7c_promotion_bindings", "m7a_git_effects", "m4b_candidate_effects"
+        )):
+            required_columns = {
+                "m7c_promotion_cutovers": {"flow_id", "flow_revision_id", "state"},
+                "m7c_promotion_bindings": {"effect_id", "flow_id", "flow_revision_id"},
+                "m7a_git_effects": {
+                    "effect_id", "task_id", "work_id", "candidate_id", "state",
+                    "effect_certainty", "observed_ref_oid", "prepared_commit_oid",
+                },
+                "m4b_candidate_effects": {"candidate_id", "task_id", "work_id"},
+            }
+            if all(
+                columns.issubset({str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()})
+                for table, columns in required_columns.items()
+            ):
+                effects = conn.execute(
+                    "SELECT effect_id, work_id, candidate_id, observed_ref_oid, prepared_commit_oid "
+                    "FROM m7a_git_effects WHERE task_id=? AND state='AFTER' AND effect_certainty='AFTER'",
+                    (task.task_id,),
+                ).fetchall()
+                for effect_id, work_id, candidate_id, observed_oid, prepared_oid in effects:
+                    if not work_id or not candidate_id or not observed_oid or str(observed_oid).lower() != str(prepared_oid).lower():
+                        continue
+                    binding = conn.execute(
+                        "SELECT flow_id, flow_revision_id FROM m7c_promotion_bindings WHERE effect_id=?",
+                        (effect_id,),
+                    ).fetchone()
+                    if not binding or not binding[0] or not binding[1]:
+                        continue
+                    cutover = conn.execute(
+                        "SELECT flow_revision_id FROM m7c_promotion_cutovers "
+                        "WHERE flow_id=? AND state='ACTIVE'",
+                        (binding[0],),
+                    ).fetchone()
+                    if not cutover or str(cutover[0]) != str(binding[1]):
+                        continue
+                    candidate = conn.execute(
+                        "SELECT task_id, work_id FROM m4b_candidate_effects WHERE candidate_id=?",
+                        (candidate_id,),
+                    ).fetchone()
+                    if (
+                        candidate
+                        and candidate[0] is not None
+                        and str(candidate[0]).strip() == task.task_id
+                        and candidate[1] is not None
+                        and str(candidate[1]).strip() == str(work_id)
+                    ):
+                        return True, None
 
         tbl_m4b = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='m4b_candidate_effects'"
         ).fetchone()
         if tbl_m4b and task and task.task_id:
-            row = conn.execute(
-                "SELECT candidate_id FROM m4b_candidate_effects WHERE task_id = ? AND state = 'PROMOTED'",
-                (task.task_id,),
-            ).fetchone()
-            if row:
-                return True, None
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(m4b_candidate_effects)").fetchall()}
+            if {"candidate_id", "task_id", "state"}.issubset(columns):
+                row = conn.execute(
+                    "SELECT candidate_id FROM m4b_candidate_effects WHERE task_id = ? AND UPPER(state) = 'PROMOTED'",
+                    (task.task_id,),
+                ).fetchone()
+                if row and row[0]:
+                    return True, None
 
         tbl_n4 = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='n4_publications'"
         ).fetchone()
         if tbl_n4 and task and task.task_id:
-            row = conn.execute(
-                "SELECT publication_id FROM n4_publications WHERE task_id = ?",
-                (task.task_id,),
-            ).fetchone()
-            if row:
-                return True, None
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(n4_publications)").fetchall()}
+            if {"publication_id", "task_id"}.issubset(columns):
+                row = conn.execute(
+                    "SELECT publication_id FROM n4_publications WHERE task_id = ? AND publication_id IS NOT NULL",
+                    (task.task_id,),
+                ).fetchone()
+                if row:
+                    return True, None
 
         return False, "authoritative_promotion_record_not_found"
     finally:
