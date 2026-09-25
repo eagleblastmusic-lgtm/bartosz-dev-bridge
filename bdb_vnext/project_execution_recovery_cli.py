@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Sequence
 
 from .composition import default_vnext_runtime_root
-from .project_execution import ProjectExecutionCoordinator, ProjectExecutionError
+from .project_execution import (
+    ProjectExecutionCoordinator,
+    ProjectExecutionError,
+    transitive_dependents,
+)
 from .project_workflow import ProjectWorkflow, ProjectWorkflowError
 
 
@@ -92,10 +96,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"attempt digest '{target_attempt.get('result_digest')}' does not match expected '{args.expected_result_digest}'",
                     )
 
-            # Determine downstream tasks
-            task_ids = [t.task_id for t in plan.tasks]
-            target_idx = task_ids.index(args.task_id) if args.task_id in task_ids else -1
-            downstream_tasks = task_ids[target_idx + 1:] if target_idx >= 0 else []
+            # Determine downstream tasks via deterministic transitive dependency traversal
+            downstream_tasks = transitive_dependents(plan.tasks, args.task_id)
 
             _print(
                 {

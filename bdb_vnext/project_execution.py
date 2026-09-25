@@ -9,10 +9,13 @@ task and applies one idempotent, stale-safe project transition.
 from __future__ import annotations
 
 import re
+import sqlite3
+import subprocess
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Mapping
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Sequence
 
 from bdb_shared.evidence import semantic_digest
 
@@ -325,57 +328,395 @@ _NON_CODE_DELIVERABLE_PATTERNS = (
 )
 
 
+_CODE_FILE_EXTENSIONS = frozenset({
+    ".c", ".cc", ".cpp", ".cs", ".css", ".cxx", ".go", ".h", ".hpp",
+    ".html", ".htm", ".java", ".js", ".json", ".jsx", ".kt", ".kts", ".less",
+    ".mjs", ".php", ".ps1", ".py", ".pyw", ".rb", ".rs", ".sass",
+    ".scss", ".sh", ".sql", ".svelte", ".swift", ".toml", ".ts",
+    ".tsx", ".vue", ".yaml", ".yml",
+})
+
+
+def _has_code_file_indicator(deliverable: str) -> bool:
+    clean = deliverable.strip()
+    lowered = clean.lower()
+    for ext in _CODE_FILE_EXTENSIONS:
+        if lowered.endswith(ext):
+            return True
+    if "/" in clean or "\\" in clean:
+        parts = re.split(r"[/\\]", clean)
+        if any(part.lower() in {"src", "lib", "app", "components", "pkg", "core", "test", "tests", "dist"} for part in parts):
+            if not lowered.endswith((".md", ".txt", ".rst", ".doc", ".pdf", ".png", ".jpg", ".jpeg")):
+                return True
+    return False
+
+
 def task_requires_code_delivery(task: ProjectTask) -> bool:
     """Determine whether a task requires material code delivery in the repository.
 
-    A task requires code delivery if it declares deliverable components or artifacts
-    that are not purely non-code review/validation/audit records, and its acceptance
-    criteria are not purely manual or external review.
+    A task requires code delivery if:
+    - Any deliverable declares a code file (by extension, path separator, or source folder).
+    - Any deliverable is not strictly a recognized non-code audit/validation/checklist record.
+    - Criteria descriptions (even if manual/review) DO NOT waive code delivery when code deliverables are declared.
+
+    A task does NOT require code delivery only if:
+    - It has no deliverables AND its acceptance criteria are purely manual/review/external/unknown.
+    - OR all declared deliverables are strictly non-code records/reports/checklists and none declare code file paths.
     """
     if not task.deliverables:
         return False
 
-    criteria = task.acceptance_criteria or ()
-    if criteria and all(
-        c.strip().lower().startswith(("manual:", "review:", "visual:", "external:"))
-        for c in criteria
-    ):
-        return False
+    # Any code indicator in any deliverable mandates code delivery
+    if any(_has_code_file_indicator(d) for d in task.deliverables):
+        return True
 
-    all_non_code = True
+    # If all deliverables match recognized non-code deliverable patterns, no code delivery is required
     for item in task.deliverables:
         lowered = item.strip().lower()
         if not any(re.search(pat, lowered) for pat in _NON_CODE_DELIVERABLE_PATTERNS):
-            all_non_code = False
-            break
+            return True
 
-    if all_non_code:
-        return False
+    return False
 
-    return True
+
+def transitive_dependents(tasks: Sequence[ProjectTask], target_task_id: str) -> list[str]:
+    """Deterministically calculate all tasks that depend directly or transitively on target_task_id.
+
+    Independent tasks occurring later in the plan list are strictly excluded.
+    Returns task IDs in their canonical plan order.
+    """
+    dependents_map: dict[str, set[str]] = {}
+    for t in tasks:
+        for dep in t.dependencies:
+            dependents_map.setdefault(dep, set()).add(t.task_id)
+
+    downstream: set[str] = set()
+    queue = list(dependents_map.get(target_task_id, set()))
+    while queue:
+        curr = queue.pop(0)
+        if curr not in downstream:
+            downstream.add(curr)
+            queue.extend(dependents_map.get(curr, set()) - downstream)
+
+    return [t.task_id for t in tasks if t.task_id in downstream]
+
+
+def _run_git(repo_dir: Path, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(repo_dir), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except Exception as exc:
+        return subprocess.CompletedProcess(
+            args=["git", "-C", str(repo_dir), *args],
+            returncode=128,
+            stdout="",
+            stderr=str(exc),
+        )
+
+
+def _verify_git_code_delivery(
+    local_repo_path: Path,
+    *,
+    head_before: str | None,
+    head_after: str | None,
+    task: ProjectTask | None,
+) -> tuple[bool, str | None]:
+    if not local_repo_path.is_dir() or not (local_repo_path / ".git").exists():
+        return False, "repo_not_a_git_repository"
+
+    if not head_after or not isinstance(head_after, str) or len(head_after.strip()) < 7:
+        return False, "invalid_or_missing_head_after"
+
+    ha = head_after.strip()
+
+    cat_after = _run_git(local_repo_path, ["cat-file", "-e", f"{ha}^{{commit}}"])
+    if cat_after.returncode != 0:
+        return False, f"head_after_not_found_in_git:{ha}"
+
+    if head_before:
+        hb = head_before.strip()
+        if ha.lower() == hb.lower():
+            return False, "head_not_advanced"
+
+        cat_before = _run_git(local_repo_path, ["cat-file", "-e", f"{hb}^{{commit}}"])
+        if cat_before.returncode == 0:
+            anc = _run_git(local_repo_path, ["merge-base", "--is-ancestor", hb, ha])
+            if anc.returncode != 0:
+                return False, f"head_after_not_ancestor:{hb}..{ha}"
+
+            diff = _run_git(local_repo_path, ["diff", "--name-only", hb, ha])
+            if diff.returncode != 0:
+                return False, f"git_diff_failed:{hb}..{ha}"
+            changed_files = [line.strip().replace("\\", "/") for line in diff.stdout.splitlines() if line.strip()]
+            if not changed_files:
+                return False, f"empty_git_diff:{hb}..{ha}"
+
+            if task and task.deliverables:
+                declared_code_paths = [
+                    d.strip().replace("\\", "/") for d in task.deliverables
+                    if _has_code_file_indicator(d)
+                ]
+                if declared_code_paths:
+                    matched = any(
+                        any(dec == f or f.endswith(dec) or dec.endswith(f) for f in changed_files)
+                        for dec in declared_code_paths
+                    )
+                    if not matched:
+                        if not any(_has_code_file_indicator(f) for f in changed_files):
+                            return False, f"git_diff_lacks_code_changes:{changed_files}"
+            else:
+                if not any(_has_code_file_indicator(f) for f in changed_files):
+                    return False, f"git_diff_lacks_code_changes:{changed_files}"
+
+            return True, None
+
+    ls = _run_git(local_repo_path, ["diff-tree", "--no-commit-id", "--name-only", "-r", ha])
+    if ls.returncode == 0 and ls.stdout.strip():
+        changed = [line.strip().replace("\\", "/") for line in ls.stdout.splitlines() if line.strip()]
+        if any(_has_code_file_indicator(f) for f in changed):
+            return True, None
+
+    return False, "head_after_unverified"
+
+
+def _verify_candidate_code_delivery(
+    runtime_root: Path | None,
+    canonical_refs: Mapping[str, Any] | None,
+    task: ProjectTask | None,
+) -> tuple[bool, str | None]:
+    if not isinstance(canonical_refs, Mapping) or not canonical_refs:
+        return False, "canonical_refs_missing"
+
+    cand_id = canonical_refs.get("candidate_id")
+    val_id = canonical_refs.get("validation_id")
+    tree_digest = canonical_refs.get("candidate_tree_digest")
+
+    if not cand_id and not val_id and not tree_digest:
+        return False, "canonical_refs_empty"
+
+    if not runtime_root:
+        return False, "runtime_root_missing_for_candidate_verification"
+
+    control_db = runtime_root / "control" / "control.db"
+    if not control_db.is_file():
+        flat_db = runtime_root / "control.db"
+        if flat_db.is_file():
+            control_db = flat_db
+        else:
+            return False, f"control_db_not_found:{control_db}"
+
+    try:
+        conn = sqlite3.connect(f"file:{control_db.as_posix()}?mode=ro", uri=True, timeout=5.0)
+    except Exception as exc:
+        return False, f"control_db_open_failed:{exc}"
+
+    try:
+        if cand_id:
+            cand_str = str(cand_id).strip()
+            table_check = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='m4b_candidate_effects'"
+            ).fetchone()
+            if not table_check:
+                return False, "m4b_candidate_effects_table_missing"
+            row = conn.execute(
+                "SELECT candidate_id, task_id, state, observed_tree_digest, planned_tree_digest FROM m4b_candidate_effects WHERE candidate_id = ?",
+                (cand_str,),
+            ).fetchone()
+            if not row:
+                return False, f"candidate_id_not_found:{cand_str}"
+            state = str(row[2]).upper()
+            if state not in {"SEALED", "OBSERVED", "PROMOTED", "APPLIED"}:
+                return False, f"candidate_state_invalid:{cand_str}:{state}"
+            if task and row[1] and row[1] != task.task_id:
+                return False, f"candidate_task_id_mismatch:{cand_str}:{row[1]}!={task.task_id}"
+            if tree_digest and str(tree_digest).strip() not in {row[3], row[4]}:
+                return False, f"candidate_tree_digest_mismatch:{cand_str}"
+
+        if val_id:
+            val_str = str(val_id).strip()
+            table_check = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='p1_validation_runs'"
+            ).fetchone()
+            if not table_check:
+                return False, "p1_validation_runs_table_missing"
+            row = conn.execute(
+                "SELECT validation_id, candidate_id, status FROM p1_validation_runs WHERE validation_id = ?",
+                (val_str,),
+            ).fetchone()
+            if not row:
+                return False, f"validation_id_not_found:{val_str}"
+            status = str(row[2]).upper()
+            if status != "PASS":
+                return False, f"validation_status_not_pass:{val_str}:{status}"
+            if cand_id and row[1] and str(cand_id).strip() != row[1]:
+                return False, f"validation_candidate_mismatch:{val_str}:{row[1]}!={cand_id}"
+
+        if not cand_id and not val_id and tree_digest:
+            td_str = str(tree_digest).strip()
+            table_check = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='m4b_candidate_effects'"
+            ).fetchone()
+            if not table_check:
+                return False, "m4b_candidate_effects_table_missing"
+            row = conn.execute(
+                "SELECT candidate_id, state FROM m4b_candidate_effects WHERE observed_tree_digest = ? OR planned_tree_digest = ?",
+                (td_str, td_str),
+            ).fetchone()
+            if not row:
+                return False, f"candidate_tree_digest_not_found:{td_str}"
+            state = str(row[1]).upper()
+            if state not in {"SEALED", "OBSERVED", "PROMOTED", "APPLIED"}:
+                return False, f"candidate_tree_state_invalid:{row[0]}:{state}"
+
+        return True, None
+    finally:
+        conn.close()
+
+
+def _verify_promotion_code_delivery(
+    runtime_root: Path | None,
+    promotion_status: str,
+    task: ProjectTask | None,
+) -> tuple[bool, str | None]:
+    if str(promotion_status).upper() != "PROMOTED":
+        return False, "promotion_status_not_promoted"
+
+    if not runtime_root:
+        return False, "runtime_root_missing_for_promotion_verification"
+
+    control_db = runtime_root / "control" / "control.db"
+    if not control_db.is_file():
+        flat_db = runtime_root / "control.db"
+        if flat_db.is_file():
+            control_db = flat_db
+        else:
+            return False, f"control_db_not_found_for_promotion:{control_db}"
+
+    try:
+        conn = sqlite3.connect(f"file:{control_db.as_posix()}?mode=ro", uri=True, timeout=5.0)
+    except Exception as exc:
+        return False, f"control_db_open_failed:{exc}"
+
+    try:
+        tbl_m7c = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='m7c_promotion_cutovers'"
+        ).fetchone()
+        if tbl_m7c:
+            row = conn.execute(
+                "SELECT flow_id, state FROM m7c_promotion_cutovers WHERE state IN ('ACTIVE', 'APPLIED', 'PROMOTED')"
+            ).fetchone()
+            if row:
+                return True, None
+
+        tbl_m4b = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='m4b_candidate_effects'"
+        ).fetchone()
+        if tbl_m4b and task and task.task_id:
+            row = conn.execute(
+                "SELECT candidate_id FROM m4b_candidate_effects WHERE task_id = ? AND state = 'PROMOTED'",
+                (task.task_id,),
+            ).fetchone()
+            if row:
+                return True, None
+
+        tbl_n4 = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='n4_publications'"
+        ).fetchone()
+        if tbl_n4 and task and task.task_id:
+            row = conn.execute(
+                "SELECT publication_id FROM n4_publications WHERE task_id = ?",
+                (task.task_id,),
+            ).fetchone()
+            if row:
+                return True, None
+
+        return False, "authoritative_promotion_record_not_found"
+    finally:
+        conn.close()
+
+
+def verify_authoritative_code_delivery(
+    *,
+    head_before: str | None = None,
+    head_after: str | None = None,
+    promotion_status: str = "NOT_RUN",
+    canonical_refs: Mapping[str, Any] | None = None,
+    local_repo_path: str | Path | None = None,
+    runtime_root: str | Path | None = None,
+    task: ProjectTask | None = None,
+) -> tuple[bool, str | None]:
+    """Authoritatively verify code delivery fail-closed across three channels:
+    1. Git object existence, linear ancestry, and non-empty material code diff.
+    2. Authoritative candidate effects and validation runs in control.db.
+    3. Authoritative promotion cutover or publication in control.db.
+
+    Returns (True, None) if verified by any authoritative channel, or (False, reason) if unverified.
+    """
+    reasons: list[str] = []
+
+    # Channel 1: Git repository check
+    if local_repo_path:
+        git_ok, git_reason = _verify_git_code_delivery(
+            Path(local_repo_path),
+            head_before=head_before,
+            head_after=head_after,
+            task=task,
+        )
+        if git_ok:
+            return True, None
+        if git_reason:
+            reasons.append(f"git:{git_reason}")
+
+    # Channel 2: Authoritative Candidate & Validation in control.db
+    if canonical_refs and isinstance(canonical_refs, Mapping) and any(
+        k in canonical_refs for k in ("candidate_id", "validation_id", "candidate_tree_digest")
+    ):
+        rt = Path(runtime_root) if runtime_root else None
+        cand_ok, cand_reason = _verify_candidate_code_delivery(rt, canonical_refs, task)
+        if cand_ok:
+            return True, None
+        if cand_reason:
+            reasons.append(f"candidate:{cand_reason}")
+
+    # Channel 3: Authoritative Promotion in control.db
+    if str(promotion_status).upper() == "PROMOTED":
+        rt = Path(runtime_root) if runtime_root else None
+        prom_ok, prom_reason = _verify_promotion_code_delivery(rt, promotion_status, task)
+        if prom_ok:
+            return True, None
+        if prom_reason:
+            reasons.append(f"promotion:{prom_reason}")
+
+    reason_summary = "; ".join(reasons) if reasons else "missing_code_deliverable_evidence"
+    return False, reason_summary
 
 
 def has_canonical_code_evidence(
     *,
-    head_before: str | None,
-    head_after: str | None,
-    promotion_status: str,
-    canonical_refs: Mapping[str, Any] | None,
+    head_before: str | None = None,
+    head_after: str | None = None,
+    promotion_status: str = "NOT_RUN",
+    canonical_refs: Mapping[str, Any] | None = None,
+    local_repo_path: str | Path | None = None,
+    runtime_root: str | Path | None = None,
+    task: ProjectTask | None = None,
 ) -> bool:
-    """Check whether a submission has canonical evidence of code deliverables."""
-    if head_after and head_before and head_after.lower() != head_before.lower():
-        return True
-
-    if str(promotion_status).upper() == "PROMOTED":
-        return True
-
-    if isinstance(canonical_refs, Mapping):
-        if canonical_refs.get("candidate_tree_digest") or canonical_refs.get("base_commit_oid"):
-            return True
-        if canonical_refs.get("candidate_id") and canonical_refs.get("validation_id"):
-            return True
-
-    return False
+    """Check whether a submission has authoritative evidence of code deliverables."""
+    ok, _ = verify_authoritative_code_delivery(
+        head_before=head_before,
+        head_after=head_after,
+        promotion_status=promotion_status,
+        canonical_refs=canonical_refs,
+        local_repo_path=local_repo_path,
+        runtime_root=runtime_root,
+        task=task,
+    )
+    return ok
 
 
 @dataclass(frozen=True)
@@ -1542,6 +1883,7 @@ class ProjectExecutionCoordinator:
         head_after: str | None = None,
         promotion_status: str = "NOT_RUN",
         canonical_refs: Mapping[str, Any] | None = None,
+        local_repo_path: str | Path | None = None,
     ) -> TaskAcceptanceResult:
         supplied = {str(item.get("criterion")): item for item in (criteria or ()) if isinstance(item, Mapping)}
         normalized: list[Mapping[str, Any]] = []
@@ -1561,19 +1903,24 @@ class ProjectExecutionCoordinator:
             elif kind in {"MANUAL_REVIEW", "EXTERNAL"} and status != "PASS": review_required = True
             elif kind == "UNKNOWN" or status == "UNKNOWN": unknown = True
 
-        if task_requires_code_delivery(task) and not has_canonical_code_evidence(
-            head_before=head_before,
-            head_after=head_after,
-            promotion_status=promotion_status,
-            canonical_refs=canonical_refs,
-        ):
-            deterministic_failure = True
-            normalized.append({
-                "criterion": "canonical:code_delivery_evidence",
-                "type": "DETERMINISTIC",
-                "status": "FAIL",
-                "evidence_ref": "missing_code_deliverable_evidence",
-            })
+        if task_requires_code_delivery(task):
+            verified, _reason = verify_authoritative_code_delivery(
+                head_before=head_before,
+                head_after=head_after,
+                promotion_status=promotion_status,
+                canonical_refs=canonical_refs,
+                local_repo_path=local_repo_path,
+                runtime_root=self.runtime_root,
+                task=task,
+            )
+            if not verified:
+                deterministic_failure = True
+                normalized.append({
+                    "criterion": "canonical:code_delivery_evidence",
+                    "type": "DETERMINISTIC",
+                    "status": "FAIL",
+                    "evidence_ref": "missing_code_deliverable_evidence",
+                })
 
         overall = "FAIL" if deterministic_failure or not validation_ok else "UNKNOWN" if unknown else "REVIEW_REQUIRED" if review_required else "PASS"
         return TaskAcceptanceResult(project_id, plan_version, task.task_id, attempt_id, tuple(normalized), overall, _utc_now())
@@ -1701,6 +2048,7 @@ class ProjectExecutionCoordinator:
                 head_after=head_after_val,
                 promotion_status=promotion_status_val,
                 canonical_refs=canonical_refs_val,
+                local_repo_path=project.local_repo_path,
             )
             execution_ok = _status(result.get("execution_status", "UNKNOWN"), "execution_status") in RESULT_STATUS_SUCCESS
             overall = acceptance.overall if execution_ok else "FAIL"
@@ -2052,18 +2400,9 @@ class ProjectExecutionCoordinator:
             statuses[task_identifier] = "active"
 
             # 6. Downstream handling
-            plan_task_ids = [t.task_id for t in plan.tasks]
-            try:
-                task_idx = plan_task_ids.index(task_identifier)
-                subsequent_task_ids = set(plan_task_ids[task_idx + 1:])
-            except ValueError:
-                subsequent_task_ids = set()
+            downstream_task_ids = set(transitive_dependents(plan.tasks, task_identifier))
 
-            for t in plan.tasks:
-                if task_identifier in t.dependencies:
-                    subsequent_task_ids.add(t.task_id)
-
-            for down_id in subsequent_task_ids:
+            for down_id in downstream_task_ids:
                 if statuses.get(down_id) == "active":
                     statuses[down_id] = "pending"
 
@@ -2072,7 +2411,7 @@ class ProjectExecutionCoordinator:
             superseded_binding_ids: list[str] = []
             bindings = list(execution.get("bindings", []))
             for b in bindings:
-                if b.get("task_id") in subsequent_task_ids:
+                if b.get("task_id") in downstream_task_ids:
                     if b.get("status") == STATUS_ACTIVE and not b.get("superseded"):
                         validate_binding_transition(STATUS_ACTIVE, STATUS_SUPERSEDED)
                         b["status"] = STATUS_SUPERSEDED
@@ -2178,4 +2517,6 @@ __all__ = [
     "execution_result_digest",
     "has_canonical_code_evidence",
     "task_requires_code_delivery",
+    "transitive_dependents",
+    "verify_authoritative_code_delivery",
 ]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import pytest
 
 from bdb_vnext.project_catalog import (
@@ -20,10 +21,14 @@ from bdb_vnext.project_launch import ProjectLaunchQueueAdapter
 from bdb_vnext.project_memory import ProjectMemoryStore
 from bdb_vnext.project_workflow import CommandResult, ProjectWorkflow
 
-HEAD = "a" * 40
-HEAD_1 = "1" * 40
-HEAD_2 = "2" * 40
-HEAD_3 = "3" * 40
+
+def _make_commit(repo: Path, file_rel: str, content: str, msg: str) -> str:
+    target = repo / file_rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", msg], check=True, capture_output=True)
+    return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
 
 
 def _incident_fixture(
@@ -31,7 +36,15 @@ def _incident_fixture(
 ) -> tuple[ProjectCatalog, ProjectExecutionCoordinator, ProjectWorkflow, str, str]:
     runtime = tmp_path / "runtime"
     repo = tmp_path / "repo"
-    (repo / ".git").mkdir(parents=True, exist_ok=True)
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Tester"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "tester@example.com"], check=True, capture_output=True)
+    HEAD = _make_commit(repo, "README.md", "# Premium Calculator", "initial commit")
+    HEAD_1 = _make_commit(repo, "src/types/config.ts", "export interface Config {}", "P3-01")
+    HEAD_2 = _make_commit(repo, "src/parser/rules.ts", "export function parseRules() {}", "P3-02")
+    HEAD_3 = _make_commit(repo, "src/premium/calculator.ts", "export function calc() {}", "P3-03")
+
     project_id = "0c62f1b8-2ce1-48d3-bae9-c3c32b9a84b6"
     brief = ProjectBrief("Premium Calculator", "recovery incident fixture", "fixture", "test")
     project = new_project_record(
@@ -372,6 +385,7 @@ def test_recovery_cli_preview_and_apply(tmp_path: Path, capsys: pytest.CaptureFi
     assert preview_out["status"] == "PREVIEW"
     assert preview_out["task_id"] == "P3-03"
     assert preview_out["projected_task_status"] == "active"
+    assert preview_out["downstream_candidate_tasks"] == ["P3-04", "P3-05"]
 
     # 2. Apply without --yes fails closed
     exit_code = recovery_cli_main([
@@ -399,3 +413,175 @@ def test_recovery_cli_preview_and_apply(tmp_path: Path, capsys: pytest.CaptureFi
     applied_out = json.loads(capsys.readouterr().out)
     assert applied_out["status"] == "APPLIED"
     assert applied_out["invalidated_task_id"] == "P3-03"
+
+
+def test_invalidation_does_not_affect_independent_later_task(tmp_path: Path) -> None:
+    """Verifies that deterministic transitive dependency traversal does not affect independent later tasks."""
+    from dataclasses import replace
+
+    runtime = tmp_path / "runtime"
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Tester"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "tester@example.com"], check=True, capture_output=True)
+    c0 = _make_commit(repo, "README.md", "# Independent Test", "init")
+    c1 = _make_commit(repo, "src/t1.ts", "export const t1 = 1;", "t1")
+
+    project_id = "test-independent-recovery"
+    brief = ProjectBrief("Indep Test", "transitive dependency test", "fixture", "test")
+    project = new_project_record(
+        project_id=project_id,
+        display_name="Indep Test",
+        repo_alias="indep-test",
+        local_repo_path=repo,
+        github_repo=None,
+        brief=brief,
+    )
+    catalog = ProjectCatalog(runtime)
+    catalog.upsert(project)
+
+    # Plan with:
+    # T1 -> T2 (dependent on T1)
+    # T-INDEPENDENT (dependencies: [], placed after T1 in plan list)
+    plan_doc = {
+        "schema": "bdb-project-plan-v1",
+        "project_id": project_id,
+        "project_name": "Indep Test",
+        "plan_version": 1,
+        "milestones": [{"id": "m1", "title": "M1", "description": "m1", "status": "active"}],
+        "tasks": [
+            {
+                "id": "T1",
+                "milestone_id": "m1",
+                "title": "Task 1",
+                "description": "T1",
+                "status": "active",
+                "dependencies": [],
+                "acceptance_criteria": ["test:deterministic"],
+                "deliverables": ["src/t1.ts"],
+            },
+            {
+                "id": "T2",
+                "milestone_id": "m1",
+                "title": "Task 2",
+                "description": "T2 (depends on T1)",
+                "status": "pending",
+                "dependencies": ["T1"],
+                "acceptance_criteria": ["test:deterministic"],
+                "deliverables": ["src/t2.ts"],
+            },
+            {
+                "id": "T-INDEPENDENT",
+                "milestone_id": "m1",
+                "title": "Independent Task",
+                "description": "Completely independent of T1 and T2",
+                "status": "pending",
+                "dependencies": [],
+                "acceptance_criteria": ["manual:check"],
+            },
+        ],
+        "current_task_id": "T1",
+    }
+    plan = validate_project_plan(plan_doc, expected_project_id=project_id)
+    memory = ProjectMemoryStore(runtime, project_id)
+    memory.ensure_initial_plan(plan)
+    catalog.upsert(
+        type(project)(
+            **{
+                **project.__dict__,
+                "plan_imported": True,
+                "plan_version": plan.plan_version,
+                "total_tasks": len(plan.tasks),
+                "current_milestone": "M1",
+                "current_task": "T1",
+                "plan_path": str(memory.current_pointer),
+                "project_status": "active",
+            }
+        )
+    )
+    coordinator = ProjectExecutionCoordinator(runtime, catalog=catalog)
+    coordinator.begin_milestone_auto(project_id, milestone_id="m1")
+
+    # Complete T1
+    b1 = coordinator.start(project_id, expected_repo_head_before=c0)
+    coordinator.record_result(
+        project_id,
+        {
+            "schema": "bdb-project-execution-submission-v1",
+            "project_id": project_id,
+            "plan_version": "1",
+            "task_id": "T1",
+            "execution_binding_id": b1.execution_binding_id,
+            "correlation_id": b1.correlation_id,
+            "command_id": b1.command_id,
+            "repo_alias": "indep-test",
+            "head_before": c0,
+            "head_after": c1,
+            "execution_status": "PASS",
+            "validation_status": "PASS",
+            "promotion_status": "NOT_RUN",
+            "result_summary": "T1 done",
+            "criteria": [{"criterion": "test:deterministic", "type": "DETERMINISTIC", "status": "PASS"}],
+        },
+    )
+
+    # Start T2 (dependent)
+    b2 = coordinator.start(project_id, task_id="T2", expected_repo_head_before=c1)
+
+    # Also activate T-INDEPENDENT binding manually in memory state to simulate concurrent/parallel branch
+    def activate_indep(state):
+        exec_doc = dict(state.execution)
+        statuses = dict(exec_doc["task_statuses"])
+        statuses["T-INDEPENDENT"] = "active"
+        exec_doc["task_statuses"] = statuses
+        bindings = list(exec_doc["bindings"])
+        indep_binding = {
+            "execution_binding_id": "bind-indep-001",
+            "project_id": project_id,
+            "plan_version": "1",
+            "task_id": "T-INDEPENDENT",
+            "command_id": "cmd-indep-001",
+            "correlation_id": "corr-indep-001",
+            "launch_id": "launch-indep-001",
+            "repo_alias": "indep-test",
+            "expected_repo_head_before": c1,
+            "status": "ACTIVE",
+            "superseded": False,
+            "created_at": "2026-09-25T12:00:00Z",
+        }
+        bindings.append(indep_binding)
+        exec_doc["bindings"] = bindings
+        return replace(state, execution=exec_doc), None
+
+    memory.execution_transaction(activate_indep)
+
+    # Verify pre-invalidation state
+    pre_snap = coordinator.snapshot(project_id)
+    assert pre_snap["task_statuses"]["T1"] == "completed"
+    assert pre_snap["task_statuses"]["T2"] == "active"
+    assert pre_snap["task_statuses"]["T-INDEPENDENT"] == "active"
+
+    # Invalidate T1
+    receipt = coordinator.invalidate_task_completion(
+        project_id,
+        "T1",
+        reason="Test invalidation of T1",
+    )
+
+    # T2 (dependent) must be superseded
+    assert b2.execution_binding_id in receipt["superseded_downstream_bindings"]
+    assert "bind-indep-001" not in receipt["superseded_downstream_bindings"]
+
+    post_snap = coordinator.snapshot(project_id)
+    # T1 is active again
+    assert post_snap["task_statuses"]["T1"] == "active"
+    # T2 (dependent) reverted to pending
+    assert post_snap["task_statuses"]["T2"] == "pending"
+    # T-INDEPENDENT is strictly UNTOUCHED (remains active!)
+    assert post_snap["task_statuses"]["T-INDEPENDENT"] == "active"
+
+    # T-INDEPENDENT binding is still ACTIVE and NOT superseded
+    indep_b = coordinator.binding(project_id, "bind-indep-001")
+    assert indep_b.status == "ACTIVE"
+    assert not indep_b.superseded
