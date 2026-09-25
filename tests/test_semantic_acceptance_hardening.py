@@ -163,6 +163,26 @@ def _candidate_result_payload(project_id: str, binding: object, head: str, refs:
     }
 
 
+def _promotion_result_payload(project_id: str, binding: object, head: str, summary: str) -> dict[str, object]:
+    return {
+        "schema": "bdb-project-execution-submission-v1",
+        "project_id": project_id,
+        "plan_version": "1",
+        "task_id": "P3-03",
+        "execution_binding_id": binding.execution_binding_id,
+        "correlation_id": binding.correlation_id,
+        "command_id": binding.command_id,
+        "repo_alias": "test-project",
+        "head_before": head,
+        "head_after": head,
+        "execution_status": "PASS",
+        "validation_status": "PASS",
+        "promotion_status": "PROMOTED",
+        "result_summary": summary,
+        "criteria": [{"criterion": "test:deterministic", "type": "DETERMINISTIC", "status": "PASS"}],
+    }
+
+
 def _write_task_bound_promotion(runtime_root: Path, *, task_id: str) -> None:
     control_dir = runtime_root / "control"
     control_dir.mkdir(parents=True, exist_ok=True)
@@ -203,6 +223,48 @@ def _write_task_bound_promotion(runtime_root: Path, *, task_id: str) -> None:
         ("effect-001", task_id, "work-001", "candidate-001", "AFTER", "AFTER", "a" * 40, "a" * 40),
     )
     conn.execute("INSERT INTO m4b_candidate_effects VALUES (?, ?, ?)", ("candidate-001", task_id, "work-001"))
+    conn.commit()
+    conn.close()
+
+
+def _write_n4_publication_control_db(
+    runtime_root: Path,
+    *,
+    candidate_id: str | None,
+    candidate_view_id: str | None,
+    candidate_task_id: str | None = None,
+    candidate_state: str = "SEALED",
+) -> None:
+    control_dir = runtime_root / "control"
+    control_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(control_dir / "control.db")
+    conn.executescript(
+        """
+        CREATE TABLE m4b_candidate_effects (
+            candidate_id TEXT PRIMARY KEY,
+            task_id TEXT,
+            state TEXT,
+            observed_tree_digest TEXT,
+            planned_tree_digest TEXT,
+            work_id TEXT
+        );
+        CREATE TABLE n4_publications (
+            publication_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            candidate_id TEXT,
+            candidate_view_id TEXT
+        );
+        """
+    )
+    if candidate_id is not None:
+        conn.execute(
+            "INSERT INTO m4b_candidate_effects VALUES (?, ?, ?, ?, ?, ?)",
+            (candidate_id, candidate_task_id, candidate_state, "sha256:" + "9" * 64, "sha256:" + "9" * 64, "work-n4"),
+        )
+    conn.execute(
+        "INSERT INTO n4_publications VALUES (?, ?, ?, ?)",
+        ("publication-p3-03", "P3-03", candidate_id, candidate_view_id),
+    )
     conn.commit()
     conn.close()
 
@@ -734,6 +796,73 @@ def test_other_task_m7c_promotion_does_not_prove_p3_03(tmp_path: Path) -> None:
     }
 
     attempt = coordinator.record_result(project_id, result_payload)
+    assert attempt.result_status == "FAIL"
+    assert attempt.failure_code == "missing_code_deliverable_evidence"
+
+
+def test_n4_publication_without_candidate_is_not_promotion_proof(tmp_path: Path) -> None:
+    catalog, coordinator, project_id, repo, head_init = _fixture(tmp_path)
+    binding = coordinator.start(project_id, expected_repo_head_before=head_init)
+    _write_n4_publication_control_db(
+        catalog.runtime_root,
+        candidate_id=None,
+        candidate_view_id=None,
+    )
+
+    attempt = coordinator.record_result(
+        project_id,
+        _promotion_result_payload(project_id, binding, head_init, "publication without a code candidate"),
+    )
+    assert attempt.result_status == "FAIL"
+    assert attempt.failure_code == "missing_code_deliverable_evidence"
+
+
+def test_n4_publication_with_other_task_candidate_is_not_promotion_proof(tmp_path: Path) -> None:
+    catalog, coordinator, project_id, repo, head_init = _fixture(tmp_path)
+    binding = coordinator.start(project_id, expected_repo_head_before=head_init)
+    _write_n4_publication_control_db(
+        catalog.runtime_root,
+        candidate_id="candidate-other-task",
+        candidate_view_id="view-other-task",
+        candidate_task_id="OTHER-TASK",
+        candidate_state="SEALED",
+    )
+
+    attempt = coordinator.record_result(
+        project_id,
+        _promotion_result_payload(project_id, binding, head_init, "publication references another task candidate"),
+    )
+    assert attempt.result_status == "FAIL"
+    assert attempt.failure_code == "missing_code_deliverable_evidence"
+
+
+def test_unrecognized_m4b_promoted_literal_is_not_promotion_proof(tmp_path: Path) -> None:
+    catalog, coordinator, project_id, repo, head_init = _fixture(tmp_path)
+    binding = coordinator.start(project_id, expected_repo_head_before=head_init)
+    control_dir = catalog.runtime_root / "control"
+    control_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(control_dir / "control.db")
+    conn.execute(
+        """CREATE TABLE m4b_candidate_effects (
+            candidate_id TEXT PRIMARY KEY,
+            task_id TEXT,
+            state TEXT,
+            observed_tree_digest TEXT,
+            planned_tree_digest TEXT,
+            work_id TEXT
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO m4b_candidate_effects VALUES (?, ?, ?, ?, ?, ?)",
+        ("candidate-p3-03", "P3-03", "PROMOTED", "sha256:" + "8" * 64, "sha256:" + "8" * 64, "work-p3-03"),
+    )
+    conn.commit()
+    conn.close()
+
+    attempt = coordinator.record_result(
+        project_id,
+        _promotion_result_payload(project_id, binding, head_init, "M4b has no canonical PROMOTED state"),
+    )
     assert attempt.result_status == "FAIL"
     assert attempt.failure_code == "missing_code_deliverable_evidence"
 

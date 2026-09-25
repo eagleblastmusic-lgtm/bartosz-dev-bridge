@@ -596,7 +596,7 @@ def _verify_candidate_code_delivery(
         if not row:
             return False, f"candidate_id_not_found:{cand_str}"
         state = str(row[2]).upper()
-        if state not in {"SEALED", "OBSERVED", "PROMOTED", "APPLIED"}:
+        if state not in {"SEALED", "OBSERVED", "APPLIED"}:
             return False, f"candidate_state_invalid:{cand_str}:{state}"
         candidate_task_id = str(row[1]).strip() if row[1] is not None else ""
         if not candidate_task_id or candidate_task_id != task.task_id:
@@ -695,32 +695,6 @@ def _verify_promotion_code_delivery(
                     ):
                         return True, None
 
-        tbl_m4b = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='m4b_candidate_effects'"
-        ).fetchone()
-        if tbl_m4b and task and task.task_id:
-            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(m4b_candidate_effects)").fetchall()}
-            if {"candidate_id", "task_id", "state"}.issubset(columns):
-                row = conn.execute(
-                    "SELECT candidate_id FROM m4b_candidate_effects WHERE task_id = ? AND UPPER(state) = 'PROMOTED'",
-                    (task.task_id,),
-                ).fetchone()
-                if row and row[0]:
-                    return True, None
-
-        tbl_n4 = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='n4_publications'"
-        ).fetchone()
-        if tbl_n4 and task and task.task_id:
-            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(n4_publications)").fetchall()}
-            if {"publication_id", "task_id"}.issubset(columns):
-                row = conn.execute(
-                    "SELECT publication_id FROM n4_publications WHERE task_id = ? AND publication_id IS NOT NULL",
-                    (task.task_id,),
-                ).fetchone()
-                if row:
-                    return True, None
-
         return False, "authoritative_promotion_record_not_found"
     finally:
         conn.close()
@@ -739,7 +713,7 @@ def verify_authoritative_code_delivery(
     """Authoritatively verify code delivery fail-closed across three channels:
     1. Git object existence, linear ancestry, and non-empty material code diff.
     2. Authoritative candidate effects and validation runs in control.db.
-    3. Authoritative promotion cutover or publication in control.db.
+    3. Task-bound canonical promotion records in control.db.
 
     Returns (True, None) if verified by any authoritative channel, or (False, reason) if unverified.
     """
