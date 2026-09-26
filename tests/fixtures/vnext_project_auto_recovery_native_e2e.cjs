@@ -429,7 +429,28 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
   }
   await wait(200);
   const p3Submit = trace.nativeRequests.find((item) => item.action === "project_execution_submit" && item.request.result?.execution_binding_id === p3Binding);
-  const requestSummary = trace.nativeRequests.map((item) => ({ action: item.action, task: item.request.task_id || item.request.result?.task_id, binding: item.request.execution_binding_id || item.request.result?.execution_binding_id, launch: item.request.launch_id, status: item.response.status, error: item.response.error_code || item.response.error, receipt: item.response.receipt && { accepted: item.response.receipt.accepted, result_status: item.response.receipt.result_status, task_status: item.response.receipt.task_status, current_task_id: item.response.receipt.current_task_id } }));
+  const requestSummary = trace.nativeRequests.map((item) => ({
+    action: item.action,
+    task: item.request.task_id || item.request.result?.task_id,
+    binding: item.request.execution_binding_id || item.request.result?.execution_binding_id,
+    launch: item.request.launch_id,
+    status: item.response.status,
+    error: item.response.error_code || item.response.error,
+    state: item.action === "project_execution_status" ? {
+      current_binding_id: item.response.current_binding_id,
+      current_task_id: item.response.current_task_id,
+      binding: item.response.binding,
+      milestone_auto: item.response.milestone_auto,
+      launch_handoff: item.response.launch_handoff,
+      launch_outbox_status: item.response.launch_outbox_status
+    } : undefined,
+    receipt: item.response.receipt && {
+      accepted: item.response.receipt.accepted,
+      result_status: item.response.receipt.result_status,
+      task_status: item.response.receipt.task_status,
+      current_task_id: item.response.receipt.current_task_id
+    }
+  }));
   assert.ok(p3Submit, "Browser AUTO must submit the existing assistant result through Native; requests=" + JSON.stringify(requestSummary) + "; sends=" + JSON.stringify(trace.sends));
   assert.equal(p3Submit.request.result.plan_version, "1");
   assert.equal(Object.prototype.hasOwnProperty.call(p3Submit.request.result, "canonical_refs"), false);
