@@ -3,6 +3,7 @@
 const SUBMISSION_SCHEMA = "bdb-vnext-submission-v1";
 const PROJECT_EXECUTION_SCHEMA = "bdb-project-execution-submission-v1";
 const MAX_SUBMISSION_TEXT = 256 * 1024;
+const PROJECT_CANONICAL_REF_KEYS = new Set(["task_id", "work_id", "candidate_id", "candidate_view_id", "candidate_tree_digest", "base_commit_oid", "validation_id", "evidence_id", "evaluation_id", "publication_id"]);
 const CONTENT_ADAPTER_RUNTIME_FINGERPRINT = "bdb-vnext-content-adapter-live-sweep-v1";
 const CANONICAL_RESULT_SWEEP_MS = 750;
 const MAX_CANONICAL_SWEEP_BLOCKS = 256;
@@ -162,14 +163,38 @@ function parseProjectExecutionResult(block) {
     ];
     if (required.some((field) => !(field in value))) return null;
     if (typeof value.project_id !== "string" || typeof value.task_id !== "string" || typeof value.execution_binding_id !== "string") return null;
-    // A complete result with malformed list fields still gets a panel so the
-    // worker's final-result gate can explain the rejection before Native.
+    let normalized = value;
+    if (Object.prototype.hasOwnProperty.call(value, "canonical_refs")) {
+      const refs = value.canonical_refs;
+      if (refs && typeof refs === "object" && !Array.isArray(refs)) {
+        const valid = Object.entries(refs).every(([key, ref]) =>
+          PROJECT_CANONICAL_REF_KEYS.has(key) &&
+          (ref === null || (typeof ref === "string" && ref.trim() !== "" && ref.length <= 128))
+        );
+        if (!valid) return null;
+      } else if (
+        Array.isArray(refs) && refs.length === 3 &&
+        /^attempt-[0-9a-f]{32}$/i.test(refs[0] || "") &&
+        /^sha256:[0-9a-f]{64}$/i.test(refs[1] || "") &&
+        /^milestone-run-[0-9a-f]{32}$/i.test(refs[2] || "")
+      ) {
+        // Older execution prompts caused one known untyped audit tuple to be
+        // emitted as an array. These values do not map to canonical_refs
+        // fields and must never be treated as authority. Drop only this exact
+        // legacy shape; Native still validates delivery through Git/canonical
+        // evidence, and all other array/object shapes fail closed.
+        normalized = { ...value };
+        delete normalized.canonical_refs;
+      } else {
+        return null;
+      }
+    }
     // Project Plan may carry an integer version. The execution submission
     // contract is text, so normalize at the Browser result boundary.
-    if (typeof value.plan_version === "number" && Number.isSafeInteger(value.plan_version) && value.plan_version >= 0) {
-      return { ...value, plan_version: String(value.plan_version) };
+    if (typeof normalized.plan_version === "number" && Number.isSafeInteger(normalized.plan_version) && normalized.plan_version >= 0) {
+      return { ...normalized, plan_version: String(normalized.plan_version) };
     }
-    return value;
+    return normalized;
   } catch (_error) {
     // YAML and prose are intentionally not accepted as a canonical result.
     return null;
@@ -529,6 +554,23 @@ async function submitProjectExecutionResult(block, result, refs, { automatic = f
   }
 }
 
+async function projectRecoverPendingSendForResult(status, result, conversationId) {
+  const binding = status && status.binding;
+  if (!binding || !binding.launch_id) return status;
+  const bindings = await projectReadBindings();
+  const local = bindings[binding.launch_id];
+  if (!local || local.state !== "SEND_ATTEMPTED") return status;
+  const launch = await projectPeek();
+  if (!launch || launch.launch_id !== binding.launch_id || launch.auto_send !== true ||
+      !projectStoredBindingMatches(local, launch, conversationId) ||
+      result.project_id !== launch.project_id || result.task_id !== launch.task_id ||
+      result.execution_binding_id !== launch.execution_binding_id) return null;
+  const recovered = await projectHandleLaunch(launch, { automatic: true });
+  if (!recovered || recovered.ok !== true) return null;
+  const refreshed = await projectExecutionStatusFor(result.project_id, result.execution_binding_id, conversationId);
+  return projectCanonicalHandoffSentMatches(refreshed, launch, conversationId) ? refreshed : null;
+}
+
 async function autoSubmitProjectExecution(block, result, refs, panelKey) {
   if (projectAutoSubmissions.has(panelKey)) return;
   const record = { status: "checking" };
@@ -541,12 +583,17 @@ async function autoSubmitProjectExecution(block, result, refs, panelKey) {
       token: panelKey
     };
     const conversationId = projectConversationId();
-    const status = await projectExecutionStatusFor(result.project_id, result.execution_binding_id, conversationId);
+    let status = await projectExecutionStatusFor(result.project_id, result.execution_binding_id, conversationId);
     if (!status) {
       record.status = "manual";
       return;
     }
     if (!projectAutoGateMatches(status, result, conversationId)) {
+      record.status = "stopped";
+      return;
+    }
+    status = await projectRecoverPendingSendForResult(status, result, conversationId);
+    if (!status || !projectAutoGateMatches(status, result, conversationId)) {
       record.status = "stopped";
       return;
     }
@@ -601,6 +648,7 @@ const PROJECT_TAB_INSTANCE_KEY = "bdbVnextProjectTabInstanceV1";
 let projectPollActive = false;
 let projectInsertionActive = false;
 const projectClaims = new Map();
+const projectLaunchHandling = new Map();
 let projectTabInstance;
 
 function projectConversationId() {
@@ -756,6 +804,19 @@ function projectBindingFor(bindings, launchId, conversationId) {
   return value && value.conversation_id === conversationId && value.tab_instance_id === projectTabInstanceId() && PROJECT_UUID_RE.test(value.claim_id || "") ? value : null;
 }
 
+function projectStoredBindingMatches(value, launch, conversationId) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      value.schema !== "bdb-vnext-project-launch-binding-v1" ||
+      value.launch_id !== launch?.launch_id || value.conversation_id !== conversationId ||
+      !PROJECT_UUID_RE.test(value.claim_id || "")) return false;
+  for (const field of ["repo_alias", "project_id", "task_id", "execution_binding_id", "correlation_id", "command_id", "expected_repo_head_before", "auto_send"]) {
+    const expected = launch[field] === undefined ? null : launch[field];
+    if (value[field] !== expected) return false;
+  }
+  const expectedPlanVersion = launch.plan_version === undefined || launch.plan_version === null ? null : String(launch.plan_version);
+  return value.plan_version === expectedPlanVersion;
+}
+
 function projectAnnounce(message, state = "neutral") {
   let output = document.querySelector(".bdb-vnext-project-launch-status");
   if (!(output instanceof HTMLElement)) {
@@ -837,6 +898,65 @@ function projectExactUserMessageCount(prompt) {
   return count;
 }
 
+function projectUserTurnSnapshot() {
+  const owners = [];
+  for (const node of document.querySelectorAll("[data-message-author-role='user']")) {
+    if (!(node instanceof HTMLElement) || !projectVisible(node) || projectIsMessageUiElement(node)) continue;
+    owners.push(node);
+  }
+  if (owners.length > 4096) return null;
+  const identities = [];
+  for (const owner of owners) {
+    const identity =
+      projectMessageAttribute(owner, "data-message-id") ||
+      projectMessageAttribute(owner, "data-turn-id") ||
+      projectMessageAttribute(owner, "id") ||
+      (() => {
+        const testId = projectMessageAttribute(owner, "data-testid");
+        return testId && /^conversation-turn-[0-9]+$/.test(testId) ? testId : null;
+      })();
+    if (!identity || identities.includes(identity)) return { count: owners.length, ids: null };
+    identities.push(identity);
+  }
+  return { count: owners.length, ids: identities };
+}
+
+function projectNewUserTurnObserved(baseline, conversationId) {
+  if (!baseline || !Number.isInteger(baseline.count) || baseline.count < 0 || projectConversationId() !== conversationId) return false;
+  const composer = projectFindComposer();
+  if (!composer || projectComposerText(composer) !== "") return false;
+  const current = projectUserTurnSnapshot();
+  if (!current || current.count !== baseline.count + 1) return false;
+  if (Array.isArray(baseline.ids)) {
+    if (!Array.isArray(current.ids) || baseline.ids.length !== baseline.count || current.ids.length !== current.count) return false;
+    if (!baseline.ids.every((identity) => current.ids.includes(identity))) return false;
+    return current.ids.filter((identity) => !baseline.ids.includes(identity)).length === 1;
+  }
+  return true;
+}
+
+function projectBoundAssistantResultFollowsUserTurn(launch, conversationId) {
+  if (!launch || projectConversationId() !== conversationId) return false;
+  const messages = Array.from(document.querySelectorAll("[data-message-author-role]"));
+  for (const owner of assistantMessageOwners(document)) {
+    for (const candidate of canonicalResultCandidates(owner)) {
+      const result = parseProjectExecutionResult({ textContent: candidate.text });
+      if (!result ||
+          result.project_id !== launch.project_id ||
+          result.plan_version !== String(launch.plan_version) ||
+          result.repo_alias !== launch.repo_alias ||
+          result.head_before !== launch.expected_repo_head_before ||
+          result.task_id !== launch.task_id ||
+          result.execution_binding_id !== launch.execution_binding_id ||
+          result.correlation_id !== launch.correlation_id ||
+          result.command_id !== launch.command_id) continue;
+      const index = messages.indexOf(owner);
+      if (index > 0 && projectMessageAttribute(messages[index - 1], "data-message-author-role") === "user") return true;
+    }
+  }
+  return false;
+}
+
 function projectSendControlEnabled(send) {
   return Boolean(
     send && send.disabled !== true &&
@@ -844,11 +964,19 @@ function projectSendControlEnabled(send) {
   );
 }
 
-function projectSendEffectObserved(prompt, baselineCount, conversationId) {
+function projectSendEffectObserved(prompt, baselineCount, conversationId, baselineUserTurns = null, launch = null) {
   if (!conversationId || projectConversationId() !== conversationId) return false;
   const composer = projectFindComposer();
   if (!composer || projectComposerText(composer) !== "") return false;
-  return projectExactUserMessageCount(prompt) > baselineCount;
+  if (projectExactUserMessageCount(prompt) > baselineCount) return true;
+  if (baselineUserTurns && projectNewUserTurnObserved(baselineUserTurns, conversationId)) {
+    return projectBoundAssistantResultFollowsUserTurn(launch, conversationId);
+  }
+  // A pre-hotfix SEND_ATTEMPTED record has only the exact-prompt count. For
+  // that legacy state, an exact result for this launch immediately following
+  // a user turn proves that this canonical prompt reached this conversation.
+  return Number.isInteger(baselineCount) && baselineCount === 0 &&
+    projectBoundAssistantResultFollowsUserTurn(launch, conversationId);
 }
 
 function projectDelay(milliseconds) {
@@ -895,12 +1023,26 @@ async function projectAutoSendInserted(launch, claimId, prompt, insertedComposer
     if (projectSendControlEnabled(send) && projectComposerText(composer) === prompt && epoch === projectAutoEpoch) {
       const conversationId = projectConversationId();
       const baselineCount = projectExactUserMessageCount(prompt);
+      const baselineUserTurns = projectUserTurnSnapshot();
+      if (!baselineUserTurns) {
+        projectAutoStop("user_turn_baseline_unavailable");
+        projectAnnounce("BDB AUTO zatrzymane: nie można bezpiecznie zapisać granicy user turn przed Send.", "warning");
+        return false;
+      }
       projectAutoState.phase = "sending_prompt";
       if (typeof send.click !== "function") return false;
       await projectWriteBinding(launch, claimId, conversationId, "SEND_ATTEMPTED", {
         send_baseline_count: baselineCount,
+        send_baseline_user_turn_count: baselineUserTurns.count,
+        send_baseline_user_turn_ids: baselineUserTurns.ids,
         send_attempt_token: token
       });
+      const persistedComposer = projectFindComposer();
+      if (projectConversationId() !== conversationId || !persistedComposer || projectComposerText(persistedComposer) !== prompt) {
+        projectAutoState.phase = "error";
+        projectAnnounce("BDB AUTO zatrzymane: composer/conversation zmieniły się przed Send; ponowna próba zablokowana.", "warning");
+        return false;
+      }
       try {
         send.click();
       } catch (_error) {
@@ -911,9 +1053,11 @@ async function projectAutoSendInserted(launch, claimId, prompt, insertedComposer
       projectAutoState.phase = "verifying_send_effect";
       for (let verifyAttempt = 0; verifyAttempt < 50; verifyAttempt += 1) {
         if (epoch !== projectAutoEpoch || projectAutoState.phase === "stopped") return false;
-        if (projectSendEffectObserved(prompt, baselineCount, conversationId)) {
+        if (projectSendEffectObserved(prompt, baselineCount, conversationId, baselineUserTurns, launch)) {
           await projectWriteBinding(launch, claimId, conversationId, "SEND_CONFIRMED", {
             send_baseline_count: baselineCount,
+            send_baseline_user_turn_count: baselineUserTurns.count,
+            send_baseline_user_turn_ids: baselineUserTurns.ids,
             send_attempt_token: token
           });
           projectAutoState.phase = "sent";
@@ -976,7 +1120,7 @@ function projectLaunchResult(ok, code, launchId = null) {
   return result;
 }
 
-async function projectHandleLaunch(launch, { selectedByUser = false, automatic = false } = {}) {
+async function projectHandleLaunchOnce(launch, { selectedByUser = false, automatic = false } = {}) {
   const launchId = launch?.launch_id || null;
   if (projectInsertionActive || !projectPageEligible({ selectedByUser })) {
     return projectLaunchResult(false, "project_prompt_not_inserted", launchId);
@@ -991,12 +1135,15 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
     return projectLaunchResult(false, "project_prompt_not_inserted", launchId);
   }
   const bindings = await projectReadBindings();
+  const storedForLaunch = bindings[launch.launch_id] || null;
   const existing = conversationId ? projectBindingFor(bindings, launch.launch_id, conversationId) : null;
+  const storedIdentityMatches = projectStoredBindingMatches(storedForLaunch, launch, conversationId);
+  const localState = existing || (autoMode && storedIdentityMatches ? storedForLaunch : null);
   const canonicalBeforeClaim = autoMode
     ? await projectExecutionStatusFor(launch.project_id, launch.execution_binding_id, conversationId)
     : null;
   if (autoMode && projectCanonicalDeliveryAckMatches(canonicalBeforeClaim, launch, conversationId)) {
-    const claimId = existing ? existing.claim_id : projectClaimId(launch.launch_id);
+    const claimId = localState ? localState.claim_id : projectClaimId(launch.launch_id);
     // Native consumes any stale queue projection when the canonical outbox is
     // already acknowledged. The Browser cache is rebuilt only as a cache.
     await projectClaim(launch, claimId, conversationId);
@@ -1005,7 +1152,11 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
     projectAnnounce("BDB AUTO: kanoniczny ACK potwierdza wysyłkę; wznowiono bez ponownego Send.", "success");
     return projectLaunchResult(true, "project_prompt_inserted", launchId);
   }
-  const localSendProof = existing && (existing.state === "SEND_ATTEMPTED" || existing.state === "SEND_CONFIRMED");
+  if (autoMode && storedForLaunch?.auto_send === true && ["SEND_ATTEMPTED", "SEND_CONFIRMED", "ACKED"].includes(storedForLaunch.state) && !storedIdentityMatches) {
+    projectAnnounce("BDB AUTO zatrzymane: zapis lokalny launchu nie pasuje do bieżącego bindingu/conversation; Send zablokowany.", "warning");
+    return projectLaunchResult(false, "project_auto_binding_identity_mismatch", launchId);
+  }
+  const localSendProof = localState && (localState.state === "SEND_ATTEMPTED" || localState.state === "SEND_CONFIRMED");
   if (autoMode && !localSendProof && !projectCanonicalHandoffSentMatches(canonicalBeforeClaim, launch, conversationId) && projectExactUserMessageCount(launch.prompt) > 0 && projectComposerText(composer) === "") {
     projectAnnounce("BDB AUTO zatrzymane: prompt jest w rozmowie, lecz brak kanonicznego ACK. Ponowny Send jest niebezpieczny; wymagane uzgodnienie dostawy.", "warning");
     return projectLaunchResult(false, "project_auto_duplicate_guard", launchId);
@@ -1019,7 +1170,7 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
       return projectLaunchResult(false, "project_prompt_not_inserted", launchId);
     }
   }
-  const claimId = existing ? existing.claim_id : projectClaimId(launch.launch_id);
+  const claimId = localState ? localState.claim_id : projectClaimId(launch.launch_id);
   if (autoMode && !selectedByUser) {
     const ownership = await projectExecutionStatusFor(launch.project_id, launch.execution_binding_id, conversationId);
     if (!ownership?.binding || ownership.binding.conversation_id !== conversationId) {
@@ -1049,11 +1200,11 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
   if (existing?.state === "ACKED" && !autoMode) {
     return projectLaunchResult(true, "project_prompt_inserted", claimedLaunchId);
   }
-  if (existing?.state === "ACKED" && existing.auto_send === true) {
+  if (autoMode && localState?.state === "ACKED" && localState.auto_send === true) {
     projectAnnounce("BDB AUTO: RECOVERY_REQUIRED — lokalny ACK nie zgadza się z potwierdzeniem wysyłki. Ponowna wysyłka zablokowana.", "warning");
     return projectLaunchResult(false, "project_auto_send_uncertain", claimedLaunchId);
   }
-  if (autoMode && existing?.state === "SEND_CONFIRMED") {
+  if (autoMode && localState?.state === "SEND_CONFIRMED") {
     const acknowledged = await projectAck(claimed.launch_id, claimId, conversationId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
     if (acknowledged) {
       await projectWriteBinding(claimed, claimId, conversationId, "ACKED");
@@ -1061,12 +1212,16 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
     }
     return projectLaunchResult(false, "project_prompt_ack_failed", claimedLaunchId);
   }
-  if (autoMode && existing?.state === "SEND_ATTEMPTED") {
-    const baseline = existing.send_baseline_count;
-    if (Number.isInteger(baseline) && baseline >= 0 && projectSendEffectObserved(claimed.prompt, baseline, conversationId)) {
+  if (autoMode && localState?.state === "SEND_ATTEMPTED") {
+    const baseline = localState.send_baseline_count;
+    const baselineUserTurns = Number.isInteger(localState.send_baseline_user_turn_count)
+      ? { count: localState.send_baseline_user_turn_count, ids: Array.isArray(localState.send_baseline_user_turn_ids) ? localState.send_baseline_user_turn_ids : null }
+      : null;
+    if (Number.isInteger(baseline) && baseline >= 0 && projectSendEffectObserved(claimed.prompt, baseline, conversationId, baselineUserTurns, claimed)) {
       await projectWriteBinding(claimed, claimId, conversationId, "SEND_CONFIRMED", {
         send_baseline_count: baseline,
-        send_attempt_token: existing.send_attempt_token || null
+        ...(baselineUserTurns ? { send_baseline_user_turn_count: baselineUserTurns.count, send_baseline_user_turn_ids: baselineUserTurns.ids } : {}),
+        send_attempt_token: localState.send_attempt_token || null
       });
       const acknowledged = await projectAck(claimed.launch_id, claimId, conversationId, { project_id: claimed.project_id, execution_binding_id: claimed.execution_binding_id, conversation_id: conversationId });
       if (acknowledged) {
@@ -1133,6 +1288,18 @@ async function projectHandleLaunch(launch, { selectedByUser = false, automatic =
   } finally {
     projectInsertionActive = false;
   }
+}
+
+function projectHandleLaunch(launch, options = {}) {
+  const launchId = launch?.launch_id;
+  if (typeof launchId !== "string" || launchId === "") return projectHandleLaunchOnce(launch, options);
+  const pending = projectLaunchHandling.get(launchId);
+  if (pending) return pending;
+  const operation = projectHandleLaunchOnce(launch, options).finally(() => {
+    if (projectLaunchHandling.get(launchId) === operation) projectLaunchHandling.delete(launchId);
+  });
+  projectLaunchHandling.set(launchId, operation);
+  return operation;
 }
 
 async function projectInsertSelectedLaunch() {
