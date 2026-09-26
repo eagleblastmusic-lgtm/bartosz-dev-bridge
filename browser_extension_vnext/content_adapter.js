@@ -6,6 +6,8 @@ const MAX_SUBMISSION_TEXT = 256 * 1024;
 const CONTENT_ADAPTER_RUNTIME_FINGERPRINT = "bdb-vnext-content-adapter-live-sweep-v1";
 const CANONICAL_RESULT_SWEEP_MS = 750;
 const MAX_CANONICAL_SWEEP_BLOCKS = 256;
+const MAX_CANONICAL_SCAN_NODES = 4096;
+const MAX_CANONICAL_SCAN_DEPTH = 64;
 const PROJECT_EXECUTION_PANEL_KIND = "project-execution";
 const GENERIC_SUBMISSION_PANEL_KIND = "generic-submission";
 const decorated = new WeakSet();
@@ -17,6 +19,85 @@ let projectAutoEpoch = 0;
 let projectAutoState = { phase: "awaiting_next_launch", launch_id: null, execution_binding_id: null, token: null };
 const PROJECT_AUTO_STOP_MESSAGE = "bdb-vnext-project-auto-stop";
 const PROJECT_EXECUTION_STATUS_MESSAGE = "bdb-vnext-project-execution-status";
+
+function projectMessageAttribute(element, name) {
+  if (!element || typeof element.getAttribute !== "function") return null;
+  const value = element.getAttribute(name);
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+function projectIsHTMLElement(element) {
+  return typeof HTMLElement === "function" && element instanceof HTMLElement;
+}
+
+function projectIsMessageUiElement(element) {
+  if (!element || (element.nodeType !== 1 && !projectIsHTMLElement(element))) return false;
+  const tag = String(element.tagName || "").toLowerCase();
+  const role = (projectMessageAttribute(element, "role") || "").toLowerCase();
+  const className = typeof element.className === "string" ? element.className.toLowerCase() : "";
+  const testId = (projectMessageAttribute(element, "data-testid") || "").toLowerCase();
+  const ariaLabel = (projectMessageAttribute(element, "aria-label") || "").toLowerCase();
+  return Boolean(
+    ["button", "input", "textarea", "select", "option"].includes(tag) ||
+    ["button", "group", "toolbar", "menu", "menuitem"].includes(role) ||
+    projectMessageAttribute(element, "contenteditable") === "true" ||
+    className.includes("bdb-vnext-project-launch-status") ||
+    className.includes("bdb-vnext-project-execution-panel") ||
+    className.includes("bdb-vnext-panel") ||
+    testId.includes("copy") || testId.includes("toolbar") || testId.includes("action-bar") ||
+    ariaLabel.includes("copy") || ariaLabel.includes("show more") || ariaLabel.includes("pokaż więcej")
+  );
+}
+
+function projectCanonicalMessageText(owner, maximum = MAX_SUBMISSION_TEXT) {
+  if (!owner) return "";
+  const canonicalAttributes = ["data-message-content", "data-message-text", "data-full-text", "data-original-text"];
+  for (const name of canonicalAttributes) {
+    const value = projectMessageAttribute(owner, name);
+    if (value !== null) return value.length <= maximum ? value.replace(/\r\n?/g, "\n") : "\u0000";
+  }
+  const chunks = [];
+  let length = 0;
+  let visited = 0;
+  let oversized = false;
+  const append = (value) => {
+    if (oversized || typeof value !== "string" || value === "") return;
+    if (length + value.length > maximum) {
+      oversized = true;
+      return;
+    }
+    chunks.push(value);
+    length += value.length;
+  };
+  const visit = (node) => {
+    if (oversized || !node) return;
+    visited += 1;
+    if (visited > MAX_CANONICAL_SCAN_NODES) {
+      oversized = true;
+      return;
+    }
+    if (node.nodeType === 3) {
+      append(typeof node.nodeValue === "string" ? node.nodeValue : node.textContent || "");
+      return;
+    }
+    if (node.nodeType !== 1 && !projectIsHTMLElement(node)) return;
+    if (projectIsMessageUiElement(node)) return;
+    if (String(node.tagName || "").toLowerCase() === "br") {
+      append("\n");
+      return;
+    }
+    const children = node.childNodes && node.childNodes.length
+      ? Array.from(node.childNodes)
+      : Array.from(node.children || []);
+    if (children.length) {
+      for (const child of children) visit(child);
+    } else if (typeof node.textContent === "string") {
+      append(node.textContent);
+    }
+  };
+  visit(owner);
+  return oversized ? "\u0000" : chunks.join("").replace(/\r\n?/g, "\n");
+}
 
 function canonicalSortedEvidence(refs) {
   if (!Array.isArray(refs)) return [];
@@ -746,19 +827,12 @@ function projectFindSendControl(composer) {
 
 function projectExactUserMessageCount(prompt) {
   if (typeof prompt !== "string" || prompt === "") return 0;
+  const expected = prompt.replace(/\r\n?/g, "\n");
   let count = 0;
   for (const node of document.querySelectorAll("[data-message-author-role='user']")) {
     if (!(node instanceof HTMLElement)) continue;
-    if (typeof node.closest === "function" && node.closest(".bdb-vnext-project-launch-status, .bdb-vnext-project-execution-panel")) continue;
-    const descendants = typeof node.querySelectorAll === "function" ? Array.from(node.querySelectorAll("*")) : [];
-    const candidates = [node, ...descendants];
-    const exact = candidates.some((candidate) => {
-      if (!(candidate instanceof HTMLElement) || !projectVisible(candidate)) return false;
-      if (typeof candidate.closest === "function" && candidate.closest("button, [role='button'], [role='group'], [role='toolbar'], textarea, input, select, [contenteditable='true'], .bdb-vnext-project-launch-status, .bdb-vnext-project-execution-panel")) return false;
-      const value = typeof candidate.innerText === "string" ? candidate.innerText : candidate.textContent || "";
-      return value === prompt;
-    });
-    if (exact) count += 1;
+    if (!projectVisible(node) || projectIsMessageUiElement(node)) continue;
+    if (projectCanonicalMessageText(node, Math.max(MAX_SUBMISSION_TEXT, expected.length)) === expected) count += 1;
   }
   return count;
 }
@@ -1114,46 +1188,153 @@ function codeBlocks(root) {
   }
   if (typeof root.querySelectorAll === "function") {
     for (const block of root.querySelectorAll("pre code")) {
+      if (blocks.length >= MAX_CANONICAL_SWEEP_BLOCKS) break;
       if (!blocks.includes(block)) blocks.push(block);
     }
   }
   return blocks;
 }
 
-function canonicalResultText(block) {
-  return typeof block.textContent === "string" ? block.textContent.trim() : "";
+function isAssistantMessageOwner(element) {
+  return Boolean(element && projectMessageAttribute(element, "data-message-author-role") === "assistant");
 }
 
-function isCanonicalResultCandidate(block) {
-  const text = canonicalResultText(block);
+function assistantMessageOwners(root) {
+  const owners = new Set();
+  const add = (element) => {
+    if (projectIsHTMLElement(element) && isAssistantMessageOwner(element)) owners.add(element);
+  };
+  if (projectIsHTMLElement(root)) {
+    add(root);
+    if (typeof root.closest === "function") {
+      const owner = root.closest("[data-message-author-role='assistant']");
+      // closest() has already enforced the semantic selector in a real DOM.
+      // Older deterministic DOM fixtures expose the relationship through
+      // closest() but do not implement data attributes themselves.
+      if (projectIsHTMLElement(owner)) owners.add(owner);
+    }
+  }
+  if (root && typeof root.querySelectorAll === "function") {
+    for (const owner of root.querySelectorAll("[data-message-author-role='assistant']")) {
+      add(owner);
+      if (owners.size >= MAX_CANONICAL_SWEEP_BLOCKS) break;
+    }
+  }
+  // Keep compatibility with rendered legacy pre/code blocks in older DOMs
+  // and in minimal DOM implementations that expose only those nodes.
+  for (const block of codeBlocks(root)) {
+    const owner = assistantOwner(block);
+    if (projectIsHTMLElement(owner)) owners.add(owner);
+    if (owners.size >= MAX_CANONICAL_SWEEP_BLOCKS) break;
+  }
+  return Array.from(owners).slice(0, MAX_CANONICAL_SWEEP_BLOCKS);
+}
+
+function canonicalSchemaCandidate(text) {
+  if (typeof text !== "string" || !text || text.length > MAX_SUBMISSION_TEXT) return false;
   return Boolean(
-    text &&
-    text.length <= MAX_SUBMISSION_TEXT &&
-    (text.includes(PROJECT_EXECUTION_SCHEMA) || text.includes(SUBMISSION_SCHEMA))
+    parseProjectExecutionResult({ textContent: text }) ||
+    parseSubmission({ textContent: text })
   );
 }
 
-function scanBlock(block) {
-  if (!(block instanceof HTMLElement)) {
-    return;
+function canonicalResultCandidates(owner) {
+  const candidates = [];
+  let visited = 0;
+  let exceeded = false;
+  const collect = (node, depth = 0) => {
+    if (!node || exceeded) return "";
+    visited += 1;
+    if (visited > MAX_CANONICAL_SCAN_NODES || depth > MAX_CANONICAL_SCAN_DEPTH) {
+      exceeded = true;
+      return "";
+    }
+    if (node.nodeType === 3) {
+      return typeof node.nodeValue === "string" ? node.nodeValue : node.textContent || "";
+    }
+    if (node.nodeType !== 1 && !projectIsHTMLElement(node)) return "";
+    if (projectIsMessageUiElement(node)) return "";
+    if (String(node.tagName || "").toLowerCase() === "br") return "\n";
+    const beforeChildren = candidates.length;
+    const children = node.childNodes && node.childNodes.length
+      ? Array.from(node.childNodes)
+      : Array.from(node.children || []);
+    let text = "";
+    if (children.length) {
+      const chunks = [];
+      for (const child of children) {
+        chunks.push(collect(child, depth + 1));
+        if (exceeded) return "";
+      }
+      text = chunks.join("");
+    } else {
+      text = typeof node.textContent === "string" ? node.textContent : "";
+    }
+    if (text.length > MAX_SUBMISSION_TEXT) {
+      exceeded = true;
+      return "";
+    }
+    if (candidates.length === beforeChildren && canonicalSchemaCandidate(text)) {
+      candidates.push({ block: node, text });
+    }
+    return text;
+  };
+  const ownerText = collect(owner);
+  if (exceeded || !ownerText || ownerText.length > MAX_SUBMISSION_TEXT || candidates.length === 0) return [];
+
+  // A valid-looking JSON descendant is insufficient if the surrounding
+  // assistant message contains prose or other unrelated material. Strip only
+  // the exact, complete candidate blocks found in this message and require
+  // that nothing except whitespace remains. Multiple adjacent canonical
+  // blocks remain supported and are independently deduplicated downstream.
+  let remainder = ownerText;
+  for (const candidate of candidates) {
+    const index = remainder.indexOf(candidate.text);
+    if (index < 0) return [];
+    remainder = `${remainder.slice(0, index)}${remainder.slice(index + candidate.text.length)}`;
   }
-  if (!isCanonicalResultCandidate(block)) {
-    return;
-  }
-  const projectResult = parseProjectExecutionResult(block);
+  return remainder.trim() === "" ? candidates : [];
+}
+
+function legacyBlockFitsAssistantMessage(block, owner) {
+  const text = projectCanonicalMessageText(block);
+  if (!canonicalSchemaCandidate(text)) return false;
+  const ownerText = projectCanonicalMessageText(owner);
+  // Some legacy DOM adapters expose pre/code nodes and their semantic owner
+  // separately. In a real connected tree the owner text is present; when it
+  // is, no surrounding prose may be discarded to accept the code block.
+  if (!ownerText) return true;
+  const index = ownerText.indexOf(text);
+  if (index < 0) return false;
+  const remainder = `${ownerText.slice(0, index)}${ownerText.slice(index + text.length)}`.trim();
+  return remainder === "" || canonicalSchemaCandidate(remainder);
+}
+
+function scanBlock(block, text) {
+  if (!projectIsHTMLElement(block)) return;
+  const candidate = { textContent: text };
+  const projectResult = parseProjectExecutionResult(candidate);
   if (projectResult) {
     decorateProjectExecution(block, projectResult);
     return;
   }
-  const submission = parseSubmission(block);
+  const submission = parseSubmission(candidate);
   if (submission) {
     decorate(block, submission);
   }
 }
 
 function scan(root = document) {
+  const owners = assistantMessageOwners(root);
+  for (const owner of owners) {
+    for (const candidate of canonicalResultCandidates(owner)) {
+      scanBlock(candidate.block, candidate.text);
+    }
+  }
   for (const block of codeBlocks(root)) {
-    scanBlock(block);
+    const owner = assistantOwner(block);
+    if (!projectIsHTMLElement(owner) || !legacyBlockFitsAssistantMessage(block, owner)) continue;
+    scanBlock(block, projectCanonicalMessageText(block));
   }
 }
 
@@ -1161,10 +1342,17 @@ function sweepCanonicalResults() {
   if (document.visibilityState !== "visible") {
     return;
   }
-  const blocks = codeBlocks(document);
-  const limit = Math.min(blocks.length, MAX_CANONICAL_SWEEP_BLOCKS);
+  const owners = assistantMessageOwners(document);
+  const limit = Math.min(owners.length, MAX_CANONICAL_SWEEP_BLOCKS);
   for (let index = 0; index < limit; index += 1) {
-    scanBlock(blocks[index]);
+    for (const candidate of canonicalResultCandidates(owners[index])) {
+      scanBlock(candidate.block, candidate.text);
+    }
+  }
+  for (const block of codeBlocks(document).slice(0, MAX_CANONICAL_SWEEP_BLOCKS)) {
+    const owner = assistantOwner(block);
+    if (!projectIsHTMLElement(owner) || !legacyBlockFitsAssistantMessage(block, owner)) continue;
+    scanBlock(block, projectCanonicalMessageText(block));
   }
 }
 

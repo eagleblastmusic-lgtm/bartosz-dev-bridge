@@ -91,6 +91,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               constructor(kind = "div", text = "") {
                 this.nodeType = 1;
                 this.kind = kind;
+                this.tagName = kind.toUpperCase();
                 this.children = [];
                 this.parentElement = null;
                 this.parentNode = null;
