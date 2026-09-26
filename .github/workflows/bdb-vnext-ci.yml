@@ -45,6 +45,7 @@ jobs:
           python -m pytest -q
           tests/test_semantic_acceptance_hardening.py
           tests/test_canonical_task_recovery.py
+          tests/test_project_execution_code_evidence_retry.py
           tests/test_project_center_write_capability_regression.py
           tests/test_project_execution_integration.py
           tests/test_project_execution_submission.py

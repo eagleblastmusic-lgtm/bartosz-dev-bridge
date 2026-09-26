@@ -434,7 +434,154 @@ class ProjectWorkflow:
         return self._queue_execution_prompt(project_id, "start")
 
     def queue_continue_prompt(self, project_id: str) -> ProjectLaunch:
+        snapshot = self.execution.snapshot(project_id)
+        task_id = snapshot.get("current_task_id")
+        if isinstance(task_id, str) and task_id:
+            invalidated = {
+                item.get("attempt_id")
+                for item in snapshot.get("completion_invalidations", [])
+                if isinstance(item, Mapping)
+            }
+            latest = next(
+                (
+                    item for item in reversed(snapshot.get("attempts", []))
+                    if item.get("task_id") == task_id
+                    and item.get("attempt_id") not in invalidated
+                    and item.get("result_status") != "STALE_RESULT"
+                ),
+                None,
+            )
+            if (
+                latest is not None
+                and latest.get("result_status") == "FAIL"
+                and latest.get("failure_code") == "missing_code_deliverable_evidence"
+            ):
+                launch, status = self.queue_code_evidence_retry(
+                    project_id,
+                    task_id=task_id,
+                    attempt_id=str(latest.get("attempt_id") or ""),
+                    expected_result_digest=str(latest.get("result_digest") or ""),
+                )
+                if launch is None:
+                    raise ProjectWorkflowError(
+                        "evidence_retry_launch_already_sent",
+                        f"canonical evidence retry launch is already {status}",
+                    )
+                return launch
         return self._queue_execution_prompt(project_id, "continue")
+
+    def queue_code_evidence_retry(
+        self,
+        project_id: str,
+        *,
+        task_id: str,
+        attempt_id: str,
+        expected_result_digest: str,
+    ) -> tuple[ProjectLaunch | None, str]:
+        """Queue one canonical generation retry after a code-evidence-only failure."""
+        project = self.catalog.get(project_id)
+        if project is None:
+            raise ProjectWorkflowError("project_not_found", "project is not in the canonical catalog")
+        try:
+            binding, reused = self.execution.create_code_evidence_retry_binding(
+                project_id,
+                task_id=task_id,
+                attempt_id=attempt_id,
+                expected_result_digest=expected_result_digest,
+            )
+        except ProjectExecutionError as exc:
+            raise ProjectWorkflowError(exc.code, str(exc)) from exc
+
+        memory = self.memory(project_id)
+        plan = memory.current_plan()
+        state = memory.read_state()
+        if plan is None:
+            raise ProjectWorkflowError("project_plan_required", "Project Plan must be imported before Continue")
+        if binding.plan_version != plan.plan_version or binding.task_id != task_id:
+            raise ProjectWorkflowError("evidence_retry_binding_mismatch", "retry binding no longer matches the canonical task")
+
+        retry_state = self.execution.snapshot(project_id)
+        if (
+            binding.status != "ACTIVE"
+            or binding.superseded
+            or retry_state.get("current_task_id") != task_id
+            or retry_state.get("current_binding_id") != binding.execution_binding_id
+            or retry_state.get("task_statuses", {}).get(task_id) in {"completed", "skipped"}
+        ):
+            return None, "already_terminal"
+
+        handoff = self.execution.launch_handoff(project_id, binding.execution_binding_id)
+        if handoff is not None and handoff.get("status") == "SENT":
+            return None, "already_sent"
+
+        auto = self.execution.milestone_auto_snapshot(project_id)
+        auto_send = (
+            auto.get("status") == "RUNNABLE"
+            and auto.get("current_task_id") == task_id
+            and isinstance(auto.get("milestone_run_id"), str)
+            and bool(auto.get("milestone_run_id"))
+        )
+        prompt = build_continue_prompt(
+            project,
+            plan=plan,
+            state=state,
+            git_head=binding.expected_repo_head_before,
+            binding=binding,
+        )
+        prompt += (
+            "\n\nCanonical evidence reconciliation: continue this task under the new generation binding. "
+            f"The exact prior failed attempt is {attempt_id} with result digest {expected_result_digest}. "
+            "The original repository delivery window remains bound to this launch; do not replace its baseline."
+        )
+
+        outbox = self.execution.launch_outbox_record(project_id, binding.launch_id)
+        if outbox is not None:
+            if (
+                outbox.project_id != project_id
+                or outbox.task_id != task_id
+                or outbox.plan_version != str(plan.plan_version)
+                or outbox.execution_binding_id != binding.execution_binding_id
+                or outbox.expected_repo_head_before != binding.expected_repo_head_before
+            ):
+                raise ProjectWorkflowError("evidence_retry_outbox_mismatch", "retry outbox identity differs from canonical binding")
+            if outbox.status == OUTBOX_STATUS_ACKNOWLEDGED:
+                if handoff is not None and handoff.get("status") == "PENDING":
+                    try:
+                        outbox = self.execution.rearm_acknowledged_launch(
+                            project_id,
+                            binding.launch_id,
+                            execution_binding_id=binding.execution_binding_id,
+                        )
+                        launch = self.publish_outbox_launch(project_id, outbox.launch_id)
+                    except ProjectExecutionError as exc:
+                        raise ProjectWorkflowError(exc.code, str(exc)) from exc
+                    return launch, "rearmed"
+                return None, "already_acknowledged"
+        else:
+            try:
+                _persisted, outbox = self.execution.prepare_launch(
+                    project_id,
+                    binding=binding,
+                    prompt=prompt,
+                    auto_send=auto_send,
+                    ttl_minutes=10,
+                )
+            except ProjectExecutionError as exc:
+                raise ProjectWorkflowError(exc.code, str(exc)) from exc
+
+        try:
+            launch = self.publish_outbox_launch(project_id, outbox.launch_id)
+        except (ProjectExecutionError, ProjectLaunchQueueError) as exc:
+            raise ProjectWorkflowError(getattr(exc, "code", "launch_publish_failed"), str(exc)) from exc
+        updated = ProjectRecord(
+            **{
+                **project.__dict__,
+                "last_launch_id": launch.launch_id,
+                "last_correlation_id": binding.correlation_id,
+            }
+        )
+        self.catalog.upsert(updated)
+        return launch, "reused" if reused else "ready"
 
     def _ensure_auto_next_launch(self, project_id: str, *, completed_task_id: str | None = None) -> tuple[ProjectLaunch | None, str]:
         """Reconcile one canonical AUTO handoff without using Browser state as authority."""
@@ -461,12 +608,21 @@ class ProjectWorkflow:
             for item in snapshot.get("completion_invalidations", [])
             if isinstance(item, Mapping) and item.get("attempt_id")
         }
-        if any(
-            item.get("task_id") == current_task_id
+        current_attempts = [
+            item for item in snapshot.get("attempts", [])
+            if item.get("task_id") == current_task_id
             and item.get("attempt_id") not in invalidated_attempt_ids
-            and item.get("result_status") not in {"STALE_RESULT"}
-            for item in snapshot.get("attempts", [])
-        ):
+            and item.get("result_status") != "STALE_RESULT"
+        ]
+        if current_attempts:
+            latest = current_attempts[-1]
+            if latest.get("result_status") == "FAIL" and latest.get("failure_code") == "missing_code_deliverable_evidence":
+                return self.queue_code_evidence_retry(
+                    project_id,
+                    task_id=current_task_id,
+                    attempt_id=str(latest.get("attempt_id") or ""),
+                    expected_result_digest=str(latest.get("result_digest") or ""),
+                )
             return None, "attempt_exists"
 
         pending = self.queue.peek()

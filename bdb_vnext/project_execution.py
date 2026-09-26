@@ -285,7 +285,7 @@ def _result_identity(binding: "ProjectExecutionBinding", result: Mapping[str, An
 def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
     raw = state.execution if isinstance(state.execution, Mapping) else {}
     if not raw:
-        return {"schema": PROJECT_EXECUTION_SCHEMA, "bindings": [], "attempts": [], "acceptance_results": [], "checkpoints": {}, "task_statuses": {}, "gate_statuses": {}, "open_question_statuses": {}, "milestones_completed": [], "milestone_runs": {}, "launch_handoffs": {}, "launch_outbox": {}, "completion_invalidations": []}
+        return {"schema": PROJECT_EXECUTION_SCHEMA, "bindings": [], "attempts": [], "acceptance_results": [], "checkpoints": {}, "task_statuses": {}, "gate_statuses": {}, "open_question_statuses": {}, "milestones_completed": [], "milestone_runs": {}, "launch_handoffs": {}, "launch_outbox": {}, "completion_invalidations": [], "code_evidence_retries": []}
     if raw.get("schema", PROJECT_EXECUTION_SCHEMA) != PROJECT_EXECUTION_SCHEMA:
         _fail("execution_schema_invalid", "project execution state schema differs")
     result = dict(raw)
@@ -301,7 +301,8 @@ def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
     result.setdefault("launch_handoffs", {})
     result.setdefault("launch_outbox", {})
     result.setdefault("completion_invalidations", [])
-    for key in ("bindings", "attempts", "acceptance_results", "completion_invalidations"):
+    result.setdefault("code_evidence_retries", [])
+    for key in ("bindings", "attempts", "acceptance_results", "completion_invalidations", "code_evidence_retries"):
         if not isinstance(result[key], list) or len(result[key]) > 512 or any(not isinstance(item, Mapping) for item in result[key]):
             _fail("execution_shape_invalid", f"execution.{key} is invalid")
     if not isinstance(result["task_statuses"], Mapping) or len(result["task_statuses"]) > 2_048:
@@ -316,7 +317,61 @@ def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
     return result
 
 
+def _requires_code_evidence_retry(
+    execution: Mapping[str, Any],
+    *,
+    task_id: str,
+    plan_version: str | int,
+    binding_id: str,
+) -> bool:
+    invalidated = {
+        item.get("attempt_id")
+        for item in execution.get("completion_invalidations", [])
+        if isinstance(item, Mapping)
+    }
+    latest = next(
+        (
+            item for item in reversed(execution.get("attempts", []))
+            if item.get("task_id") == task_id
+            and str(item.get("plan_version")) == str(plan_version)
+            and item.get("attempt_id") not in invalidated
+            and item.get("result_status") != "STALE_RESULT"
+        ),
+        None,
+    )
+    if (
+        latest is None
+        or latest.get("result_status") != "FAIL"
+        or latest.get("failure_code") != "missing_code_deliverable_evidence"
+    ):
+        return False
+    retry_record = next(
+        (
+            item for item in execution.get("code_evidence_retries", [])
+            if item.get("prior_attempt_id") == latest.get("attempt_id")
+            and item.get("prior_result_digest") == latest.get("result_digest")
+            and item.get("retry_binding_id") == binding_id
+        ),
+        None,
+    )
+    if retry_record is None:
+        return True
+    retry_binding = next(
+        (
+            item for item in execution.get("bindings", [])
+            if item.get("execution_binding_id") == binding_id
+        ),
+        None,
+    )
+    return (
+        retry_binding is None
+        or retry_binding.get("status") != STATUS_ACTIVE
+        or retry_binding.get("superseded") is True
+    )
+
+
 COMPLETION_INVALIDATION_SCHEMA = "bdb-completion-invalidation-receipt-v1"
+CODE_EVIDENCE_RETRY_SCHEMA = "bdb-code-evidence-retry-v1"
 
 _NON_CODE_DELIVERABLE_PATTERNS = (
     r"\b(?:validation|verification|test|smoke test|performance|audit|review)\s+(?:record|report|summary)\b",
@@ -1126,6 +1181,13 @@ class ProjectExecutionCoordinator:
                 if semantic_digest(existing) != semantic_digest(binding.to_dict()):
                     _fail("execution_binding_conflict", "binding identity already contains different bytes")
                 return state, _binding_from_dict(existing)
+            if _requires_code_evidence_retry(
+                execution,
+                task_id=binding.task_id,
+                plan_version=binding.plan_version,
+                binding_id=binding.execution_binding_id,
+            ):
+                _fail("evidence_retry_required", "failed code-delivery evidence must use the canonical retry API")
             blockers = task_prerequisite_blockers(plan, state, task)
             if blockers:
                 _fail(
@@ -1181,6 +1243,344 @@ class ProjectExecutionCoordinator:
 
     def start(self, project_id: str, **kwargs: Any) -> ProjectExecutionBinding:
         return self.persist_binding(self.new_binding(project_id, **kwargs))
+
+    def create_code_evidence_retry_binding(
+        self,
+        project_id: str,
+        *,
+        task_id: str,
+        attempt_id: str,
+        expected_result_digest: str,
+    ) -> tuple[ProjectExecutionBinding, bool]:
+        """Create one append-only retry binding for a failed code-evidence result.
+
+        The retry inherits the failed binding's baseline. It is admitted only
+        when the exact failed attempt is still the current incomplete task and
+        its historical Git delivery window is now locally verifiable.
+        """
+        project_identifier = _identifier(project_id, "project_id")
+        task_identifier = _identifier(task_id, "task_id")
+        attempt_identifier = _identifier(attempt_id, "attempt_id")
+        result_digest = _text(expected_result_digest, "expected_result_digest", max_length=128)
+        project, plan, memory = self._project(project_identifier)
+        task = next((item for item in plan.tasks if item.task_id == task_identifier), None)
+        if task is None:
+            _fail("task_not_found", f"task '{task_identifier}' does not exist in canonical plan")
+        repo_path = Path(project.local_repo_path)
+
+        def verify_git_window(head_before: str, head_after: str) -> tuple[bool, str | None]:
+            verified, reason = _verify_git_code_delivery(
+                repo_path,
+                head_before=head_before,
+                head_after=head_after,
+                task=task,
+            )
+            if not verified:
+                return False, reason
+            if re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", head_after) is None:
+                return False, "head_after_commit_identity_invalid"
+            resolved = _run_git(repo_path, ["rev-parse", "--verify", f"{head_after}^{{commit}}"])
+            if resolved.returncode != 0 or resolved.stdout.strip().lower() != head_after.lower():
+                return False, "head_after_commit_identity_mismatch"
+            return True, None
+
+        def existing_retry(execution: Mapping[str, Any]) -> tuple[Mapping[str, Any], ProjectExecutionBinding] | None:
+            records = execution.get("code_evidence_retries", [])
+            matches = [
+                item for item in records
+                if item.get("prior_attempt_id") == attempt_identifier
+            ]
+            if not matches:
+                return None
+            if len(matches) != 1:
+                _fail("evidence_retry_history_ambiguous", "multiple retry records match the prior attempt")
+            record = matches[0]
+            if record.get("prior_result_digest") != result_digest:
+                _fail("evidence_retry_digest_mismatch", "prior attempt result digest differs from retry request")
+            if (
+                record.get("project_id") != project_identifier
+                or record.get("plan_version") != plan.plan_version
+                or record.get("task_id") != task_identifier
+            ):
+                _fail("evidence_retry_identity_mismatch", "stored retry identity differs from the request")
+            raw_prior_attempt = next(
+                (
+                    item for item in execution.get("attempts", [])
+                    if item.get("attempt_id") == attempt_identifier
+                ),
+                None,
+            )
+            if (
+                raw_prior_attempt is None
+                or raw_prior_attempt.get("project_id") != project_identifier
+                or raw_prior_attempt.get("task_id") != task_identifier
+                or str(raw_prior_attempt.get("plan_version")) != str(plan.plan_version)
+                or raw_prior_attempt.get("result_digest") != result_digest
+                or raw_prior_attempt.get("execution_binding_id") != record.get("prior_binding_id")
+                or raw_prior_attempt.get("head_before") != record.get("expected_repo_head_before")
+                or raw_prior_attempt.get("head_after") != record.get("verified_head_after")
+            ):
+                _fail("evidence_retry_prior_attempt_mismatch", "stored retry history no longer matches the exact prior attempt")
+            raw_prior_binding = next(
+                (
+                    item for item in execution.get("bindings", [])
+                    if item.get("execution_binding_id") == record.get("prior_binding_id")
+                ),
+                None,
+            )
+            if raw_prior_binding is None:
+                _fail("evidence_retry_prior_binding_missing", "stored retry history has no exact prior binding")
+            prior_binding = _binding_from_dict(raw_prior_binding)
+            if (
+                prior_binding.project_id != project_identifier
+                or prior_binding.task_id != task_identifier
+                or prior_binding.plan_version != plan.plan_version
+                or prior_binding.expected_repo_head_before != record.get("expected_repo_head_before")
+                or prior_binding.status != STATUS_FAILED
+                or prior_binding.superseded
+            ):
+                _fail("evidence_retry_prior_binding_mismatch", "stored retry history no longer matches the failed binding")
+            raw_binding = next(
+                (
+                    item for item in execution.get("bindings", [])
+                    if item.get("execution_binding_id") == record.get("retry_binding_id")
+                ),
+                None,
+            )
+            if raw_binding is None:
+                _fail("evidence_retry_binding_missing", "stored retry record has no canonical binding")
+            binding = _binding_from_dict(raw_binding)
+            if (
+                binding.project_id != project_identifier
+                or binding.task_id != task_identifier
+                or binding.plan_version != plan.plan_version
+                or binding.expected_repo_head_before != record.get("expected_repo_head_before")
+            ):
+                _fail("evidence_retry_binding_mismatch", "stored retry binding differs from its audit record")
+            return record, binding
+
+        def validate_source(state: ProjectMemoryState) -> tuple[dict[str, Any], Mapping[str, Any], ProjectExecutionBinding, str]:
+            execution = _execution_document(state)
+            attempts = execution.get("attempts", [])
+            raw_attempt = next(
+                (item for item in attempts if item.get("attempt_id") == attempt_identifier),
+                None,
+            )
+            if raw_attempt is None:
+                _fail("evidence_retry_attempt_not_found", f"attempt '{attempt_identifier}' does not exist")
+            if raw_attempt.get("project_id") != project_identifier:
+                _fail("evidence_retry_project_mismatch", "prior attempt belongs to another project")
+            if raw_attempt.get("task_id") != task_identifier:
+                _fail("evidence_retry_attempt_task_mismatch", "prior attempt belongs to another task")
+            if str(raw_attempt.get("plan_version")) != str(plan.plan_version):
+                _fail("evidence_retry_plan_mismatch", "prior attempt belongs to another plan version")
+            if raw_attempt.get("result_digest") != result_digest:
+                _fail("evidence_retry_digest_mismatch", "prior attempt result digest differs from retry request")
+            if any(
+                item.get("attempt_id") == attempt_identifier
+                for item in execution.get("completion_invalidations", [])
+            ):
+                _fail("evidence_retry_attempt_invalidated", "prior attempt was already invalidated")
+
+            statuses = execution.get("task_statuses", {})
+            task_status = statuses.get(task_identifier, task.status)
+            if task_status not in {"pending", "active", "review", "blocked"}:
+                _fail("evidence_retry_task_complete", "prior task is already complete")
+            if execution.get("current_task_id") != task_identifier:
+                _fail("evidence_retry_task_not_current", "prior task is no longer the canonical current task")
+            blockers = task_prerequisite_blockers(plan, state, task)
+            if blockers:
+                _fail("execution_prerequisites_blocked", "task prerequisites are no longer satisfied")
+
+            active_for_task = [
+                item for item in execution.get("bindings", [])
+                if item.get("task_id") == task_identifier
+                and str(item.get("plan_version")) == str(plan.plan_version)
+                and item.get("status", STATUS_ACTIVE) == STATUS_ACTIVE
+                and item.get("superseded") is not True
+            ]
+            if active_for_task:
+                _fail("evidence_retry_binding_active", "task already has an active execution binding")
+            if execution.get("current_binding_id") is not None:
+                _fail("evidence_retry_current_binding_conflict", "canonical current binding is not clear")
+
+            relevant_attempts = [
+                item for item in attempts
+                if item.get("task_id") == task_identifier
+                and not any(
+                    invalidation.get("attempt_id") == item.get("attempt_id")
+                    for invalidation in execution.get("completion_invalidations", [])
+                )
+            ]
+            if not relevant_attempts or relevant_attempts[-1].get("attempt_id") != attempt_identifier:
+                _fail("evidence_retry_attempt_not_latest", "a later non-invalidated task attempt exists")
+
+            if (
+                raw_attempt.get("result_status") != "FAIL"
+                or raw_attempt.get("execution_status") != "PASS"
+                or raw_attempt.get("validation_status") != "PASS"
+                or raw_attempt.get("failure_code") != "missing_code_deliverable_evidence"
+            ):
+                _fail(
+                    "evidence_retry_failure_not_eligible",
+                    "prior attempt is not a deterministic code-evidence-only failure",
+                )
+
+            acceptance = next(
+                (
+                    item for item in reversed(execution.get("acceptance_results", []))
+                    if item.get("attempt_id") == attempt_identifier
+                    and item.get("project_id") == project_identifier
+                    and item.get("task_id") == task_identifier
+                    and str(item.get("plan_version")) == str(plan.plan_version)
+                ),
+                None,
+            )
+            if acceptance is None or acceptance.get("overall") != "FAIL":
+                _fail("evidence_retry_acceptance_missing", "prior code-evidence failure has no matching acceptance record")
+            criteria = acceptance.get("criteria", [])
+            code_failure = next(
+                (
+                    item for item in criteria
+                    if item.get("criterion") == "canonical:code_delivery_evidence"
+                    and item.get("status") == "FAIL"
+                ),
+                None,
+            )
+            if code_failure is None or any(
+                item.get("criterion") != "canonical:code_delivery_evidence"
+                and item.get("status") != "PASS"
+                for item in criteria
+            ):
+                _fail(
+                    "evidence_retry_failure_not_eligible",
+                    "prior attempt has failures beyond canonical code-delivery evidence",
+                )
+
+            raw_binding = next(
+                (
+                    item for item in execution.get("bindings", [])
+                    if item.get("execution_binding_id") == raw_attempt.get("execution_binding_id")
+                ),
+                None,
+            )
+            if raw_binding is None:
+                _fail("evidence_retry_binding_missing", "prior attempt has no canonical execution binding")
+            failed_binding = _binding_from_dict(raw_binding)
+            if (
+                failed_binding.project_id != project_identifier
+                or failed_binding.task_id != task_identifier
+                or failed_binding.plan_version != plan.plan_version
+                or failed_binding.command_id != raw_attempt.get("command_id")
+            ):
+                _fail("evidence_retry_binding_mismatch", "prior attempt and binding identities differ")
+            if failed_binding.status != STATUS_FAILED or failed_binding.superseded or not failed_binding.finished_at:
+                _fail(
+                    "evidence_retry_binding_not_terminal_failed",
+                    "prior binding must be terminal FAILED and not superseded",
+                )
+            baseline = failed_binding.expected_repo_head_before
+            observed_before = raw_attempt.get("head_before")
+            observed_after = raw_attempt.get("head_after")
+            if not baseline or not isinstance(observed_before, str) or observed_before.lower() != baseline.lower():
+                _fail("evidence_retry_head_before_mismatch", "attempt head_before differs from its original binding")
+            if not isinstance(observed_after, str) or not observed_after:
+                _fail("evidence_retry_head_after_missing", "failed attempt has no recorded head_after")
+            return execution, raw_attempt, failed_binding, str(code_failure.get("evidence_ref") or "")
+
+        initial_execution = _execution_document(memory.read_state())
+        existing = existing_retry(initial_execution)
+        if existing is not None:
+            record, binding = existing
+            verified, reason = verify_git_window(
+                str(record.get("expected_repo_head_before") or ""),
+                str(record.get("verified_head_after") or ""),
+            )
+            if not verified:
+                _fail("evidence_retry_git_delivery_unverified", f"stored retry Git evidence is no longer observable: {reason}")
+            return binding, True
+
+        _execution, raw_attempt, failed_binding, verification_reason = validate_source(memory.read_state())
+        baseline = failed_binding.expected_repo_head_before
+        verified, git_reason = verify_git_window(
+            baseline,
+            str(raw_attempt.get("head_after") or ""),
+        )
+        if not verified:
+            _fail("evidence_retry_git_delivery_unverified", f"historical Git delivery window is not verifiable: {git_reason}")
+
+        proposed = self.new_binding(
+            project_identifier,
+            task_id=task_identifier,
+            expected_repo_head_before=baseline,
+        )
+        if failed_binding.conversation_id:
+            proposed = replace(proposed, conversation_id=failed_binding.conversation_id)
+        created_at = _utc_now()
+
+        def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, tuple[ProjectExecutionBinding, bool]]:
+            execution = _execution_document(state)
+            concurrent_retry = existing_retry(execution)
+            if concurrent_retry is not None:
+                _record, existing_binding = concurrent_retry
+                return state, (existing_binding, True)
+
+            _current_execution, current_attempt, current_failed_binding, current_reason = validate_source(state)
+            if (
+                current_failed_binding.execution_binding_id != failed_binding.execution_binding_id
+                or current_attempt.get("result_digest") != result_digest
+                or current_failed_binding.expected_repo_head_before != baseline
+            ):
+                _fail("evidence_retry_identity_changed", "canonical failed attempt changed before retry binding")
+
+            task_bindings = [
+                item for item in execution.get("bindings", [])
+                if item.get("task_id") == task_identifier
+                and str(item.get("plan_version")) == str(plan.plan_version)
+            ]
+            generation = max((int(item.get("generation", 1)) for item in task_bindings), default=0) + 1
+            retry_binding = replace(proposed, generation=generation)
+            execution["bindings"].append(retry_binding.to_dict())
+            statuses = dict(execution.get("task_statuses", {}))
+            statuses.setdefault(task_identifier, "active")
+            execution["task_statuses"] = statuses
+            execution["current_task_id"] = task_identifier
+            execution["current_binding_id"] = retry_binding.execution_binding_id
+
+            retry_record = {
+                "schema": CODE_EVIDENCE_RETRY_SCHEMA,
+                "project_id": project_identifier,
+                "plan_version": str(plan.plan_version),
+                "task_id": task_identifier,
+                "prior_attempt_id": attempt_identifier,
+                "prior_result_digest": result_digest,
+                "prior_binding_id": current_failed_binding.execution_binding_id,
+                "retry_binding_id": retry_binding.execution_binding_id,
+                "expected_repo_head_before": baseline,
+                "verified_head_after": str(current_attempt.get("head_after")),
+                "verification_reason": current_reason,
+                "created_at": created_at,
+            }
+            retries = list(execution.get("code_evidence_retries", []))
+            retries.append(retry_record)
+            execution["code_evidence_retries"] = retries
+
+            updated = replace(state, execution=execution)
+            updated = memory._append_event(
+                updated,
+                "CODE_EVIDENCE_RETRY_BOUND",
+                (
+                    f"Created evidence-reconciliation binding {retry_binding.execution_binding_id} "
+                    f"from failed attempt {attempt_identifier} ({result_digest}); "
+                    f"inherited {baseline} -> {current_attempt.get('head_after')}"
+                ),
+                task_id=task_identifier,
+                plan_version=plan.plan_version,
+                correlation_id=retry_binding.correlation_id,
+            )
+            return updated, (retry_binding, False)
+
+        return memory.execution_transaction(transition)
 
     def binding(self, project_id: str, execution_binding_id: str) -> ProjectExecutionBinding:
         """Read one canonical binding without creating or selecting another task."""
@@ -1402,6 +1802,13 @@ class ProjectExecutionCoordinator:
             task = next((item for item in plan.tasks if item.task_id == binding.task_id), None)
             if task is None:
                 _fail("task_not_found", "execution task does not exist")
+            if _requires_code_evidence_retry(
+                execution,
+                task_id=binding.task_id,
+                plan_version=binding.plan_version,
+                binding_id=binding.execution_binding_id,
+            ):
+                _fail("evidence_retry_required", "failed code-delivery evidence must use the canonical retry API")
 
             # Check existing binding
             existing = next((item for item in execution["bindings"] if item.get("execution_binding_id") == binding.execution_binding_id), None)
@@ -1964,7 +2371,7 @@ class ProjectExecutionCoordinator:
             elif kind == "UNKNOWN" or status == "UNKNOWN": unknown = True
 
         if task_requires_code_delivery(task):
-            verified, _reason = verify_authoritative_code_delivery(
+            verified, verification_reason = verify_authoritative_code_delivery(
                 head_before=head_before,
                 head_after=head_after,
                 promotion_status=promotion_status,
@@ -1979,7 +2386,11 @@ class ProjectExecutionCoordinator:
                     "criterion": "canonical:code_delivery_evidence",
                     "type": "DETERMINISTIC",
                     "status": "FAIL",
-                    "evidence_ref": "missing_code_deliverable_evidence",
+                    "evidence_ref": (
+                        "missing_code_deliverable_evidence"
+                        if not verification_reason
+                        else f"missing_code_deliverable_evidence:{verification_reason}"
+                    ),
                 })
 
         overall = "FAIL" if deterministic_failure or not validation_ok else "UNKNOWN" if unknown else "REVIEW_REQUIRED" if review_required else "PASS"
@@ -2552,7 +2963,7 @@ class ProjectExecutionCoordinator:
         project, plan, memory = self._project(project_id); state = memory.read_state(); execution = _execution_document(state)
         active_run = execution.get("active_milestone_run") if isinstance(execution.get("active_milestone_run"), Mapping) else None
         auto_progress = self._milestone_auto_projection(plan, state, active_run) if active_run else None
-        return {"schema": PROJECT_EXECUTION_SCHEMA, "project_id": project_id, "plan_version": plan.plan_version, "task_statuses": dict(execution.get("task_statuses", {})), "gate_statuses": dict(execution.get("gate_statuses", {})), "open_question_statuses": dict(execution.get("open_question_statuses", {})), "bindings": list(execution["bindings"]), "attempts": list(execution["attempts"]), "acceptance_results": list(execution["acceptance_results"]), "checkpoints": dict(execution.get("checkpoints", {})), "launch_handoffs": dict(execution.get("launch_handoffs", {})), "launch_outbox": dict(execution.get("launch_outbox", {})), "completion_invalidations": list(execution.get("completion_invalidations", [])), "current_binding_id": execution.get("current_binding_id"), "current_task_id": execution.get("current_task_id"), "available_tasks": [task.task_id for task in (available_project_tasks(plan, state, str(active_run.get("milestone_id"))) if active_run else available_project_tasks(plan, state))], "milestone_auto": {**(auto_progress or {}), "milestone_run_id": active_run.get("milestone_run_id")} if active_run and auto_progress else None, "watchdog": self.watchdog(project_id), "stale_result": bool(execution.get("stale_result", False))}
+        return {"schema": PROJECT_EXECUTION_SCHEMA, "project_id": project_id, "plan_version": plan.plan_version, "task_statuses": dict(execution.get("task_statuses", {})), "gate_statuses": dict(execution.get("gate_statuses", {})), "open_question_statuses": dict(execution.get("open_question_statuses", {})), "bindings": list(execution["bindings"]), "attempts": list(execution["attempts"]), "acceptance_results": list(execution["acceptance_results"]), "checkpoints": dict(execution.get("checkpoints", {})), "launch_handoffs": dict(execution.get("launch_handoffs", {})), "launch_outbox": dict(execution.get("launch_outbox", {})), "completion_invalidations": list(execution.get("completion_invalidations", [])), "code_evidence_retries": list(execution.get("code_evidence_retries", [])), "current_binding_id": execution.get("current_binding_id"), "current_task_id": execution.get("current_task_id"), "available_tasks": [task.task_id for task in (available_project_tasks(plan, state, str(active_run.get("milestone_id"))) if active_run else available_project_tasks(plan, state))], "milestone_auto": {**(auto_progress or {}), "milestone_run_id": active_run.get("milestone_run_id")} if active_run and auto_progress else None, "watchdog": self.watchdog(project_id), "stale_result": bool(execution.get("stale_result", False))}
 
 
 __all__ = [
