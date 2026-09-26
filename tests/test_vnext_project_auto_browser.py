@@ -50,6 +50,32 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               evidence_refs: [],
               criteria: []
             };
+            if (["recover-collapsed", "recover-new-baseline", "recover-uncertain"].includes(mode)) {
+              result.execution_status = "PASS";
+              result.validation_status = "PASS";
+              result.promotion_status = "PASS";
+              result.canonical_refs = [
+                "attempt-ae7d9b6bb8b347b3b78402957d78fc3b",
+                "sha256:" + "a".repeat(64),
+                "milestone-run-" + "b".repeat(32)
+              ];
+            }
+            const currentLaunch = {
+              schema: "bdb-project-launch-v1",
+              launch_id: launchId,
+              repo_alias: "execution-fixture",
+              prompt: "Canonical P0-01 prompt with complete binding identity",
+              auto_send: true,
+              project_id: projectId,
+              plan_version: "1",
+              task_id: taskId,
+              execution_binding_id: bindingId,
+              correlation_id: "corr-1",
+              command_id: "command-1",
+              expected_repo_head_before: "a".repeat(40),
+              created_at: "2026-01-01T00:00:00Z",
+              expires_at: "2999-01-01T00:00:00Z"
+            };
             const nextLaunch = {
               schema: "bdb-project-launch-v1",
               launch_id: nextLaunchId,
@@ -69,13 +95,32 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
             const panels = [];
             const messages = [];
             const events = [];
+            const acknowledgedLaunches = new Set();
             let stopListener = null;
             let observerCallback = null;
             let sweepCallback = null;
             let sendClicks = 0;
-            let codeText = "";
+            let codeText = ["recover-collapsed", "recover-new-baseline", "recover-uncertain"].includes(mode) ? JSON.stringify(result) : "";
             const userMessages = [];
             const localStorage = {};
+            if (["recover-collapsed", "recover-new-baseline", "recover-uncertain"].includes(mode)) {
+              const oldSendAttempt = {
+                schema: "bdb-vnext-project-launch-binding-v1",
+                launch_id: launchId, conversation_id: conversationId,
+                tab_instance_id: "33333333-3333-4333-8333-333333333333",
+                claim_id: "44444444-4444-4444-8444-444444444444",
+                repo_alias: "execution-fixture", project_id: projectId, plan_version: "1",
+                task_id: taskId, execution_binding_id: bindingId, correlation_id: "corr-1",
+                command_id: "command-1", expected_repo_head_before: "a".repeat(40),
+                auto_send: true, state: "SEND_ATTEMPTED", send_baseline_count: 0,
+                send_attempt_token: launchId + ":" + bindingId + ":1727300000000", updated_at: Date.now()
+              };
+              if (mode === "recover-new-baseline") {
+                oldSendAttempt.send_baseline_user_turn_count = 0;
+                oldSendAttempt.send_baseline_user_turn_ids = [];
+              }
+              localStorage.bdbVnextProjectLaunchBindingsV1 = { [launchId]: oldSendAttempt };
+            }
             if (["manual-acked", "auto-acked", "restart-acked", "claimed-visible-noack"].includes(mode)) {
               localStorage.bdbVnextProjectLaunchBindingsV1 = {
                 [nextLaunchId]: {
@@ -100,6 +145,8 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                 this.listeners = {};
                 this.className = "";
                 this._text = text;
+                this.attributes = {};
+                if (kind === "user" || kind === "assistant") this.attributes["data-message-author-role"] = kind;
               }
               get isConnected() { return Boolean(this.parentElement); }
               get textContent() { return this.children.length ? this.children.map((child) => child.textContent || "").join("") : this._text; }
@@ -119,8 +166,8 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               insertAdjacentElement(_where, item) { this.append(item); }
               remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((item) => item !== this); this.parentElement = null; }
               addEventListener(type, callback) { this.listeners[type] = callback; }
-              setAttribute() {}
-              getAttribute() { return null; }
+              setAttribute(name, value) { this.attributes[name] = String(value); }
+              getAttribute(name) { return this.attributes[name] || null; }
               focus() {}
               dispatchEvent() {}
               matches(selector) { return selector === "pre code" && this.kind === "code" && this.parentElement?.kind === "pre"; }
@@ -181,6 +228,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               if (mode !== "noeffect") setTimeout(() => {
                 composer.value = "";
                 const message = new Element("user", mode === "collapsed" ? "" : prompt);
+                message.setAttribute("data-message-id", "sent-turn-" + (userMessages.length + 1));
                 if (mode === "collapsed") {
                   message.append(new Element("content", prompt), new Element("button", "Pokaż więcej"));
                 }
@@ -197,6 +245,13 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               observe(_target, options) { assert.equal(options.characterData, true); }
             }
             const documentElement = new Element("html");
+            if (["recover-collapsed", "recover-new-baseline"].includes(mode)) {
+              const sentTurn = new Element("user", "Długi prompt canonicalny … Pokaż więcej");
+              sentTurn.setAttribute("data-message-id", "already-sent-turn-4");
+              sentTurn.append(new Element("content", "Długi prompt canonicalny … "), new Element("button", "Pokaż więcej"));
+              userMessages.push(sentTurn);
+              documentElement.append(sentTurn);
+            }
             documentElement.append(assistant);
             if (["canonical-acked", "restart-acked", "visible-noack", "claimed-visible-noack"].includes(mode)) {
               const visiblePrompt = new Element("user", prompt);
@@ -231,6 +286,8 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                   if (selector === "pre code") return codeText ? [code] : [];
                   if (selector === "#prompt-textarea") return [composer];
                   if (selector === "[data-message-author-role='user']") return userMessages;
+                  if (selector === "[data-message-author-role='assistant']") return [assistant];
+                  if (selector === "[data-message-author-role]") return documentElement.children.filter((item) => item.getAttribute("data-message-author-role"));
                   return [];
                 },
                 createElement: (kind) => new Element(kind),
@@ -249,7 +306,11 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                   onMessage: { addListener(callback) { stopListener = callback; } },
                   async sendMessage(message) {
                     messages.push(message);
-                    if (message.type === "bdb-vnext-project-launch-peek") return { ok: true, response: { status: "empty" } };
+                    if (message.type === "bdb-vnext-project-launch-peek") {
+                      return ["recover-collapsed", "recover-new-baseline", "recover-uncertain"].includes(mode)
+                        ? { ok: true, response: { status: "project_launch", launch: currentLaunch } }
+                        : { ok: true, response: { status: "empty" } };
+                    }
                     if (message.type === "bdb-vnext-project-execution-status") {
                       await new Promise((resolve) => setTimeout(resolve, mode === "stopped" || mode === "edited" ? 5 : 0));
                       if (mode === "stale" || mode === "wrong") return { ok: true, response: {
@@ -258,15 +319,18 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                         milestone_auto: { status: "STOPPED", milestone_run_id: "run-1", current_task_id: taskId }
                       }};
                       const next = message.execution_binding_id === "binding-2";
+                      const statusLaunchId = next ? nextLaunchId : launchId;
+                      const acknowledged = acknowledgedLaunches.has(statusLaunchId);
                       return { ok: true, response: {
                         status: "project_execution_status", current_binding_id: next ? "binding-2" : bindingId, current_task_id: next ? "P0-02" : taskId,
-                        binding: { project_id: projectId, plan_version: "1", execution_binding_id: next ? "binding-2" : bindingId, task_id: next ? "P0-02" : taskId, launch_id: next ? nextLaunchId : launchId, correlation_id: next ? "corr-2" : "corr-1", command_id: next ? "command-2" : "command-1", repo_alias: "execution-fixture", expected_repo_head_before: next ? "b".repeat(40) : "a".repeat(40), conversation_id: mode === "unbound" && next ? null : conversationId, status: "ACTIVE", superseded: false },
+                        binding: { project_id: projectId, plan_version: "1", execution_binding_id: next ? "binding-2" : bindingId, task_id: next ? "P0-02" : taskId, launch_id: statusLaunchId, correlation_id: next ? "corr-2" : "corr-1", command_id: next ? "command-2" : "command-1", repo_alias: "execution-fixture", expected_repo_head_before: next ? "b".repeat(40) : "a".repeat(40), conversation_id: mode === "unbound" && next ? null : conversationId, status: "ACTIVE", superseded: false },
                         milestone_auto: { status: "RUNNABLE", milestone_run_id: "run-1", current_task_id: next ? "P0-02" : taskId },
-                        launch_handoff: ["sent", "canonical-acked", "restart-acked"].includes(mode) && next ? { status: "SENT", project_id: projectId, execution_binding_id: "binding-2", task_id: "P0-02", launch_id: nextLaunchId, conversation_id: conversationId } : { status: "PENDING" },
-                        launch_outbox_status: ["canonical-acked", "restart-acked"].includes(mode) && next ? "ACKNOWLEDGED" : mode === "sent" && next ? "PUBLISHED" : "PENDING"
+                        launch_handoff: acknowledged || (["sent", "canonical-acked", "restart-acked"].includes(mode) && next) ? { status: "SENT", project_id: projectId, execution_binding_id: next ? "binding-2" : bindingId, task_id: next ? "P0-02" : taskId, launch_id: statusLaunchId, conversation_id: conversationId } : { status: "PENDING" },
+                        launch_outbox_status: acknowledged || (["canonical-acked", "restart-acked"].includes(mode) && next) ? "ACKNOWLEDGED" : "PUBLISHED"
                       }};
                     }
                     if (message.type === "bdb-vnext-project-execution-submit") {
+                      if (["recover-collapsed", "recover-new-baseline", "recover-uncertain"].includes(mode)) events.push("submit");
                       const failed = mode === "fail" || mode === "replay-fail";
                       return { ok: true, receipt: {
                       accepted: !failed, result_status: failed ? "FAIL" : "PASS", task_status: failed ? "blocked" : "completed",
@@ -274,8 +338,8 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
                       current_task_id: "P0-02", next_launch: mode === "completed" || failed ? null : nextLaunch
                       }};
                     }
-                    if (message.type === "bdb-vnext-project-launch-claim") return { ok: true, response: { status: "claimed", launch: nextLaunch } };
-                    if (message.type === "bdb-vnext-project-launch-ack") { events.push("ack"); return { ok: true, response: { status: "acknowledged" } }; }
+                    if (message.type === "bdb-vnext-project-launch-claim") return { ok: true, response: { status: "claimed", launch: message.launch_id === launchId ? currentLaunch : nextLaunch } };
+                    if (message.type === "bdb-vnext-project-launch-ack") { acknowledgedLaunches.add(message.launch_id); events.push("ack"); return { ok: true, response: { status: "acknowledged" } }; }
                     return { ok: false, error: "unexpected message" };
                   }
                 }
@@ -315,6 +379,19 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
               } else if (mode === "auto-acked") {
                 assert.equal(sendClicks, 0, "uncertain previous AUTO ACK must not resend");
                 assert.equal(ackMessages.length, 0);
+              } else if (["recover-collapsed", "recover-new-baseline"].includes(mode)) {
+                assert.equal(submitMessages.length, 1, "existing assistant result is submitted once after delivery recovery");
+                assert.equal(ackMessages.filter((message) => message.launch_id === launchId).length, 1, "the pending launch receives exactly one canonical ACK");
+                assert.equal(sendClicks, 1, "recovery must not resend P0-01; only the next launch sends");
+                assert.equal(submitMessages[0].result.plan_version, "1");
+                assert.equal(Object.prototype.hasOwnProperty.call(submitMessages[0].result, "canonical_refs"), false, "legacy tuple is discarded, never used as canonical refs");
+                assert.equal(localStorage.bdbVnextProjectLaunchBindingsV1[launchId].state, "ACKED");
+                assert.deepEqual(events.slice(0, 2), ["ack", "submit"], "ACK must precede submission of the existing result");
+                assert.deepEqual(events.slice(2), ["send", "ack"], "AUTO advances once after result acceptance");
+              } else if (mode === "recover-uncertain") {
+                assert.equal(submitMessages.length, 0, "result without a provable sent turn remains blocked");
+                assert.equal(ackMessages.length, 0);
+                assert.equal(sendClicks, 0, "uncertain SEND_ATTEMPTED remains duplicate-blocked");
               } else if (mode === "happy" || mode === "collapsed" || mode === "completed") {
                 assert.equal(submitMessages.length, 1, "one result submit despite observer+sweep");
                 assert.equal(claimMessages.length, mode === "completed" ? 0 : 1);
@@ -389,7 +466,7 @@ def test_vnext_project_auto_chain_is_exactly_once_and_fail_closed(tmp_path: Path
         ),
         encoding="utf-8",
     )
-    for mode in ("happy", "collapsed", "completed", "nonempty", "edited", "stopped", "nosend", "noeffect", "sent", "canonical-acked", "restart-acked", "visible-noack", "claimed-visible-noack", "manual-acked", "auto-acked", "unbound", "fail", "replay-fail", "stale", "wrong"):
+    for mode in ("happy", "collapsed", "completed", "recover-collapsed", "recover-new-baseline", "recover-uncertain", "nonempty", "edited", "stopped", "nosend", "noeffect", "sent", "canonical-acked", "restart-acked", "visible-noack", "claimed-visible-noack", "manual-acked", "auto-acked", "unbound", "fail", "replay-fail", "stale", "wrong"):
         completed = subprocess.run(
             [node, str(harness), str(ROOT / "browser_extension_vnext" / "content_adapter.js"), mode],
             capture_output=True,

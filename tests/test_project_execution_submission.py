@@ -72,6 +72,9 @@ def test_project_execution_submission_is_strict_json_contract() -> None:
         ProjectExecutionSubmission.from_mapping({**parsed.to_dict(), "unexpected": True})
     with_refs = ProjectExecutionSubmission.from_mapping({**parsed.to_dict(), "canonical_refs": {"candidate_id": "candidate-1", "evidence_id": None}})
     assert with_refs.to_dict()["canonical_refs"] == {"candidate_id": "candidate-1", "evidence_id": None}
+    with pytest.raises(ProjectExecutionError) as array_refs:
+        ProjectExecutionSubmission.from_mapping({**parsed.to_dict(), "canonical_refs": ["attempt-ae7d9b6bb8b347b3b78402957d78fc3b"]})
+    assert array_refs.value.code == "execution_shape_invalid"
     with pytest.raises(ProjectExecutionError):
         ProjectExecutionSubmission.from_mapping({**parsed.to_dict(), "canonical_refs": {"unexpected": "ref"}})
     with pytest.raises(ProjectExecutionError):
@@ -501,6 +504,10 @@ def test_execution_prompt_requires_one_versioned_json_result_and_cost_aware_poli
     assert "trzech kolejnych status polls" in launch.prompt
     assert 'Plan version (JSON string): "1"' in launch.prompt
     assert "WAITING_EXTERNAL/PENDING/RUNNING/VALIDATING/AWAITING_CI nie są finalnym wynikiem" in launch.prompt
+    assert "canonical_refs" in launch.prompt
+    assert "MUSI być obiektem JSON/mapą, nigdy tablicą" in launch.prompt
+    assert '"candidate_id": "candidate-123"' in launch.prompt
+    assert "nie wymyślaj identyfikatorów" in launch.prompt
     assert launch.execution_binding_id in launch.prompt
     assert binding.task_id in launch.prompt
     assert binding.correlation_id in launch.prompt

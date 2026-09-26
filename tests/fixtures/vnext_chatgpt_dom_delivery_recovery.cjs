@@ -247,7 +247,7 @@ const launch = {
 
 const userMessages = [];
 let userOwner;
-if (mode.startsWith("proof-") || mode === "recovery-collapsed" || mode === "recovery-uncertain" || mode === "combined") {
+if (mode.startsWith("proof-") || mode === "recovery-collapsed" || mode === "recovery-uncertain" || mode === "recovery-wrong-result" || mode === "combined") {
   userOwner = new Element("article");
   userOwner.setAttribute("data-message-author-role", "user");
   if (mode === "proof-attribute" || mode === "recovery-collapsed" || mode === "combined") {
@@ -263,6 +263,12 @@ if (mode.startsWith("proof-") || mode === "recovery-collapsed" || mode === "reco
       bdbPanel.append(new TextNode("BDB panel must not be prompt evidence"));
       userOwner.append(bdbPanel);
     }
+  } else if (mode === "recovery-wrong-result") {
+    const truncated = new Element("div");
+    truncated.append(new TextNode("Canonical P3-03 prompt"));
+    const show = new Element("button");
+    show.append(new TextNode("Pokaż więcej"));
+    userOwner.append(truncated, show);
   } else if (mode === "proof-show-more") {
     const body = new Element("div");
     body.append(new TextNode(prompt.replace(/\r\n/g, "\n")));
@@ -288,6 +294,7 @@ if (mode.startsWith("proof-") || mode === "recovery-collapsed" || mode === "reco
 if (["legacy", "interactive", "initial-scan", "active", "rerender", "wrong-binding", "wrong-conversation", "combined"].includes(mode)) {
   assistantMessage(documentElement, JSON.stringify(resultPayload()), mode === "legacy" ? "legacy" : "interactive");
 }
+if (mode === "recovery-wrong-result") assistantMessage(documentElement, JSON.stringify(resultPayload({ head_before: "c".repeat(40) })), "interactive");
 if (mode === "partial") {
   assistantMessage(documentElement, '{"schema":"bdb-project-execution-submission-v1","project_id":"partial"', "interactive");
 }
@@ -317,10 +324,16 @@ const document = {
   execCommand() { return false; }
 };
 
-const persistedState = ["recovery-collapsed", "recovery-uncertain", "combined"].includes(mode);
+const persistedState = ["recovery-collapsed", "recovery-uncertain", "recovery-wrong-result", "combined"].includes(mode);
 if (persistedState) {
   localStore.bdbVnextProjectLaunchBindingsV1 = {
     [launchId]: {
+      schema: "bdb-vnext-project-launch-binding-v1",
+      repo_alias: "premium-calculator",
+      plan_version: "1",
+      correlation_id: "correlation-current",
+      command_id: "command-current",
+      expected_repo_head_before: "a".repeat(40),
       launch_id: launchId,
       conversation_id: conversationId,
       tab_instance_id: tabId,
@@ -372,10 +385,21 @@ const context = {
       onMessage: { addListener() {} },
       async sendMessage(message) {
         runtimeMessages.push(message);
-        if (message.type === "bdb-vnext-project-launch-peek") return { ok: true, response: { status: "empty" } };
+        if (message.type === "bdb-vnext-project-launch-peek") return persistedState
+          ? { ok: true, response: { status: "project_launch", launch } }
+          : { ok: true, response: { status: "empty" } };
         if (message.type === "bdb-vnext-project-execution-status") return { ok: true, response: canonicalStatus };
         if (message.type === "bdb-vnext-project-launch-claim") return { ok: true, response: { status: "claimed", launch } };
-        if (message.type === "bdb-vnext-project-launch-ack") return { ok: true, response: { status: "acknowledged" } };
+        if (message.type === "bdb-vnext-project-launch-ack") {
+          canonicalStatus.launch_handoff = {
+            status: "SENT", project_id: message.handoff.project_id,
+            execution_binding_id: message.handoff.execution_binding_id,
+            task_id: taskId, launch_id: launchId,
+            conversation_id: message.handoff.conversation_id
+          };
+          canonicalStatus.launch_outbox_status = "ACKNOWLEDGED";
+          return { ok: true, response: { status: "acknowledged" } };
+        }
         if (message.type === "bdb-vnext-project-execution-submit") {
           nativeSubmissions.push(message);
           return { ok: true, receipt: {
@@ -413,7 +437,7 @@ async function main() {
     assert.equal(exactSendProof(), expected);
     return;
   }
-  if (mode === "recovery-collapsed" || mode === "recovery-uncertain") {
+  if (mode === "recovery-collapsed" || mode === "recovery-uncertain" || mode === "recovery-wrong-result") {
     if (mode === "recovery-uncertain") userMessages.splice(0, userMessages.length);
     const recovery = await context.projectHandleLaunch(launch, { automatic: true });
     assert.equal(sendClicks, 0, "SEND_ATTEMPTED recovery must never click Send again");

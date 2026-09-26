@@ -53,6 +53,10 @@ def test_uncertain_send_attempt_remains_duplicate_blocked() -> None:
     _run("recovery-uncertain")
 
 
+def test_recovery_rejects_assistant_result_for_another_delivery_baseline() -> None:
+    _run("recovery-wrong-result")
+
+
 @pytest.mark.parametrize(
     "mode",
     ["legacy", "interactive", "initial-scan", "sweep"],
