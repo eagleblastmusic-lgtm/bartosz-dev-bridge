@@ -447,6 +447,7 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
     launch: item.request.launch_id,
     status: item.response.status,
     error: item.response.error_code || item.response.error,
+    bridge_error: item.response.status === "bridge_error" ? { exit_code: item.response.exit_code, error: item.response.error, stdout: item.response.stdout, stderr: item.response.stderr } : undefined,
     state: item.action === "project_execution_status" ? {
       current_binding_id: item.response.current_binding_id,
       current_task_id: item.response.current_task_id,
