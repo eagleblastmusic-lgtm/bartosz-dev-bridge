@@ -33,4 +33,4 @@ except M9bNativeError as exc:
         "error_code": exc.code,
         "error": str(exc),
     }
-print(json.dumps(response, separators=(",", ":"), ensure_ascii=False))
+print(json.dumps(response, separators=(",", ":")))
