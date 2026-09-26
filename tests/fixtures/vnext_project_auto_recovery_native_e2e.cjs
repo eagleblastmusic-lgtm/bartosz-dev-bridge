@@ -88,8 +88,14 @@ function callCanonicalNative(browserMessage) {
     env: { ...process.env, PYTHONPATH: repoRoot },
     timeout: 15000
   });
-  if (child.error) throw child.error;
-  if (child.status !== 0) throw new Error("canonical Native bridge failed: " + (child.stderr || child.stdout));
+  if (child.error) {
+    trace.nativeRequests.push({ action, browser_type: browserMessage.type, request, response: { status: "bridge_error", error: String(child.error), stdout: child.stdout || "", stderr: child.stderr || "" } });
+    throw child.error;
+  }
+  if (child.status !== 0) {
+    trace.nativeRequests.push({ action, browser_type: browserMessage.type, request, response: { status: "bridge_error", exit_code: child.status, stdout: child.stdout || "", stderr: child.stderr || "" } });
+    throw new Error("canonical Native bridge failed: " + (child.stderr || child.stdout));
+  }
   const response = JSON.parse(child.stdout);
   trace.nativeRequests.push({ action, browser_type: browserMessage.type, request, response });
   if (response.status === "failed") {
