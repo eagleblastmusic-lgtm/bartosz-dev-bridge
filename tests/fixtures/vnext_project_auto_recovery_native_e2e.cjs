@@ -433,6 +433,7 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
   const autoGateMatches = firstStatusResponse && typeof context.projectAutoGateMatches === "function"
     ? context.projectAutoGateMatches(firstStatusResponse, input.result, input.conversation_id)
     : null;
+  const lifecycle = vm.runInContext("({ autoState: projectAutoState, pollActive: projectPollActive, insertionActive: projectInsertionActive, submissions: Array.from(projectAutoSubmissions.values()).map((item) => item.status), claims: Array.from(projectClaims.entries()) })", context);
   const requestSummary = trace.nativeRequests.map((item) => ({
     action: item.action,
     task: item.request.task_id || item.request.result?.task_id,
@@ -455,7 +456,7 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
       current_task_id: item.response.receipt.current_task_id
     }
   }));
-  assert.ok(p3Submit, "Browser AUTO must submit the existing assistant result through Native; autoGateMatches=" + autoGateMatches + "; resultIdentity=" + JSON.stringify({ project_id: input.result.project_id, task_id: input.result.task_id, execution_binding_id: input.result.execution_binding_id, plan_version: input.result.plan_version }) + "; requests=" + JSON.stringify(requestSummary) + "; sends=" + JSON.stringify(trace.sends));
+  assert.ok(p3Submit, "Browser AUTO must submit the existing assistant result through Native; autoGateMatches=" + autoGateMatches + "; resultIdentity=" + JSON.stringify({ project_id: input.result.project_id, task_id: input.result.task_id, execution_binding_id: input.result.execution_binding_id, plan_version: input.result.plan_version }) + "; lifecycle=" + JSON.stringify(lifecycle) + "; requests=" + JSON.stringify(requestSummary) + "; sends=" + JSON.stringify(trace.sends));
   assert.equal(p3Submit.request.result.plan_version, "1");
   assert.equal(Object.prototype.hasOwnProperty.call(p3Submit.request.result, "canonical_refs"), false);
   assert.equal(trace.sends.length, 1, "only the newly authorized P3-04 launch may send; P3-03 recovery must not resend; requests=" + JSON.stringify(trace.nativeRequests.map((item) => ({action:item.action, task:item.request.task_id || item.request.result?.task_id, binding:item.request.execution_binding_id || item.request.result?.execution_binding_id, status:item.response.status, error:item.response.error, receipt:item.response.receipt ? {accepted:item.response.receipt.accepted, result_status:item.response.receipt.result_status, task_status:item.response.receipt.task_status, current_task_id:item.response.receipt.current_task_id, milestone_status:item.response.receipt.milestone_status, next_launch_status:item.response.receipt.next_launch_status, next_task:item.response.receipt.next_launch?.task_id} : undefined}))) + " sends=" + JSON.stringify(trace.sends));
