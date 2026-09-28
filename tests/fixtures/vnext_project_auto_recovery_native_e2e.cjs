@@ -127,13 +127,23 @@ function selectorMatch(element, selector) {
   if (!element || element.nodeType !== 1) return false;
   if (selector === "#prompt-textarea") return element.id === "prompt-textarea";
   if (selector === "[data-message-author-role]") return element.getAttribute("data-message-author-role") !== null;
+  const attributePrefix = selector.match(/^\[([^\^=]+)\^=['"]([^'"]+)['"]\]$/);
+  if (attributePrefix) return (element.getAttribute(attributePrefix[1]) || "").startsWith(attributePrefix[2]);
+  const attributePresence = selector.match(/^\[([a-z0-9-]+)\]$/i);
+  if (attributePresence) return element.getAttribute(attributePresence[1]) !== null;
   const roleMatch = selector.match(/^\[data-message-author-role='(user|assistant)'\]$/);
   if (roleMatch) return element.getAttribute("data-message-author-role") === roleMatch[1];
   if (selector === "button[data-testid='send-button']") return element.tagName === "BUTTON" && element.getAttribute("data-testid") === "send-button";
   if (selector === "button[aria-label='Send prompt']") return element.tagName === "BUTTON" && element.getAttribute("aria-label") === "Send prompt";
   if (selector === "button[aria-label*='Send' i]") return element.tagName === "BUTTON" && /send/i.test(element.getAttribute("aria-label") || "");
   if (selector === "button[type='submit']") return element.tagName === "BUTTON" && element.getAttribute("type") === "submit";
-  if (selector === "pre code") return false;
+  if (selector === "pre code") {
+    if (element.tagName !== "CODE") return false;
+    for (let current = element.parentElement; current; current = current.parentElement) {
+      if (current.tagName === "PRE") return true;
+    }
+    return false;
+  }
   if (selector.startsWith(".") && !selector.includes(" ")) return element.className.split(/\s+/).includes(selector.slice(1));
   if (selector === "[contenteditable='true']" || selector === "[contenteditable='true'][role='textbox']") {
     return element.getAttribute("contenteditable") === "true" &&
@@ -214,7 +224,7 @@ class HTMLElement {
   closest(selector) {
     for (let current = this; current; current = current.parentElement) {
       if (selector === "form" && current.tagName === "FORM") return current;
-      if (selector.includes("data-message-author-role") && selectorMatch(current, selector.replace(/,\s*\[data-message-author-role='user'\]/, ""))) return current;
+      if (selectorMatch(current, selector.replace(/,\s*\[data-message-author-role='user'\]/, ""))) return current;
       if (selector.startsWith(".") && selectorMatch(current, selector)) return current;
     }
     return null;
@@ -235,11 +245,7 @@ class HTMLElement {
     if (this.tagName === "BUTTON" && this.getAttribute("data-testid") === "send-button") {
       const prompt = composer.value;
       trace.sends.push(prompt);
-      const turn = new HTMLElement("article");
-      turn.setAttribute("data-message-author-role", "user");
-      turn.setAttribute("data-message-id", "user-turn-" + (trace.sends.length + 1));
-      turn.appendChild(new TextNode(prompt));
-      conversationRoot.appendChild(turn);
+      appendLiveTurn({ turnKey: "fixture-new-turn-" + trace.sends.length, userPrompt: prompt, userMessageId: "new-user-message-" + trace.sends.length });
       composer.value = "";
       return;
     }
@@ -264,6 +270,128 @@ class FakeMutationObserver {
 }
 
 const conversationRoot = new HTMLElement("main");
+function visibleUserPrompt(prompt, mismatchIdentity = false) {
+  let visible = String(prompt);
+  if (mismatchIdentity) {
+    visible = visible.replace(/Task ID \(copy exactly\): [^\r\n]+/, "Task ID (copy exactly): P3-04");
+  }
+  const suffix = "… / ";
+  return visible.slice(0, Math.max(0, 4024 - suffix.length)) + suffix;
+}
+
+function appendUserUnit(contents, turnKey, prompt, messageId, { truncate = false, mismatchIdentity = false } = {}) {
+  const key = turnKey + ":0:user";
+  const searchUnit = new HTMLElement("div");
+  searchUnit.className = "group/user-message flex w-full flex-col items-end justify-end gap-1";
+  searchUnit.setAttribute("data-chatgpt-search-unit-key", key);
+  searchUnit.setAttribute("data-chatgpt-search-message-ids", messageId);
+  const unit = new HTMLElement("div");
+  unit.className = "w-full";
+  unit.setAttribute("data-content-search-unit-key", key);
+  const message = new HTMLElement("div");
+  message.className = "block-BQZwFn";
+  const body = new HTMLElement("div");
+  body.appendChild(new TextNode(truncate ? visibleUserPrompt(prompt, mismatchIdentity) : String(prompt)));
+  if (truncate) {
+    const showMore = new HTMLElement("button");
+    showMore.setAttribute("aria-label", "Pokaż więcej");
+    showMore.appendChild(new TextNode("Pokaż więcej"));
+    body.appendChild(showMore);
+  }
+  message.appendChild(body);
+  unit.appendChild(message);
+  searchUnit.appendChild(unit);
+  contents.appendChild(searchUnit);
+  return unit;
+}
+
+function appendAssistantUnit(contents, turnKey, result, messageId) {
+  const key = turnKey + ":2:assistant";
+  const unit = new HTMLElement("div");
+  unit.setAttribute("data-content-search-unit-key", key);
+  unit.setAttribute("data-chatgpt-search-unit-key", key);
+  unit.setAttribute("data-chatgpt-search-message-ids", messageId + " " + messageId);
+  const label = new HTMLElement("h4");
+  label.className = "sr-only m-0 select-none";
+  label.setAttribute("data-conversation-role", "assistant");
+  label.appendChild(new TextNode("ChatGPT powiedział:"));
+  const selection = new HTMLElement("div");
+  selection.className = "group flex min-w-0 flex-col";
+  selection.setAttribute("data-chatgpt-selection-conversation-id", input.conversation_id);
+  selection.setAttribute("data-chatgpt-selection-message-id", messageId);
+  const markdownRoot = new HTMLElement("div");
+  markdownRoot.className = "MarkdownRoot-rZKhxa [&>*:first-child]:mt-0 [&>*:last-child]:mb-0";
+  markdownRoot.setAttribute("data-markdown-text-style", "assistant-message");
+  markdownRoot.appendChild(new TextNode("  JSON  "));
+  const codeBlock = new HTMLElement("div");
+  codeBlock.className = "CodeBlock-zu1QM3";
+  const inlineCodePane = new HTMLElement("div");
+  inlineCodePane.className = "InlineCodePane-EYx4bd w-full overflow-x-hidden";
+  const scrollport = new HTMLElement("div");
+  scrollport.className = "chatgpt-code-scrollport flex w-full items-stretch overscroll-x-contain overflow-x-auto";
+  const pre = new HTMLElement("pre");
+  pre.className = "m-0 flex-1 cursor-text px-4 pb-3 font-mono text-size-code text-default md:px-5 ViewerContent-Cg8AgN pt-0 min-w-max whitespace-pre";
+  const code = new HTMLElement("code");
+  code.appendChild(new TextNode(JSON.stringify(result)));
+  pre.appendChild(code);
+  scrollport.appendChild(pre);
+  inlineCodePane.appendChild(scrollport);
+  codeBlock.appendChild(inlineCodePane);
+  markdownRoot.appendChild(codeBlock);
+  selection.appendChild(markdownRoot);
+  unit.appendChild(label);
+  unit.appendChild(selection);
+  contents.appendChild(unit);
+  return unit;
+}
+
+function appendLiveTurn({ turnKey, userPrompt = null, userMessageId = null, result = null, assistantMessageId = null, truncateUser = false, mismatchIdentity = false }) {
+  const wrapper = new HTMLElement("div");
+  wrapper.setAttribute("data-turn-key", userMessageId || assistantMessageId || turnKey);
+  const turn = new HTMLElement("div");
+  turn.className = "flex flex-col gap-1.5";
+  turn.setAttribute("data-content-search-turn-key", turnKey);
+  const separator = new HTMLElement("div");
+  separator.setAttribute("role", "separator");
+  const time = new HTMLElement("time");
+  separator.appendChild(time);
+  const outerContents = new HTMLElement("div");
+  outerContents.className = "contents";
+  const innerContents = new HTMLElement("div");
+  innerContents.className = "contents";
+  const messages = new HTMLElement("div");
+  messages.className = "flex flex-col";
+  if (userPrompt !== null) appendUserUnit(messages, turnKey, userPrompt, userMessageId, { truncate: truncateUser, mismatchIdentity });
+  if (result !== null) appendAssistantUnit(messages, turnKey, result, assistantMessageId);
+  innerContents.appendChild(messages);
+  outerContents.appendChild(innerContents);
+  turn.appendChild(separator);
+  turn.appendChild(outerContents);
+  wrapper.appendChild(turn);
+  conversationRoot.appendChild(wrapper);
+  return turn;
+}
+
+const initialTurnKey = "fixture-captured-turn-a";
+appendLiveTurn({
+  turnKey: initialTurnKey,
+  userPrompt: input.dom_mode === "ambiguous-turn" ? null : input.launch.prompt,
+  userMessageId: "3d94f8f9-a1a1-4442-8a7c-f6c0fe6d05be",
+  result: input.result,
+  assistantMessageId: "9e4f7eda-a0d3-4e5e-8efc-175c9ffa5090",
+  truncateUser: true,
+  mismatchIdentity: input.dom_mode === "identity-mismatch"
+});
+if (input.dom_mode === "duplicate-candidate-turn") {
+  appendLiveTurn({
+    turnKey: "fixture-duplicate-turn-b",
+    userPrompt: input.launch.prompt,
+    userMessageId: "duplicate-user-message-2",
+    result: input.result,
+    assistantMessageId: "duplicate-assistant-message-2",
+    truncateUser: true
+  });
+}
 const composer = new HTMLTextAreaElement();
 composer.id = "prompt-textarea";
 const form = new HTMLElement("form");
@@ -272,27 +400,6 @@ const send = new HTMLElement("button");
 send.setAttribute("data-testid", "send-button");
 send.setAttribute("aria-label", "Send prompt");
 form.appendChild(send);
-
-const collapsedUser = new HTMLElement("article");
-collapsedUser.setAttribute("data-message-author-role", "user");
-collapsedUser.setAttribute("data-message-id", "existing-user-turn-1");
-const clippedText = new HTMLElement("div");
-clippedText.appendChild(new TextNode(input.launch.prompt.slice(0, 180) + "…"));
-collapsedUser.appendChild(clippedText);
-const showMore = new HTMLElement("button");
-showMore.setAttribute("role", "button");
-showMore.appendChild(new TextNode("Pokaż więcej"));
-collapsedUser.appendChild(showMore);
-conversationRoot.appendChild(collapsedUser);
-
-const assistant = new HTMLElement("article");
-assistant.setAttribute("data-message-author-role", "assistant");
-assistant.setAttribute("data-message-id", "assistant-result-1");
-const interactiveJson = new HTMLElement("div");
-interactiveJson.setAttribute("data-testid", "interactive-json");
-interactiveJson.appendChild(new TextNode(JSON.stringify(input.result)));
-assistant.appendChild(interactiveJson);
-conversationRoot.appendChild(assistant);
 conversationRoot.appendChild(form);
 
 const runtimeListeners = [];
@@ -373,7 +480,6 @@ const document = {
   documentElement: conversationRoot,
   querySelectorAll(selector) {
     if (selector === "#prompt-textarea") return [composer];
-    if (selector === "pre code") return [];
     return conversationRoot.querySelectorAll(selector);
   },
   querySelector(selector) {
@@ -398,7 +504,7 @@ const context = {
   MutationObserver: FakeMutationObserver,
   document,
   window: { getComputedStyle: () => ({ visibility: "visible", display: "block" }) },
-  location: { protocol: "https:", hostname: "chatgpt.com", pathname: "/c/" + input.conversation_id },
+  location: { protocol: "https:", hostname: "chatgpt.com", pathname: "/g/example/premium-calculator/c/" + input.conversation_id },
   sessionStorage: {
     getItem(key) { return sessionStorage.get(key) || null; },
     setItem(key, value) { sessionStorage.set(key, String(value)); }
@@ -422,7 +528,8 @@ vm.createContext(context);
 vm.runInContext(fs.readFileSync(workerPath, "utf8"), context, { filename: "transport_worker.js" });
 vm.runInContext(fs.readFileSync(adapterPath, "utf8"), context, { filename: "content_adapter.js" });
 
-const deadline = Date.now() + 20000;
+const negativeRecovery = ["ambiguous-turn", "identity-mismatch", "duplicate-candidate-turn"].includes(input.dom_mode);
+const deadline = Date.now() + (negativeRecovery ? 1000 : 20000);
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 (async () => {
   const p3Binding = input.launch.execution_binding_id;
@@ -434,6 +541,20 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
     await wait(25);
   }
   await wait(200);
+  assert.equal(document.querySelectorAll("[data-message-author-role]").length, 0, "captured live route has no legacy message owner markers");
+  assert.equal(document.querySelectorAll("[data-testid^='conversation-turn-']").length, 0, "captured live route has no legacy conversation-turn test IDs");
+  assert.equal(document.querySelectorAll("[data-virtualized-turn-content]").length, 0, "captured live route has no virtualized-turn attribute");
+  const codeBlocks = document.querySelectorAll("pre code");
+  assert.equal(codeBlocks.length, input.dom_mode === "duplicate-candidate-turn" ? 2 : 1, "the existing result is discoverable through pre/code only");
+  assert.equal(codeBlocks[0].textContent, JSON.stringify(input.result));
+  assert.equal(JSON.parse(codeBlocks[0].textContent).schema, "bdb-project-execution-submission-v1");
+  if (negativeRecovery) {
+    assert.equal(trace.nativeRequests.filter((item) => item.action === "project_launch_ack" && item.request.launch_id === input.launch.launch_id).length, 0, "an unpaired structural result cannot ACK the prior launch");
+    assert.equal(trace.nativeRequests.filter((item) => item.action === "project_execution_submit" && item.request.result?.execution_binding_id === p3Binding).length, 0, "an unpaired structural result cannot be auto-submitted");
+    assert.equal(trace.sends.length, 0, "ambiguous recovery cannot resend");
+    process.stdout.write(JSON.stringify(trace));
+    return;
+  }
   const p3Submit = trace.nativeRequests.find((item) => item.action === "project_execution_submit" && item.request.result?.execution_binding_id === p3Binding);
   const firstStatusResponse = trace.nativeRequests.find((item) => item.action === "project_execution_status")?.response || null;
   const autoGateMatches = firstStatusResponse && typeof context.projectAutoGateMatches === "function"

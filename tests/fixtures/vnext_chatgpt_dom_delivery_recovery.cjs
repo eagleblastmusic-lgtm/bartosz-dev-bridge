@@ -121,6 +121,7 @@ function matchesSimple(element, selector) {
   if (selector === "pre code") return element.tagName === "CODE" && element.parentElement?.tagName === "PRE";
   if (selector.startsWith("#")) return element.id === selector.slice(1);
   if (selector.startsWith(".")) return String(element.className || "").split(/\s+/).includes(selector.slice(1));
+  if (selector === "[data-message-author-role]") return element.getAttribute("data-message-author-role") !== null;
   const roleMatch = selector.match(/^\[data-message-author-role=['"]([^'"]+)['"]\]$/);
   if (roleMatch) return element.getAttribute("data-message-author-role") === roleMatch[1];
   const attrMatch = selector.match(/^\[([^=\]]+)=['"]([^'"]+)['"]\]$/);
