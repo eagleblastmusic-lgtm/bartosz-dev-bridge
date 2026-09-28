@@ -9,7 +9,11 @@ const CANONICAL_RESULT_SWEEP_MS = 750;
 const MAX_CANONICAL_SWEEP_BLOCKS = 256;
 const MAX_CANONICAL_SCAN_NODES = 4096;
 const MAX_CANONICAL_SCAN_DEPTH = 64;
-const PROJECT_VIRTUALIZED_TURN_SELECTOR = "[data-virtualized-turn-content]";
+const PROJECT_CONTENT_SEARCH_UNIT_SELECTOR = "[data-content-search-unit-key]";
+const PROJECT_CONTENT_SEARCH_TURN_SELECTOR = "[data-content-search-turn-key]";
+const PROJECT_CHATGPT_SEARCH_UNIT_SELECTOR = "[data-chatgpt-search-unit-key]";
+const PROJECT_CONVERSATION_ROLE_SELECTOR = "[data-conversation-role]";
+const PROJECT_SELECTION_MESSAGE_SELECTOR = "[data-chatgpt-selection-message-id]";
 const PROJECT_EXECUTION_PANEL_KIND = "project-execution";
 const GENERIC_SUBMISSION_PANEL_KIND = "generic-submission";
 const decorated = new WeakSet();
@@ -209,25 +213,135 @@ function assistantOwner(block) {
   return projectStructuralAssistantOwner(block);
 }
 
-function projectStructuralTurnOwner(block) {
-  if (!projectIsHTMLElement(block) || typeof block.closest !== "function") return null;
-  // The current ChatGPT virtualized transcript keeps a stable turn-content
-  // boundary even when author-role and conversation-turn test IDs are absent.
-  // Never infer through an explicitly marked user turn.
-  if (projectIsHTMLElement(block.closest("[data-message-author-role='user']"))) return null;
-  const owner = block.closest(PROJECT_VIRTUALIZED_TURN_SELECTOR);
-  if (!projectIsHTMLElement(owner) || !projectVisible(owner)) return null;
-  if (!projectStructuralConversationTurns().includes(owner)) return null;
-  return owner;
+function projectContentSearchUnit(node) {
+  if (!projectIsHTMLElement(node) || typeof node.closest !== "function") return null;
+  const unit = projectMessageAttribute(node, "data-content-search-unit-key")
+    ? node
+    : node.closest(PROJECT_CONTENT_SEARCH_UNIT_SELECTOR);
+  if (!projectIsHTMLElement(unit)) return null;
+  const key = projectMessageAttribute(unit, "data-content-search-unit-key");
+  const parsedKey = typeof key === "string" ? key.match(/^(.+):(\d+):(user|assistant)$/) : null;
+  if (!parsedKey) return null;
+  const searchUnit = unit.closest(PROJECT_CHATGPT_SEARCH_UNIT_SELECTOR);
+  if (!projectIsHTMLElement(searchUnit) || projectMessageAttribute(searchUnit, "data-chatgpt-search-unit-key") !== key) return null;
+  if (parsedKey[3] === "user" && unit.parentElement !== searchUnit) return null;
+  const contentUnits = searchUnit === unit
+    ? [unit]
+    : Array.from(searchUnit.querySelectorAll(PROJECT_CONTENT_SEARCH_UNIT_SELECTOR));
+  if (contentUnits.length !== 1 || contentUnits[0] !== unit) return null;
+  const messageIds = (projectMessageAttribute(searchUnit, "data-chatgpt-search-message-ids") || "")
+    .split(/\s+/).filter(Boolean);
+  const uniqueMessageIds = Array.from(new Set(messageIds));
+  if (uniqueMessageIds.length !== 1) return null;
+  const messageId = uniqueMessageIds[0];
+  if (!/^[A-Za-z0-9-]{8,128}$/.test(messageId)) return null;
+
+  const turn = unit.closest(PROJECT_CONTENT_SEARCH_TURN_SELECTOR);
+  if (!projectIsHTMLElement(turn)) return null;
+  const turns = [];
+  for (let ancestor = unit.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    if (projectMessageAttribute(ancestor, "data-content-search-turn-key") !== null) turns.push(ancestor);
+  }
+  if (turns.length !== 1 || turns[0] !== turn || projectMessageAttribute(turn, "data-content-search-turn-key") !== parsedKey[1]) return null;
+
+  const role = parsedKey[3];
+  // On the current /g/.../c/... layout the turn key contains both messages;
+  // the unit key, assistant label, and selection message ID identify the
+  // message itself. Do not promote the enclosing turn to an owner.
+  let selection = null;
+  if (role === "assistant") {
+    const roleNodes = Array.from(unit.querySelectorAll(PROJECT_CONVERSATION_ROLE_SELECTOR));
+    const selectionNodes = Array.from(unit.querySelectorAll(PROJECT_SELECTION_MESSAGE_SELECTOR));
+    if (roleNodes.length !== 1 || projectMessageAttribute(roleNodes[0], "data-conversation-role") !== "assistant" ||
+        roleNodes[0].parentElement !== unit || selectionNodes.length !== 1 || selectionNodes[0].parentElement !== unit ||
+        projectMessageAttribute(selectionNodes[0], "data-chatgpt-selection-message-id") !== messageId ||
+        projectMessageAttribute(selectionNodes[0], "data-chatgpt-selection-conversation-id") !== projectConversationId()) return null;
+    const searchIds = (projectMessageAttribute(unit, "data-chatgpt-search-message-ids") || "").split(/\s+/).filter(Boolean);
+    if (!searchIds.length || searchIds.some((id) => id !== messageId)) return null;
+    selection = selectionNodes[0];
+  } else {
+    if (unit.querySelectorAll(PROJECT_CONVERSATION_ROLE_SELECTOR).length !== 0 ||
+        unit.querySelectorAll(PROJECT_SELECTION_MESSAGE_SELECTOR).length !== 0) return null;
+  }
+
+  return {
+    unit,
+    turn,
+    key,
+    turnKey: parsedKey[1],
+    order: Number(parsedKey[2]),
+    role,
+    messageId,
+    selection
+  };
 }
 
 function projectStructuralAssistantOwner(block) {
-  const owner = projectStructuralTurnOwner(block);
-  if (!owner) return null;
-  const candidates = canonicalResultCandidates(owner);
-  // A structural turn is an assistant owner only when it contains one
-  // complete, unambiguous canonical result and this block is that result.
-  return candidates.length === 1 && candidates[0].block === block ? owner : null;
+  const identity = projectContentSearchUnit(block);
+  if (!identity || identity.role !== "assistant" || !projectVisible(identity.unit)) return null;
+  const candidates = projectAssistantResultCandidates(identity.unit);
+  // The observed ChatGPT structure labels one message unit and binds its
+  // content to a conversation/message ID. Anything less remains unowned.
+  return candidates.length === 1 && candidates[0].block === block ? identity.selection : null;
+}
+
+function projectAssistantResultCandidates(owner) {
+  const identity = projectContentSearchUnit(owner);
+  if (!identity || identity.role !== "assistant" || !identity.selection) return canonicalResultCandidates(owner);
+  const blocks = codeBlocks(identity.selection);
+  if (blocks.length !== 1) return [];
+  const block = blocks[0];
+  const text = typeof block.textContent === "string" ? block.textContent.trim() : "";
+  const parsed = parseProjectExecutionResult({ textContent: text }) || parseSubmission({ textContent: text });
+  if (!parsed) return [];
+  const ownerText = projectCanonicalMessageText(identity.selection);
+  const index = ownerText.indexOf(text);
+  if (index < 0) return [];
+  const remainder = `${ownerText.slice(0, index)}${ownerText.slice(index + text.length)}`.trim();
+  // Current ChatGPT's code viewer contributes one visible language label
+  // outside <code>. Preserve fail-closed content ownership around that label.
+  if (remainder !== "" && !/^json$/i.test(remainder)) return [];
+  return [{ block, text }];
+}
+
+function projectStructuralMessagePair(owner, expectedLaunch = null) {
+  const assistant = projectContentSearchUnit(owner);
+  if (!assistant || assistant.role !== "assistant" || !projectVisible(assistant.unit)) return false;
+  const rawUnits = Array.from(assistant.turn.querySelectorAll(PROJECT_CONTENT_SEARCH_UNIT_SELECTOR));
+  if (rawUnits.length !== 2) return false;
+  const units = rawUnits.map(projectContentSearchUnit);
+  if (units.some((unit) => !unit || unit.turn !== assistant.turn || unit.turnKey !== assistant.turnKey)) return false;
+  const userUnits = units.filter((unit) => unit.role === "user");
+  const assistantUnits = units.filter((unit) => unit.role === "assistant");
+  if (userUnits.length !== 1 || assistantUnits.length !== 1 || assistantUnits[0].unit !== assistant.unit) return false;
+  if (userUnits[0].order >= assistant.order || rawUnits.indexOf(userUnits[0].unit) >= rawUnits.indexOf(assistant.unit)) return false;
+  if (expectedLaunch !== null && !projectLaunchIdentityLinesMatch(userUnits[0].unit, assistant, expectedLaunch)) return false;
+  return { user: userUnits[0], assistant, turn: assistant.turn };
+}
+
+function projectLaunchIdentityLinesMatch(userUnit, assistant, launch) {
+  if (!projectIsHTMLElement(userUnit) || !assistant || !launch) return false;
+  const planVersion = launch.plan_version === undefined || launch.plan_version === null ? "" : String(launch.plan_version);
+  const values = [
+    ["Project ID: ", launch.project_id],
+    ["Repo alias: ", launch.repo_alias],
+    ["Plan version (JSON string): ", `"${planVersion}"`],
+    ["Repo HEAD przed wykonaniem: ", launch.expected_repo_head_before],
+    ["Execution binding: ", launch.execution_binding_id],
+    ["Task ID (copy exactly): ", launch.task_id],
+    ["Correlation ID (copy exactly): ", launch.correlation_id],
+    ["Command ID (copy exactly): ", launch.command_id]
+  ];
+  if (values.some(([, value]) => typeof value !== "string" || value.length === 0 || /[\r\n]/.test(value))) return false;
+  const visibleText = typeof userUnit.innerText === "string" ? userUnit.innerText.replace(/\r\n?/g, "\n") : "";
+  if (!visibleText || visibleText.length > MAX_SUBMISSION_TEXT) return false;
+  // ChatGPT truncates older user messages. Exact identity lines bind the
+  // visible turn without pretending the omitted prompt tail is available.
+  const visibleLines = visibleText.split("\n").map((line) => line.trim());
+  return values.every(([prefix, value]) => {
+    const identityLines = visibleLines.filter((line) => line.startsWith(prefix));
+    return identityLines.length === 1 && identityLines[0] === `${prefix}${value}`;
+  });
 }
 
 function panelIsConnected(panel) {
@@ -938,26 +1052,35 @@ function projectExactUserMessageCount(prompt) {
   const expected = prompt.replace(/\r\n?/g, "\n");
   const explicit = Array.from(document.querySelectorAll("[data-message-author-role='user']"))
     .filter((node) => node instanceof HTMLElement && projectVisible(node) && !projectIsMessageUiElement(node));
-  const owners = explicit.length ? explicit : projectStructuralConversationTurns();
+  const owners = explicit.length ? explicit : projectStructuralUserMessageUnits();
+  if (!owners) return 0;
   let count = 0;
-  for (const node of owners) {
+  for (const entry of owners) {
+    const node = entry && entry.unit ? entry.unit : entry;
     if (projectCanonicalMessageText(node, Math.max(MAX_SUBMISSION_TEXT, expected.length)) === expected) count += 1;
   }
   return count;
 }
 
-function projectStructuralConversationTurns() {
-  const nodes = Array.from(document.querySelectorAll(PROJECT_VIRTUALIZED_TURN_SELECTOR));
-  if (nodes.length > MAX_CANONICAL_SCAN_NODES) return [];
-  const turns = [];
-  for (const node of nodes) {
-    if (!(node instanceof HTMLElement) || !projectVisible(node) || projectIsMessageUiElement(node)) continue;
-    // Nested turn markers cannot establish a stable conversation order.
-    if (node.parentElement && typeof node.parentElement.closest === "function" &&
-        node.parentElement.closest(PROJECT_VIRTUALIZED_TURN_SELECTOR)) return [];
-    if (!turns.includes(node)) turns.push(node);
+function projectStructuralUnits() {
+  const nodes = Array.from(document.querySelectorAll(PROJECT_CONTENT_SEARCH_UNIT_SELECTOR));
+  if (nodes.length > MAX_CANONICAL_SCAN_NODES) return null;
+  const identities = nodes.map(projectContentSearchUnit);
+  if (identities.some((identity) => !identity)) return null;
+  const keys = new Set();
+  const messageIds = new Set();
+  for (const identity of identities) {
+    if (keys.has(identity.key) || messageIds.has(identity.messageId)) return null;
+    keys.add(identity.key);
+    messageIds.add(identity.messageId);
   }
-  return turns;
+  return identities;
+}
+
+function projectStructuralUserMessageUnits() {
+  const identities = projectStructuralUnits();
+  if (!identities) return null;
+  return identities.filter((identity) => identity.role === "user" && projectVisible(identity.unit));
 }
 
 function projectUserTurnSnapshot(prompt = null) {
@@ -965,16 +1088,15 @@ function projectUserTurnSnapshot(prompt = null) {
     .filter((node) => node instanceof HTMLElement && projectVisible(node) && !projectIsMessageUiElement(node));
   let owners = explicit;
   if (!owners.length) {
-    if (typeof prompt !== "string" || prompt === "") return null;
-    const expected = prompt.replace(/\r\n?/g, "\n");
-    owners = projectStructuralConversationTurns().filter((node) =>
-      projectCanonicalMessageText(node, Math.max(MAX_SUBMISSION_TEXT, expected.length)) === expected
-    );
+    owners = projectStructuralUserMessageUnits();
+    if (!owners) return null;
   }
   if (owners.length > MAX_CANONICAL_SCAN_NODES) return null;
   const identities = [];
-  for (const owner of owners) {
+  for (const entry of owners) {
+    const owner = entry && entry.unit ? entry.unit : entry;
     const identity =
+      (entry && entry.messageId) ||
       projectMessageAttribute(owner, "data-message-id") ||
       projectMessageAttribute(owner, "data-turn-id") ||
       projectMessageAttribute(owner, "id") ||
@@ -1007,7 +1129,7 @@ function projectBoundAssistantResultFollowsUserTurn(launch, conversationId) {
   const messages = Array.from(document.querySelectorAll("[data-message-author-role]"));
   const matchingOwners = [];
   for (const owner of assistantMessageOwners(document)) {
-    for (const candidate of canonicalResultCandidates(owner)) {
+    for (const candidate of projectAssistantResultCandidates(owner)) {
       const result = parseProjectExecutionResult({ textContent: candidate.text });
       if (!result ||
           result.project_id !== launch.project_id ||
@@ -1028,14 +1150,7 @@ function projectBoundAssistantResultFollowsUserTurn(launch, conversationId) {
     return index > 0 &&
       projectMessageAttribute(messages[index - 1], "data-message-author-role") === "user";
   }
-  const turns = projectStructuralConversationTurns();
-  if (!turns.length || turns.filter((turn) => turn === owner).length !== 1) return false;
-  const index = turns.indexOf(owner);
-  if (index <= 0) return false;
-  const expectedPrompt = typeof launch.prompt === "string" ? launch.prompt.replace(/\r\n?/g, "\n") : "";
-  if (!expectedPrompt) return false;
-  const precedingText = projectCanonicalMessageText(turns[index - 1], Math.max(MAX_SUBMISSION_TEXT, expectedPrompt.length));
-  return precedingText === expectedPrompt;
+  return Boolean(projectStructuralMessagePair(owner, launch));
 }
 
 function projectSendControlEnabled(send) {
@@ -1475,9 +1590,10 @@ function assistantMessageOwners(root) {
     if (projectIsHTMLElement(owner)) owners.add(owner);
     if (owners.size >= MAX_CANONICAL_SWEEP_BLOCKS) break;
   }
-  for (const owner of projectStructuralConversationTurns()) {
-    if (typeof owner.closest === "function" && owner.closest("[data-message-author-role]")) continue;
-    if (canonicalResultCandidates(owner).length === 1) owners.add(owner);
+  for (const node of document.querySelectorAll(PROJECT_CONTENT_SEARCH_UNIT_SELECTOR)) {
+    const identity = projectContentSearchUnit(node);
+    if (!identity || identity.role !== "assistant" || identity.unit.closest("[data-message-author-role]")) continue;
+    if (projectAssistantResultCandidates(identity.unit).length === 1) owners.add(identity.selection);
     if (owners.size >= MAX_CANONICAL_SWEEP_BLOCKS) break;
   }
   return Array.from(owners).slice(0, MAX_CANONICAL_SWEEP_BLOCKS);
@@ -1580,7 +1696,7 @@ function scanBlock(block, text) {
 function scan(root = document) {
   const owners = assistantMessageOwners(root);
   for (const owner of owners) {
-    for (const candidate of canonicalResultCandidates(owner)) {
+    for (const candidate of projectAssistantResultCandidates(owner)) {
       scanBlock(candidate.block, candidate.text);
     }
   }
@@ -1598,7 +1714,7 @@ function sweepCanonicalResults() {
   const owners = assistantMessageOwners(document);
   const limit = Math.min(owners.length, MAX_CANONICAL_SWEEP_BLOCKS);
   for (let index = 0; index < limit; index += 1) {
-    for (const candidate of canonicalResultCandidates(owners[index])) {
+    for (const candidate of projectAssistantResultCandidates(owners[index])) {
       scanBlock(candidate.block, candidate.text);
     }
   }

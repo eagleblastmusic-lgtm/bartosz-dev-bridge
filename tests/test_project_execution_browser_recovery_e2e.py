@@ -65,7 +65,7 @@ def _execution_result(project_id: str, binding, *, head_before: str, head_after:
     }
 
 
-def test_collapsed_send_attempted_recovers_existing_result_through_canonical_native_and_advances_auto(tmp_path: Path) -> None:
+def test_truncated_send_attempted_recovers_existing_result_through_canonical_native_and_advances_auto(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for the Browser/Native recovery contract")
@@ -244,24 +244,30 @@ def test_collapsed_send_attempted_recovers_existing_result_through_canonical_nat
         sys.executable,
         str(ROOT),
     ]
-    ambiguous = subprocess.run(
-        browser_args,
-        input=json.dumps({"conversation_id": CONVERSATION_ID, "launch": launch.to_dict(), "result": result, "dom_mode": "ambiguous-turn"}),
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=45,
-    )
-    assert ambiguous.returncode == 0, ambiguous.stdout + ambiguous.stderr
-    ambiguous_trace = json.loads(ambiguous.stdout)
-    assert not [item for item in ambiguous_trace["nativeRequests"] if item["action"] == "project_launch_ack"]
-    assert not [item for item in ambiguous_trace["nativeRequests"] if item["action"] == "project_execution_submit"]
-    assert not ambiguous_trace["sends"]
-    after_ambiguous = coordinator.snapshot(PROJECT_ID)
-    assert after_ambiguous["task_statuses"]["P3-03"] == "active"
-    assert after_ambiguous["launch_handoffs"][P3_BINDING_ID]["status"] == "PENDING"
-    assert coordinator.launch_outbox_record(PROJECT_ID, P3_LAUNCH_ID).status == "PUBLISHED"
-    assert not [item for item in after_ambiguous["attempts"] if item["task_id"] == "P3-03"]
+    for negative_mode in ("ambiguous-turn", "identity-mismatch", "duplicate-candidate-turn"):
+        rejected = subprocess.run(
+            browser_args,
+            input=json.dumps({"conversation_id": CONVERSATION_ID, "launch": launch.to_dict(), "result": result, "dom_mode": negative_mode}),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=45,
+        )
+        assert rejected.returncode == 0, rejected.stdout + rejected.stderr
+        rejected_trace = json.loads(rejected.stdout)
+        assert {item["action"] for item in rejected_trace["nativeRequests"]} <= {
+            "project_launch_peek", "project_execution_status", "project_launch_claim",
+        }, negative_mode
+        assert not [item for item in rejected_trace["nativeRequests"] if item["action"] == "project_launch_ack"], negative_mode
+        assert not [item for item in rejected_trace["nativeRequests"] if item["action"] == "project_execution_submit"], negative_mode
+        assert not rejected_trace["sends"], negative_mode
+        after_rejection = coordinator.snapshot(PROJECT_ID)
+        assert after_rejection["task_statuses"]["P3-03"] == "active"
+        assert after_rejection["current_task_id"] == "P3-03"
+        assert after_rejection["milestone_auto"]["completed_tasks"] == 2
+        assert after_rejection["launch_handoffs"][P3_BINDING_ID]["status"] == "PENDING"
+        assert coordinator.launch_outbox_record(PROJECT_ID, P3_LAUNCH_ID).status == "PUBLISHED"
+        assert not [item for item in after_rejection["attempts"] if item["task_id"] == "P3-03"]
 
     payload = {"conversation_id": CONVERSATION_ID, "launch": launch.to_dict(), "result": result}
     completed = subprocess.run(
