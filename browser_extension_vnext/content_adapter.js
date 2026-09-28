@@ -9,6 +9,7 @@ const CANONICAL_RESULT_SWEEP_MS = 750;
 const MAX_CANONICAL_SWEEP_BLOCKS = 256;
 const MAX_CANONICAL_SCAN_NODES = 4096;
 const MAX_CANONICAL_SCAN_DEPTH = 64;
+const PROJECT_VIRTUALIZED_TURN_SELECTOR = "[data-virtualized-turn-content]";
 const PROJECT_EXECUTION_PANEL_KIND = "project-execution";
 const GENERIC_SUBMISSION_PANEL_KIND = "generic-submission";
 const decorated = new WeakSet();
@@ -202,7 +203,31 @@ function parseProjectExecutionResult(block) {
 }
 
 function assistantOwner(block) {
-  return block.closest("[data-message-author-role='assistant']");
+  if (!block || typeof block.closest !== "function") return null;
+  const marked = block.closest("[data-message-author-role='assistant']");
+  if (projectIsHTMLElement(marked)) return marked;
+  return projectStructuralAssistantOwner(block);
+}
+
+function projectStructuralTurnOwner(block) {
+  if (!projectIsHTMLElement(block) || typeof block.closest !== "function") return null;
+  // The current ChatGPT virtualized transcript keeps a stable turn-content
+  // boundary even when author-role and conversation-turn test IDs are absent.
+  // Never infer through an explicitly marked user turn.
+  if (projectIsHTMLElement(block.closest("[data-message-author-role='user']"))) return null;
+  const owner = block.closest(PROJECT_VIRTUALIZED_TURN_SELECTOR);
+  if (!projectIsHTMLElement(owner) || !projectVisible(owner)) return null;
+  if (!projectStructuralConversationTurns().includes(owner)) return null;
+  return owner;
+}
+
+function projectStructuralAssistantOwner(block) {
+  const owner = projectStructuralTurnOwner(block);
+  if (!owner) return null;
+  const candidates = canonicalResultCandidates(owner);
+  // A structural turn is an assistant owner only when it contains one
+  // complete, unambiguous canonical result and this block is that result.
+  return candidates.length === 1 && candidates[0].block === block ? owner : null;
 }
 
 function panelIsConnected(panel) {
@@ -554,17 +579,28 @@ async function submitProjectExecutionResult(block, result, refs, { automatic = f
   }
 }
 
-async function projectRecoverPendingSendForResult(status, result, conversationId) {
-  const binding = status && status.binding;
-  if (!binding || !binding.launch_id) return status;
+async function projectRecoverPendingSendForResult(status, result, conversationId, { required = false } = {}) {
   const bindings = await projectReadBindings();
-  const local = bindings[binding.launch_id];
-  if (!local || local.state !== "SEND_ATTEMPTED") return status;
+  let launchId = status && status.binding && status.binding.launch_id;
+  if (!launchId && required) {
+    const matches = Object.entries(bindings).filter(([, local]) =>
+      local && local.state === "SEND_ATTEMPTED" &&
+      local.execution_binding_id === result.execution_binding_id &&
+      local.project_id === result.project_id &&
+      local.conversation_id === conversationId
+    );
+    if (matches.length !== 1) return null;
+    launchId = matches[0][0];
+  }
+  if (!launchId) return required ? null : status;
+  const local = bindings[launchId];
+  if (!local || local.state !== "SEND_ATTEMPTED") return required ? null : status;
   const launch = await projectPeek();
-  if (!launch || launch.launch_id !== binding.launch_id || launch.auto_send !== true ||
+  if (!launch || launch.launch_id !== launchId || launch.auto_send !== true ||
       !projectStoredBindingMatches(local, launch, conversationId) ||
       result.project_id !== launch.project_id || result.task_id !== launch.task_id ||
-      result.execution_binding_id !== launch.execution_binding_id) return null;
+      result.execution_binding_id !== launch.execution_binding_id ||
+      !projectBoundAssistantResultFollowsUserTurn(launch, conversationId)) return null;
   const recovered = await projectHandleLaunch(launch, { automatic: true });
   if (!recovered || recovered.ok !== true) return null;
   const refreshed = await projectExecutionStatusFor(result.project_id, result.execution_binding_id, conversationId);
@@ -583,16 +619,27 @@ async function autoSubmitProjectExecution(block, result, refs, panelKey) {
       token: panelKey
     };
     const conversationId = projectConversationId();
-    let status = await projectExecutionStatusFor(result.project_id, result.execution_binding_id, conversationId);
-    if (!status) {
-      record.status = "manual";
-      return;
+    const structuralRecoveryRequired =
+      !projectIsHTMLElement(block.closest("[data-message-author-role='assistant']")) &&
+      projectIsHTMLElement(projectStructuralAssistantOwner(block));
+    let status = null;
+    if (structuralRecoveryRequired) {
+      // Without an explicit author marker, automatic submission is permitted
+      // only through recovery of the exact prior SEND_ATTEMPTED launch and a
+      // uniquely adjacent canonical prompt/result pair.
+      status = await projectRecoverPendingSendForResult(null, result, conversationId, { required: true });
+    } else {
+      status = await projectExecutionStatusFor(result.project_id, result.execution_binding_id, conversationId);
+      if (!status) {
+        record.status = "manual";
+        return;
+      }
+      if (!projectAutoGateMatches(status, result, conversationId)) {
+        record.status = "stopped";
+        return;
+      }
+      status = await projectRecoverPendingSendForResult(status, result, conversationId);
     }
-    if (!projectAutoGateMatches(status, result, conversationId)) {
-      record.status = "stopped";
-      return;
-    }
-    status = await projectRecoverPendingSendForResult(status, result, conversationId);
     if (!status || !projectAutoGateMatches(status, result, conversationId)) {
       record.status = "stopped";
       return;
@@ -889,22 +936,42 @@ function projectFindSendControl(composer) {
 function projectExactUserMessageCount(prompt) {
   if (typeof prompt !== "string" || prompt === "") return 0;
   const expected = prompt.replace(/\r\n?/g, "\n");
+  const explicit = Array.from(document.querySelectorAll("[data-message-author-role='user']"))
+    .filter((node) => node instanceof HTMLElement && projectVisible(node) && !projectIsMessageUiElement(node));
+  const owners = explicit.length ? explicit : projectStructuralConversationTurns();
   let count = 0;
-  for (const node of document.querySelectorAll("[data-message-author-role='user']")) {
-    if (!(node instanceof HTMLElement)) continue;
-    if (!projectVisible(node) || projectIsMessageUiElement(node)) continue;
+  for (const node of owners) {
     if (projectCanonicalMessageText(node, Math.max(MAX_SUBMISSION_TEXT, expected.length)) === expected) count += 1;
   }
   return count;
 }
 
-function projectUserTurnSnapshot() {
-  const owners = [];
-  for (const node of document.querySelectorAll("[data-message-author-role='user']")) {
+function projectStructuralConversationTurns() {
+  const nodes = Array.from(document.querySelectorAll(PROJECT_VIRTUALIZED_TURN_SELECTOR));
+  if (nodes.length > MAX_CANONICAL_SCAN_NODES) return [];
+  const turns = [];
+  for (const node of nodes) {
     if (!(node instanceof HTMLElement) || !projectVisible(node) || projectIsMessageUiElement(node)) continue;
-    owners.push(node);
+    // Nested turn markers cannot establish a stable conversation order.
+    if (node.parentElement && typeof node.parentElement.closest === "function" &&
+        node.parentElement.closest(PROJECT_VIRTUALIZED_TURN_SELECTOR)) return [];
+    if (!turns.includes(node)) turns.push(node);
   }
-  if (owners.length > 4096) return null;
+  return turns;
+}
+
+function projectUserTurnSnapshot(prompt = null) {
+  const explicit = Array.from(document.querySelectorAll("[data-message-author-role='user']"))
+    .filter((node) => node instanceof HTMLElement && projectVisible(node) && !projectIsMessageUiElement(node));
+  let owners = explicit;
+  if (!owners.length) {
+    if (typeof prompt !== "string" || prompt === "") return null;
+    const expected = prompt.replace(/\r\n?/g, "\n");
+    owners = projectStructuralConversationTurns().filter((node) =>
+      projectCanonicalMessageText(node, Math.max(MAX_SUBMISSION_TEXT, expected.length)) === expected
+    );
+  }
+  if (owners.length > MAX_CANONICAL_SCAN_NODES) return null;
   const identities = [];
   for (const owner of owners) {
     const identity =
@@ -921,11 +988,11 @@ function projectUserTurnSnapshot() {
   return { count: owners.length, ids: identities };
 }
 
-function projectNewUserTurnObserved(baseline, conversationId) {
+function projectNewUserTurnObserved(baseline, conversationId, prompt) {
   if (!baseline || !Number.isInteger(baseline.count) || baseline.count < 0 || projectConversationId() !== conversationId) return false;
   const composer = projectFindComposer();
   if (!composer || projectComposerText(composer) !== "") return false;
-  const current = projectUserTurnSnapshot();
+  const current = projectUserTurnSnapshot(prompt);
   if (!current || current.count !== baseline.count + 1) return false;
   if (Array.isArray(baseline.ids)) {
     if (!Array.isArray(current.ids) || baseline.ids.length !== baseline.count || current.ids.length !== current.count) return false;
@@ -938,6 +1005,7 @@ function projectNewUserTurnObserved(baseline, conversationId) {
 function projectBoundAssistantResultFollowsUserTurn(launch, conversationId) {
   if (!launch || projectConversationId() !== conversationId) return false;
   const messages = Array.from(document.querySelectorAll("[data-message-author-role]"));
+  const matchingOwners = [];
   for (const owner of assistantMessageOwners(document)) {
     for (const candidate of canonicalResultCandidates(owner)) {
       const result = parseProjectExecutionResult({ textContent: candidate.text });
@@ -950,11 +1018,24 @@ function projectBoundAssistantResultFollowsUserTurn(launch, conversationId) {
           result.execution_binding_id !== launch.execution_binding_id ||
           result.correlation_id !== launch.correlation_id ||
           result.command_id !== launch.command_id) continue;
-      const index = messages.indexOf(owner);
-      if (index > 0 && projectMessageAttribute(messages[index - 1], "data-message-author-role") === "user") return true;
+      matchingOwners.push(owner);
     }
   }
-  return false;
+  if (matchingOwners.length !== 1) return false;
+  const owner = matchingOwners[0];
+  if (messages.length) {
+    const index = messages.indexOf(owner);
+    return index > 0 &&
+      projectMessageAttribute(messages[index - 1], "data-message-author-role") === "user";
+  }
+  const turns = projectStructuralConversationTurns();
+  if (!turns.length || turns.filter((turn) => turn === owner).length !== 1) return false;
+  const index = turns.indexOf(owner);
+  if (index <= 0) return false;
+  const expectedPrompt = typeof launch.prompt === "string" ? launch.prompt.replace(/\r\n?/g, "\n") : "";
+  if (!expectedPrompt) return false;
+  const precedingText = projectCanonicalMessageText(turns[index - 1], Math.max(MAX_SUBMISSION_TEXT, expectedPrompt.length));
+  return precedingText === expectedPrompt;
 }
 
 function projectSendControlEnabled(send) {
@@ -969,7 +1050,7 @@ function projectSendEffectObserved(prompt, baselineCount, conversationId, baseli
   const composer = projectFindComposer();
   if (!composer || projectComposerText(composer) !== "") return false;
   if (projectExactUserMessageCount(prompt) > baselineCount) return true;
-  if (baselineUserTurns && projectNewUserTurnObserved(baselineUserTurns, conversationId)) {
+  if (baselineUserTurns && projectNewUserTurnObserved(baselineUserTurns, conversationId, prompt)) {
     return projectBoundAssistantResultFollowsUserTurn(launch, conversationId);
   }
   // A pre-hotfix SEND_ATTEMPTED record has only the exact-prompt count. For
@@ -1023,7 +1104,7 @@ async function projectAutoSendInserted(launch, claimId, prompt, insertedComposer
     if (projectSendControlEnabled(send) && projectComposerText(composer) === prompt && epoch === projectAutoEpoch) {
       const conversationId = projectConversationId();
       const baselineCount = projectExactUserMessageCount(prompt);
-      const baselineUserTurns = projectUserTurnSnapshot();
+      const baselineUserTurns = projectUserTurnSnapshot(launch.prompt);
       if (!baselineUserTurns) {
         projectAutoStop("user_turn_baseline_unavailable");
         projectAnnounce("BDB AUTO zatrzymane: nie można bezpiecznie zapisać granicy user turn przed Send.", "warning");
@@ -1392,6 +1473,11 @@ function assistantMessageOwners(root) {
   for (const block of codeBlocks(root)) {
     const owner = assistantOwner(block);
     if (projectIsHTMLElement(owner)) owners.add(owner);
+    if (owners.size >= MAX_CANONICAL_SWEEP_BLOCKS) break;
+  }
+  for (const owner of projectStructuralConversationTurns()) {
+    if (typeof owner.closest === "function" && owner.closest("[data-message-author-role]")) continue;
+    if (canonicalResultCandidates(owner).length === 1) owners.add(owner);
     if (owners.size >= MAX_CANONICAL_SWEEP_BLOCKS) break;
   }
   return Array.from(owners).slice(0, MAX_CANONICAL_SWEEP_BLOCKS);

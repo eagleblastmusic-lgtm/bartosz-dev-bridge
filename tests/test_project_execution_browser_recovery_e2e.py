@@ -193,6 +193,10 @@ def test_collapsed_send_attempted_recovers_existing_result_through_canonical_nat
     assert launch.plan_version == "1"
     assert coordinator.binding(PROJECT_ID, P3_BINDING_ID).generation == 4
     assert coordinator.binding(PROJECT_ID, P3_BINDING_ID).expected_repo_head_before == head_before
+    assert before_browser["current_task_id"] == "P3-03"
+    assert before_browser["task_statuses"]["P3-03"] == "active"
+    assert before_browser["milestone_auto"]["completed_tasks"] == 2
+    assert before_browser["milestone_auto"]["total_tasks"] == 5
     assert before_browser["launch_handoffs"][P3_BINDING_ID]["status"] == "PENDING"
     assert coordinator.launch_outbox_record(PROJECT_ID, P3_LAUNCH_ID).status == "PUBLISHED"
     assert not [item for item in before_browser["attempts"] if item["task_id"] == "P3-03"]
@@ -230,18 +234,38 @@ def test_collapsed_send_attempted_recovers_existing_result_through_canonical_nat
             "milestone-run-71b90932793b4b9fa5c063007cccc39f",
         ],
     }
+    browser_args = [
+        node,
+        str(ROOT / "tests" / "fixtures" / "vnext_project_auto_recovery_native_e2e.cjs"),
+        str(ROOT / "browser_extension_vnext" / "content_adapter.js"),
+        str(ROOT / "browser_extension_vnext" / "transport_worker.js"),
+        str(ROOT / "tests" / "fixtures" / "vnext_native_e2e_bridge.py"),
+        str(runtime),
+        sys.executable,
+        str(ROOT),
+    ]
+    ambiguous = subprocess.run(
+        browser_args,
+        input=json.dumps({"conversation_id": CONVERSATION_ID, "launch": launch.to_dict(), "result": result, "dom_mode": "ambiguous-turn"}),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=45,
+    )
+    assert ambiguous.returncode == 0, ambiguous.stdout + ambiguous.stderr
+    ambiguous_trace = json.loads(ambiguous.stdout)
+    assert not [item for item in ambiguous_trace["nativeRequests"] if item["action"] == "project_launch_ack"]
+    assert not [item for item in ambiguous_trace["nativeRequests"] if item["action"] == "project_execution_submit"]
+    assert not ambiguous_trace["sends"]
+    after_ambiguous = coordinator.snapshot(PROJECT_ID)
+    assert after_ambiguous["task_statuses"]["P3-03"] == "active"
+    assert after_ambiguous["launch_handoffs"][P3_BINDING_ID]["status"] == "PENDING"
+    assert coordinator.launch_outbox_record(PROJECT_ID, P3_LAUNCH_ID).status == "PUBLISHED"
+    assert not [item for item in after_ambiguous["attempts"] if item["task_id"] == "P3-03"]
+
     payload = {"conversation_id": CONVERSATION_ID, "launch": launch.to_dict(), "result": result}
     completed = subprocess.run(
-        [
-            node,
-            str(ROOT / "tests" / "fixtures" / "vnext_project_auto_recovery_native_e2e.cjs"),
-            str(ROOT / "browser_extension_vnext" / "content_adapter.js"),
-            str(ROOT / "browser_extension_vnext" / "transport_worker.js"),
-            str(ROOT / "tests" / "fixtures" / "vnext_native_e2e_bridge.py"),
-            str(runtime),
-            sys.executable,
-            str(ROOT),
-        ],
+        browser_args,
         input=json.dumps(payload),
         capture_output=True,
         text=True,
@@ -259,6 +283,13 @@ def test_collapsed_send_attempted_recovers_existing_result_through_canonical_nat
     assert len(submissions) == 1
     assert submissions[0]["request"]["result"]["plan_version"] == "1"
     assert "canonical_refs" not in submissions[0]["request"]["result"]
+    assert submissions[0]["response"]["receipt"]["accepted"] is True
+    assert submissions[0]["response"]["receipt"]["task_status"] == "completed"
+    assert submissions[0]["response"]["receipt"]["current_task_id"] == "P3-04"
+    assert {item["action"] for item in trace["nativeRequests"]} <= {
+        "project_execution_status", "project_launch_peek", "project_launch_claim",
+        "project_launch_ack", "project_execution_submit",
+    }, "recovery must use canonical Browser/Native operations without direct Project Memory mutation"
     p3_ack = [
         item for item in trace["nativeRequests"]
         if item["action"] == "project_launch_ack" and item["request"].get("launch_id") == P3_LAUNCH_ID
@@ -267,6 +298,7 @@ def test_collapsed_send_attempted_recovers_existing_result_through_canonical_nat
     assert trace["nativeRequests"].index(p3_ack[0]) < trace["nativeRequests"].index(submissions[0])
     assert len(trace["sends"]) == 1
     assert "Task ID (copy exactly): P3-04" in trace["sends"][0]
+    assert trace["sends"][0] != launch.prompt, "the existing P3-03 prompt must never be resent"
 
     after = coordinator.snapshot(PROJECT_ID)
     p3_attempts = [item for item in after["attempts"] if item["task_id"] == "P3-03"]
@@ -278,6 +310,7 @@ def test_collapsed_send_attempted_recovers_existing_result_through_canonical_nat
     assert after["milestone_auto"]["status"] == "RUNNABLE"
     assert after["milestone_auto"]["completed_tasks"] == 3
     assert after["milestone_auto"]["total_tasks"] == 5
+    assert after["current_task_id"] == "P3-04"
 
     p3_binding = coordinator.binding(PROJECT_ID, P3_BINDING_ID)
     assert p3_binding.generation == 4
@@ -288,6 +321,7 @@ def test_collapsed_send_attempted_recovers_existing_result_through_canonical_nat
 
     p4_bindings = [item for item in after["bindings"] if item["task_id"] == "P3-04" and item["plan_version"] == "1"]
     assert len(p4_bindings) == 1
+    assert len([item for item in after["bindings"] if item["task_id"] == "P3-03"]) == 1
     p4_binding_id = p4_bindings[0]["execution_binding_id"]
     p4_launch_id = p4_bindings[0]["launch_id"]
     p4_handoffs = [

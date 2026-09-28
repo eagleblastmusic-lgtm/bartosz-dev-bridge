@@ -126,14 +126,22 @@ class TextNode {
 function selectorMatch(element, selector) {
   if (!element || element.nodeType !== 1) return false;
   if (selector === "#prompt-textarea") return element.id === "prompt-textarea";
+  if (selector === "[data-virtualized-turn-content]") return element.getAttribute("data-virtualized-turn-content") !== null;
   if (selector === "[data-message-author-role]") return element.getAttribute("data-message-author-role") !== null;
+  if (selector === "[data-testid^='conversation-turn-']") return (element.getAttribute("data-testid") || "").startsWith("conversation-turn-");
   const roleMatch = selector.match(/^\[data-message-author-role='(user|assistant)'\]$/);
   if (roleMatch) return element.getAttribute("data-message-author-role") === roleMatch[1];
   if (selector === "button[data-testid='send-button']") return element.tagName === "BUTTON" && element.getAttribute("data-testid") === "send-button";
   if (selector === "button[aria-label='Send prompt']") return element.tagName === "BUTTON" && element.getAttribute("aria-label") === "Send prompt";
   if (selector === "button[aria-label*='Send' i]") return element.tagName === "BUTTON" && /send/i.test(element.getAttribute("aria-label") || "");
   if (selector === "button[type='submit']") return element.tagName === "BUTTON" && element.getAttribute("type") === "submit";
-  if (selector === "pre code") return false;
+  if (selector === "pre code") {
+    if (element.tagName !== "CODE") return false;
+    for (let current = element.parentElement; current; current = current.parentElement) {
+      if (current.tagName === "PRE") return true;
+    }
+    return false;
+  }
   if (selector.startsWith(".") && !selector.includes(" ")) return element.className.split(/\s+/).includes(selector.slice(1));
   if (selector === "[contenteditable='true']" || selector === "[contenteditable='true'][role='textbox']") {
     return element.getAttribute("contenteditable") === "true" &&
@@ -214,7 +222,7 @@ class HTMLElement {
   closest(selector) {
     for (let current = this; current; current = current.parentElement) {
       if (selector === "form" && current.tagName === "FORM") return current;
-      if (selector.includes("data-message-author-role") && selectorMatch(current, selector.replace(/,\s*\[data-message-author-role='user'\]/, ""))) return current;
+      if (selectorMatch(current, selector.replace(/,\s*\[data-message-author-role='user'\]/, ""))) return current;
       if (selector.startsWith(".") && selectorMatch(current, selector)) return current;
     }
     return null;
@@ -235,11 +243,7 @@ class HTMLElement {
     if (this.tagName === "BUTTON" && this.getAttribute("data-testid") === "send-button") {
       const prompt = composer.value;
       trace.sends.push(prompt);
-      const turn = new HTMLElement("article");
-      turn.setAttribute("data-message-author-role", "user");
-      turn.setAttribute("data-message-id", "user-turn-" + (trace.sends.length + 1));
-      turn.appendChild(new TextNode(prompt));
-      conversationRoot.appendChild(turn);
+      conversationRoot.appendChild(virtualizedTurn(prompt, "send-turn-" + trace.sends.length).wrapper);
       composer.value = "";
       return;
     }
@@ -264,6 +268,17 @@ class FakeMutationObserver {
 }
 
 const conversationRoot = new HTMLElement("main");
+function virtualizedTurn(text, id) {
+  const wrapper = new HTMLElement("div");
+  wrapper.className = "group flex flex-col pb-2 pt-2";
+  const content = new HTMLElement("div");
+  content.className = "flex flex-col";
+  content.setAttribute("data-virtualized-turn-content", "");
+  content.setAttribute("data-turn-id", id);
+  if (text) content.appendChild(new TextNode(text));
+  wrapper.appendChild(content);
+  return { wrapper, content };
+}
 const composer = new HTMLTextAreaElement();
 composer.id = "prompt-textarea";
 const form = new HTMLElement("form");
@@ -273,26 +288,50 @@ send.setAttribute("data-testid", "send-button");
 send.setAttribute("aria-label", "Send prompt");
 form.appendChild(send);
 
-const collapsedUser = new HTMLElement("article");
-collapsedUser.setAttribute("data-message-author-role", "user");
-collapsedUser.setAttribute("data-message-id", "existing-user-turn-1");
-const clippedText = new HTMLElement("div");
-clippedText.appendChild(new TextNode(input.launch.prompt.slice(0, 180) + "…"));
-collapsedUser.appendChild(clippedText);
-const showMore = new HTMLElement("button");
-showMore.setAttribute("role", "button");
-showMore.appendChild(new TextNode("Pokaż więcej"));
-collapsedUser.appendChild(showMore);
-conversationRoot.appendChild(collapsedUser);
-
-const assistant = new HTMLElement("article");
-assistant.setAttribute("data-message-author-role", "assistant");
-assistant.setAttribute("data-message-id", "assistant-result-1");
-const interactiveJson = new HTMLElement("div");
-interactiveJson.setAttribute("data-testid", "interactive-json");
-interactiveJson.appendChild(new TextNode(JSON.stringify(input.result)));
-assistant.appendChild(interactiveJson);
-conversationRoot.appendChild(assistant);
+if (input.dom_mode !== "ambiguous-turn") {
+  conversationRoot.appendChild(virtualizedTurn(input.launch.prompt, "existing-user-turn-4").wrapper);
+}
+const assistantTurn = virtualizedTurn("", "assistant-result-turn-1");
+const assistant = assistantTurn.content;
+const virtualizedLayout = new HTMLElement("div");
+virtualizedLayout.className = "[&_[data-virtualized-turn-content]]:[content-visibility:visible]";
+const turnBody = new HTMLElement("div");
+const messageBody = new HTMLElement("div");
+messageBody.className = "flex flex-col gap-1.5";
+const contentsA = new HTMLElement("div");
+contentsA.className = "contents";
+const contentsB = new HTMLElement("div");
+contentsB.className = "contents";
+const messageGroup = new HTMLElement("div");
+messageGroup.className = "group flex flex-col pb-2 pt-2";
+const markdownGroup = new HTMLElement("div");
+markdownGroup.className = "group flex min-w-0 flex-col";
+const markdownRoot = new HTMLElement("div");
+markdownRoot.className = "MarkdownRoot-rZKhxa [&>*:first-child]:mt-0 [&>*:last-child]:mb-0";
+const codeBlock = new HTMLElement("div");
+codeBlock.className = "CodeBlock-zu1QM3";
+const inlineCodePane = new HTMLElement("div");
+inlineCodePane.className = "InlineCodePane-EYx4bd w-full overflow-x-hidden";
+const scrollport = new HTMLElement("div");
+scrollport.className = "chatgpt-code-scrollport flex w-full items-stretch overscroll-x-contain overflow-x-auto";
+const pre = new HTMLElement("pre");
+pre.className = "m-0 flex-1 cursor-text px-4 pb-3 font-mono text-size-code text-default md:px-5 ViewerContent-Cg8AgN pt-0 min-w-max whitespace-pre";
+const code = new HTMLElement("code");
+code.appendChild(new TextNode(JSON.stringify(input.result)));
+pre.appendChild(code);
+scrollport.appendChild(pre);
+inlineCodePane.appendChild(scrollport);
+codeBlock.appendChild(inlineCodePane);
+markdownRoot.appendChild(codeBlock);
+markdownGroup.appendChild(markdownRoot);
+messageGroup.appendChild(markdownGroup);
+contentsB.appendChild(messageGroup);
+contentsA.appendChild(contentsB);
+messageBody.appendChild(contentsA);
+turnBody.appendChild(messageBody);
+virtualizedLayout.appendChild(turnBody);
+assistantTurn.content.appendChild(virtualizedLayout);
+conversationRoot.appendChild(assistantTurn.wrapper);
 conversationRoot.appendChild(form);
 
 const runtimeListeners = [];
@@ -373,7 +412,6 @@ const document = {
   documentElement: conversationRoot,
   querySelectorAll(selector) {
     if (selector === "#prompt-textarea") return [composer];
-    if (selector === "pre code") return [];
     return conversationRoot.querySelectorAll(selector);
   },
   querySelector(selector) {
@@ -398,7 +436,7 @@ const context = {
   MutationObserver: FakeMutationObserver,
   document,
   window: { getComputedStyle: () => ({ visibility: "visible", display: "block" }) },
-  location: { protocol: "https:", hostname: "chatgpt.com", pathname: "/c/" + input.conversation_id },
+  location: { protocol: "https:", hostname: "chatgpt.com", pathname: "/g/example/premium-calculator/c/" + input.conversation_id },
   sessionStorage: {
     getItem(key) { return sessionStorage.get(key) || null; },
     setItem(key, value) { sessionStorage.set(key, String(value)); }
@@ -434,6 +472,17 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
     await wait(25);
   }
   await wait(200);
+  assert.equal(document.querySelectorAll("[data-message-author-role]").length, 0, "live route fixture has no legacy message owner markers");
+  assert.equal(document.querySelectorAll("[data-testid^='conversation-turn-']").length, 0, "live route fixture has no legacy conversation-turn test IDs");
+  assert.equal(document.querySelectorAll("pre code").length, 1, "the existing result is discoverable only through its pre/code block");
+  assert.equal(document.querySelectorAll("pre code")[0].textContent, JSON.stringify(input.result));
+  if (input.dom_mode === "ambiguous-turn") {
+    assert.equal(trace.nativeRequests.filter((item) => item.action === "project_launch_ack" && item.request.launch_id === input.launch.launch_id).length, 0, "an unpaired structural result cannot ACK the prior launch");
+    assert.equal(trace.nativeRequests.filter((item) => item.action === "project_execution_submit" && item.request.result?.execution_binding_id === p3Binding).length, 0, "an unpaired structural result cannot be auto-submitted");
+    assert.equal(trace.sends.length, 0, "ambiguous recovery cannot resend");
+    process.stdout.write(JSON.stringify(trace));
+    return;
+  }
   const p3Submit = trace.nativeRequests.find((item) => item.action === "project_execution_submit" && item.request.result?.execution_binding_id === p3Binding);
   const firstStatusResponse = trace.nativeRequests.find((item) => item.action === "project_execution_status")?.response || null;
   const autoGateMatches = firstStatusResponse && typeof context.projectAutoGateMatches === "function"
