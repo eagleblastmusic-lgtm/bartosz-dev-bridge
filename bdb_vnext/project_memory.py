@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import threading
 import time
 import uuid
@@ -38,6 +39,7 @@ PROJECT_CHECKPOINT_SCHEMA = "bdb-project-checkpoint-v1"
 MAX_MEMORY_BYTES = 4 * 1024 * 1024
 MAX_EVENTS = 2_048
 MAX_ITEMS = 512
+MAX_EXECUTION_BYTES = 512 * 1024
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$")
 _PLAN_VERSION_RE = re.compile(r"^(\d+)(?:\.0+)?$")
 _STATUS_VALUES = frozenset({"pending", "active", "review", "completed", "blocked", "skipped"})
@@ -69,6 +71,43 @@ class ProjectMemoryError(ValueError):
 
 def _fail(code: str, message: str) -> None:
     raise ProjectMemoryError(code, message)
+
+
+def validate_execution_document(execution: object, *, bounded: bool = True) -> None:
+    """Shared persistence/producer contract, without importing Execution into Memory."""
+    if not isinstance(execution, Mapping):
+        _fail("memory_execution_shape_invalid", "execution must be an object")
+    try:
+        payload = canonical_json_bytes(dict(execution))
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ProjectMemoryError("memory_execution_shape_invalid", "execution must contain JSON values") from exc
+    if bounded and len(payload) > MAX_EXECUTION_BYTES:
+        _fail("memory_execution_shape_invalid", "execution state is outside its byte bound")
+    for key in ("bindings", "attempts", "acceptance_results", "completion_invalidations", "code_evidence_retries"):
+        if key in execution:
+            value = execution[key]
+            if not isinstance(value, list) or (bounded and len(value) > MAX_ITEMS) or any(not isinstance(item, Mapping) for item in value):
+                _fail("memory_execution_shape_invalid", f"execution.{key} is invalid")
+            for row in value:
+                for field in ("execution_binding_id", "task_id", "attempt_id", "status", "result_status", "overall"):
+                    if field in row and row[field] is not None and not isinstance(row[field], str):
+                        _fail("memory_execution_shape_invalid", f"execution.{key}.{field} must be text")
+    for key, limit in {"task_statuses": MAX_EVENTS, "milestone_runs": 128, "checkpoints": MAX_ITEMS,
+                       "gate_statuses": MAX_ITEMS, "milestone_gate_statuses": MAX_ITEMS,
+                       "open_question_statuses": MAX_ITEMS, "launch_handoffs": MAX_ITEMS, "launch_outbox": MAX_ITEMS}.items():
+        if key in execution and (not isinstance(execution[key], Mapping) or (bounded and len(execution[key]) > limit)):
+            _fail("memory_execution_shape_invalid", f"execution.{key} is invalid")
+        if key in execution:
+            statuses = key in {"task_statuses", "gate_statuses", "milestone_gate_statuses", "open_question_statuses"}
+            if any(not isinstance(identifier, str) or not isinstance(value, str if statuses else Mapping) for identifier, value in execution[key].items()):
+                _fail("memory_execution_shape_invalid", f"execution.{key} has invalid entries")
+    if execution.get("active_milestone_run") is not None and not isinstance(execution["active_milestone_run"], Mapping):
+        _fail("memory_execution_shape_invalid", "execution.active_milestone_run must be an object")
+    for key in ("current_binding_id", "current_task_id"):
+        if execution.get(key) is not None and not isinstance(execution[key], str):
+            _fail("memory_execution_shape_invalid", f"execution.{key} must be text")
+    if "milestones_completed" in execution and (not isinstance(execution["milestones_completed"], list) or any(not isinstance(item, str) for item in execution["milestones_completed"])):
+        _fail("memory_execution_shape_invalid", "execution.milestones_completed is invalid")
 
 
 def _now() -> str:
@@ -607,19 +646,70 @@ class ProjectMemoryStore:
             raise ProjectMemoryError("memory_corrupt", "project memory is not valid JSON") from exc
         if not isinstance(document, Mapping) or document.get("schema") != PROJECT_MEMORY_SCHEMA or document.get("project_id") != self.project_id:
             _fail("memory_schema_invalid", "project memory schema or project identity differs")
-        return self._state_from_dict(document)
+        retention = document.get("retention")
+        if retention is None: return self._state_from_dict(document)
+        if not isinstance(retention, Mapping) or retention.get("schema") != "bdb-vnext-v1-retention-v1" or not isinstance(retention.get("event_offset"), int) or isinstance(retention.get("event_offset"), bool) or retention["event_offset"] < 0:
+            _fail("memory_retention_invalid", "retention pointer is invalid")
+        self._state_from_dict(document, event_offset=retention["event_offset"])
+        from .retention_compaction import ContentAddressedStore, RetentionCompactionController, _canonical_json_str, _sha256_hex
+        try:
+            database = self.root / "retention.db"
+            if database.is_symlink(): _fail("memory_path_invalid", "retention content must not be a symlink")
+            conn = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+            try:
+                content = json.loads(ContentAddressedStore.resolve_verified(conn, retention["archive_ref"]))
+            finally:
+                conn.close()
+            if not isinstance(content, Mapping): raise ValueError("retention content must be an object")
+            logical = RetentionCompactionController.rehydrate_v1(document, content)
+            if _sha256_hex(_canonical_json_str(logical)) != retention["logical_digest"]:
+                _fail("memory_retention_invalid", "retention logical digest differs")
+        except (sqlite3.Error, ValueError, KeyError, TypeError, StopIteration) as exc:
+            raise ProjectMemoryError("memory_retention_invalid", "retention content is missing or corrupt") from exc
+        return self._state_from_dict(logical, bounded=False)
 
-    def _state_from_dict(self, document: Mapping[str, Any]) -> ProjectMemoryState:
+    def _state_from_dict(self, document: Mapping[str, Any], *, bounded: bool = True, event_offset: int = 0) -> ProjectMemoryState:
         # The persisted representation is intentionally strict enough to reject
         # accidental cross-project or unbounded metadata, while keeping the
         # read model small for the GUI.
+        if not isinstance(document, Mapping) or document.get("schema") != PROJECT_MEMORY_SCHEMA or document.get("project_id") != self.project_id:
+            _fail("memory_schema_invalid", "project memory schema or project identity differs")
         collections = {}
+        required = {
+            "events": ("event_id", "project_id", "event_type", "timestamp", "human_summary"),
+            "decisions": ("decision_id", "project_id", "title", "decision", "reason", "status", "created_at"),
+            "inbox": ("inbox_id", "project_id", "title", "description", "created_at"),
+            "risks": ("risk_id", "project_id", "title", "description", "severity", "status", "created_at"),
+            "technical_debt": ("debt_id", "project_id", "title", "description", "created_at", "status"),
+            "attention": ("attention_id", "project_id", "type", "title", "description", "created_at"),
+            "checkpoints": ("checkpoint_id", "project_id", "created_at", "label"),
+        }
+        array_fields = {"related_task_ids", "completed_task_ids", "active_decision_ids", "open_blocker_ids"}
+        nullable_fields = {"task_id", "milestone_id", "plan_version", "git_head", "correlation_id",
+                           "prerequisite_id", "prerequisite_kind", "related_plan_version",
+                           "supersedes_decision_id", "suggested_review_milestone", "current_task_id", "human_summary"}
         for key in ("events", "decisions", "inbox", "risks", "technical_debt", "attention", "checkpoints"):
             value = document.get(key, [])
-            if not isinstance(value, list) or len(value) > MAX_ITEMS * 4:
+            if not isinstance(value, list) or (bounded and len(value) > (MAX_EVENTS if key == "events" else MAX_ITEMS)):
                 _fail("memory_shape_invalid", f"{key} is outside its bound")
             if any(not isinstance(item, Mapping) for item in value):
                 _fail("memory_shape_invalid", f"{key} contains a non-object item")
+            seen = set()
+            for item in value:
+                if any(field not in item or not isinstance(item[field], str) or not item[field].strip() for field in required[key]):
+                    _fail("memory_shape_invalid", f"{key} has missing or invalid required fields")
+                if item["project_id"] != self.project_id:
+                    _fail("memory_project_mismatch", f"{key} contains a foreign project")
+                identifier = item[required[key][0]]
+                if identifier in seen:
+                    _fail("memory_shape_invalid", f"{key} contains duplicate identities")
+                seen.add(identifier)
+                for field, field_value in item.items():
+                    if field in array_fields:
+                        if not isinstance(field_value, list) or len(field_value) > MAX_EVENTS or any(not isinstance(entry, str) for entry in field_value):
+                            _fail("memory_shape_invalid", f"{key}.{field} must be a bounded text array")
+                    elif not (field_value is None and field in nullable_fields) and not isinstance(field_value, str):
+                        _fail("memory_shape_invalid", f"{key}.{field} must be text")
             collections[key] = tuple(dict(item) for item in value)
         events = tuple(ProjectEvent(**{key: item[key] for key in ("event_id", "project_id", "event_type", "timestamp", "human_summary")}, task_id=item.get("task_id"), milestone_id=item.get("milestone_id"), plan_version=item.get("plan_version"), git_head=item.get("git_head"), correlation_id=item.get("correlation_id"), prerequisite_id=item.get("prerequisite_id"), prerequisite_kind=item.get("prerequisite_kind")) for item in collections["events"])
         decisions = tuple(DecisionRecord(item["decision_id"], item["project_id"], item["title"], item["decision"], item["reason"], item["status"], item["created_at"], tuple(item.get("related_task_ids", [])), item.get("related_plan_version"), item.get("supersedes_decision_id")) for item in collections["decisions"])
@@ -629,22 +719,73 @@ class ProjectMemoryStore:
         attention = tuple(AttentionItem(item["attention_id"], item["project_id"], item["type"], item["title"], item["description"], item["created_at"], item.get("status", "open")) for item in collections["attention"])
         checkpoints = tuple(Checkpoint(item["checkpoint_id"], item["project_id"], item["created_at"], item["label"], item.get("plan_version"), item.get("git_head"), tuple(item.get("completed_task_ids", [])), item.get("current_task_id"), tuple(item.get("active_decision_ids", [])), tuple(item.get("open_blocker_ids", [])), item.get("human_summary")) for item in collections["checkpoints"])
         execution = document.get("execution", {})
-        if not isinstance(execution, Mapping) or len(canonical_json_bytes(dict(execution))) > 512 * 1024:
-            _fail("memory_execution_shape_invalid", "execution state is outside its bound")
+        validate_execution_document(execution, bounded=bounded)
         execution = dict(execution)
-        if any(event.project_id != self.project_id for event in events) or any(event.event_id != f"{self.project_id}:e{index:06d}" for index, event in enumerate(events, 1)):
+        if any(event.project_id != self.project_id for event in events) or any(event.event_id != f"{self.project_id}:e{index:06d}" for index, event in enumerate(events, event_offset + 1)):
             _fail("memory_event_order_invalid", "project events must form one append-only sequence")
         revision_raw = document.get("revision", 1)
-        try:
-            revision = int(revision_raw)
-            if revision < 1:
-                _fail("memory_revision_invalid", "revision must be >= 1")
-        except (TypeError, ValueError) as exc:
+        if isinstance(revision_raw, bool) or not isinstance(revision_raw, int) or revision_raw < 1:
             _fail("memory_revision_invalid", "revision must be an integer >= 1")
+        revision = revision_raw
         return ProjectMemoryState(self.project_id, events, decisions, inbox, risks, debt, attention, checkpoints, execution, revision=revision)
 
     def _write_state(self, state: ProjectMemoryState) -> None:
-        _atomic_write(self.memory_path, state.to_dict())
+        document = state.to_dict()
+        self._state_from_dict(document, bounded=False)
+        from .retention_compaction import AuditSegmentManager, ContentAddressedStore, RetentionCompactionController
+        live, archive = RetentionCompactionController.project_v1(document)
+        # Validate bounded final bytes before creating any archive or replacing authority.
+        self._state_from_dict(live, event_offset=len(archive["events"]))
+        if len(canonical_json_bytes(live)) > MAX_MEMORY_BYTES:
+            _fail("memory_too_large", "active/unresolved project memory exceeds its bound")
+        if archive["events"] or archive["lists"] or archive["maps"]:
+            database = self.root / "retention.db"
+            if database.is_symlink(): _fail("memory_path_invalid", "retention content must not be a symlink")
+            conn = sqlite3.connect(database)
+            try:
+                conn.execute("PRAGMA synchronous = FULL")
+                cas = ContentAddressedStore(conn)
+                controller = RetentionCompactionController(conn, self.project_id, cas, AuditSegmentManager(conn, self.project_id))
+                live = controller.compact_v1(document)
+            except (sqlite3.Error, ValueError) as exc:
+                raise ProjectMemoryError("memory_retention_failed", "retention could not be committed; previous authority preserved") from exc
+            finally:
+                conn.close()
+        self._state_from_dict(live, event_offset=len(archive["events"]))
+        if len(canonical_json_bytes(live)) > MAX_MEMORY_BYTES:
+            _fail("memory_too_large", "retained project memory exceeds its byte bound")
+        _atomic_write(self.memory_path, live)
+
+    def capacity_status(self) -> dict[str, Any]:
+        document = self.read_state().to_dict()
+        from .retention_compaction import RetentionCompactionController
+        live, _ = RetentionCompactionController.project_v1(document)
+        ratios = {"events": len(live["events"]) / MAX_EVENTS,
+                  "execution_bytes": len(canonical_json_bytes(live["execution"])) / MAX_EXECUTION_BYTES,
+                  "memory_bytes": len(canonical_json_bytes(live)) / MAX_MEMORY_BYTES}
+        for key in ("decisions", "inbox", "risks", "technical_debt", "attention", "checkpoints"):
+            ratios[key] = len(live[key]) / MAX_ITEMS
+        for key, value in live["execution"].items():
+            if isinstance(value, list) and key != "milestones_completed": ratios[f"execution.{key}"] = len(value) / MAX_ITEMS
+            elif isinstance(value, dict) and key in {"task_statuses", "milestone_runs", "checkpoints", "gate_statuses", "milestone_gate_statuses", "open_question_statuses", "launch_handoffs", "launch_outbox"}:
+                limit = MAX_EVENTS if key == "task_statuses" else 128 if key == "milestone_runs" else MAX_ITEMS
+                ratios[f"execution.{key}"] = len(value) / limit
+        return {"status": "CAPACITY_WARNING" if max(ratios.values()) >= 0.8 else "READY", "ratios": ratios,
+                "logical_events": len(document["events"]), "physical_events": len(live["events"])}
+
+    def export_archive(self) -> dict[str, Any]:
+        document = self.read_state().to_dict()
+        return {"schema": "bdb-vnext-v1-memory-export-v1", "document": document,
+                "digest": hashlib.sha256(canonical_json_bytes(document)).hexdigest()}
+
+    def restore_archive(self, archive: Mapping[str, Any]) -> None:
+        document = archive.get("document")
+        if archive.get("schema") != "bdb-vnext-v1-memory-export-v1" or archive.get("digest") != hashlib.sha256(canonical_json_bytes(document)).hexdigest():
+            _fail("memory_archive_invalid", "memory export digest differs")
+        state = self._state_from_dict(document, bounded=False)
+        with self._execution_lock():
+            if self.memory_path.exists(): _fail("memory_restore_target_not_empty", "restore requires an empty isolated project target")
+            self._write_state(state)
 
     @contextmanager
     def _execution_lock(self) -> Iterator[None]:
@@ -709,6 +850,8 @@ class ProjectMemoryStore:
             updated, result = operation(current)
             if updated.project_id != self.project_id:
                 _fail("memory_project_mismatch", "transition changed project identity")
+            if updated.events[:len(current.events)] != current.events:
+                _fail("memory_event_order_invalid", "transition changed immutable event history")
             next_rev = current.revision + 1
             final_state = replace(updated, revision=next_rev)
             self._write_state(final_state)
@@ -727,8 +870,6 @@ class ProjectMemoryStore:
         if event_type not in _EVENT_TYPES:
             _fail("event_type_invalid", "event_type is unsupported")
         summary = _text(summary, "human_summary", max_length=2_000)
-        if len(state.events) >= MAX_EVENTS:
-            _fail("event_log_bounded", "project event log reached its bound")
         event_id = f"{self.project_id}:e{len(state.events) + 1:06d}"
         if prerequisite_id is not None:
             prerequisite_id = _text(prerequisite_id, "prerequisite_id", max_length=96)
@@ -746,7 +887,6 @@ class ProjectMemoryStore:
     def add_decision(self, *, title: str, decision: str, reason: str, plan_version: str | None = None, related_task_ids: Iterable[str] = (), supersedes_decision_id: str | None = None) -> DecisionRecord:
         def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, DecisionRecord]:
             identifier = f"D-{len(state.decisions) + 1:03d}"
-            if len(state.decisions) >= MAX_ITEMS: _fail("memory_collection_bounded", "decision history reached its bound")
             if supersedes_decision_id and not any(item.decision_id == supersedes_decision_id for item in state.decisions):
                 _fail("decision_supersedes_missing", "superseded decision does not exist")
             record = DecisionRecord(identifier, self.project_id, _text(title, "decision.title", max_length=300), _text(decision, "decision.decision", max_length=4_000), _text(reason, "decision.reason", max_length=4_000), "active", _now(), tuple(related_task_ids), plan_version, supersedes_decision_id)
@@ -760,7 +900,6 @@ class ProjectMemoryStore:
 
     def add_inbox(self, *, title: str, description: str) -> InboxItem:
         def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, InboxItem]:
-            if len(state.inbox) >= MAX_ITEMS: _fail("memory_collection_bounded", "inbox reached its bound")
             record = InboxItem(f"I-{len(state.inbox) + 1:03d}", self.project_id, _text(title, "inbox.title", max_length=300), _text(description, "inbox.description", max_length=4_000), _now())
             updated = replace(state, inbox=state.inbox + (record,))
             updated = self._append_event(updated, "INBOX_ITEM_ADDED", f"Dodano pomysł: {record.title}")
@@ -782,7 +921,6 @@ class ProjectMemoryStore:
     def add_risk(self, *, title: str, description: str, severity: str = "medium") -> RiskRecord:
         if severity not in {"low", "medium", "high"}: _fail("risk_severity_invalid", "risk severity is unsupported")
         def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, RiskRecord]:
-            if len(state.risks) >= MAX_ITEMS: _fail("memory_collection_bounded", "risk history reached its bound")
             record = RiskRecord(f"R-{len(state.risks) + 1:03d}", self.project_id, _text(title, "risk.title", max_length=300), _text(description, "risk.description", max_length=4_000), severity, "open", _now())
             updated = replace(state, risks=state.risks + (record,))
             updated = self._append_event(updated, "RISK_ADDED", f"Dodano ryzyko: {record.title}")
@@ -802,7 +940,6 @@ class ProjectMemoryStore:
 
     def add_debt(self, *, title: str, description: str, related_task_ids: Iterable[str] = (), suggested_review_milestone: str | None = None) -> DebtRecord:
         def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, DebtRecord]:
-            if len(state.technical_debt) >= MAX_ITEMS: _fail("memory_collection_bounded", "technical debt history reached its bound")
             record = DebtRecord(f"TD-{len(state.technical_debt) + 1:03d}", self.project_id, _text(title, "debt.title", max_length=300), _text(description, "debt.description", max_length=4_000), _now(), "open", tuple(related_task_ids), suggested_review_milestone)
             updated = replace(state, technical_debt=state.technical_debt + (record,))
             updated = self._append_event(updated, "TECH_DEBT_ADDED", f"Dodano dług techniczny: {record.title}")
@@ -823,7 +960,6 @@ class ProjectMemoryStore:
     def add_attention(self, *, type: str, title: str, description: str) -> AttentionItem:
         if type not in {"decision_required", "blocked", "review_required", "plan_review_required"}: _fail("attention_type_invalid", "attention type is unsupported")
         def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, AttentionItem]:
-            if len(state.attention) >= MAX_ITEMS: _fail("memory_collection_bounded", "attention history reached its bound")
             record = AttentionItem(f"A-{len(state.attention) + 1:03d}", self.project_id, type, _text(title, "attention.title", max_length=300), _text(description, "attention.description", max_length=4_000), _now())
             updated = replace(state, attention=state.attention + (record,))
             updated = self._append_event(updated, "ATTENTION_ADDED", f"Dodano uwagę: {record.title}")
@@ -842,7 +978,6 @@ class ProjectMemoryStore:
 
     def create_checkpoint(self, *, label: str, plan_version: str | None, git_head: str | None, completed_task_ids: Iterable[str], current_task_id: str | None, active_decision_ids: Iterable[str] = (), open_blocker_ids: Iterable[str] = (), human_summary: str | None = None) -> Checkpoint:
         def transition(state: ProjectMemoryState) -> tuple[ProjectMemoryState, Checkpoint]:
-            if len(state.checkpoints) >= MAX_ITEMS: _fail("memory_collection_bounded", "checkpoint history reached its bound")
             record = Checkpoint(f"CP-{len(state.checkpoints) + 1:03d}", self.project_id, _now(), _text(label, "checkpoint.label", max_length=300), plan_version, git_head, tuple(completed_task_ids), current_task_id, tuple(active_decision_ids), tuple(open_blocker_ids), human_summary)
             updated = replace(state, checkpoints=state.checkpoints + (record,))
             updated = self._append_event(updated, "CHECKPOINT_CREATED", f"Utworzono checkpoint: {record.label}", plan_version=plan_version, git_head=git_head)

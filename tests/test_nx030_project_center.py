@@ -264,17 +264,32 @@ def test_project_center_actions_use_only_canonical_commands(tmp_path: Path) -> N
         auto_start_confirmation=lambda _view: True,
     )
     window._projects = (record,)
+    from bdb_vnext.control_center_query import ControlCenterSnapshot
+    active = ControlCenterSnapshot(runtime_root=str(runtime), system_state="ON", writer_state="ON", activation_state="ACTIVE", store_state="SEALED", store_instance_id="fixture", works=(), action_predicates=(), reason_code="production_acceptance_pass", read_only=False)
+    window._snapshot_loader = lambda _: active
     window._select_project(record.project_id)
 
     window._auto_scope_selector.setCurrentIndex(AUTO_SCOPE_OPTIONS.index(AutoScope.PROJECT))
     assert commands.calls == []
     window._start_auto_from_gui()
+    from PySide6.QtTest import QTest
+    def wait_for_operation():
+        for _ in range(100):
+            if not window._operations: return
+            QTest.qWait(20)
+            import time
+            time.sleep(0.005)
+        pytest.fail("workflow did not finish")
+    wait_for_operation()
     window._continue_auto_from_gui()
+    wait_for_operation()
     window._stop_auto_from_gui()
+    wait_for_operation()
     # The fake represents a stopped canonical state; make the resume path
     # available exactly as it would be after a fresh canonical read.
     window._auto_view_model = ProjectCenterAutoViewModel.from_canonical(commands.state)
     window._resume_auto_from_gui()
+    wait_for_operation()
     assert [call[0] for call in commands.calls] == ["start_auto", "continue_auto", "stop_auto", "resume_auto"]
     assert commands.calls[0][1:] == (AutoScope.PROJECT, True)
     window.close()

@@ -274,6 +274,8 @@ class LocalExecutionRequest:
         # Ensure env_vars is a sorted mapping of string pairs
         if not isinstance(self.env_vars, Mapping):
             raise LocalExecutionContractError("invalid_env_vars", "env_vars must be a mapping")
+        if any(not isinstance(key, str) or not isinstance(value, str) or not key or "=" in key or "\x00" in key or "\x00" in value for key, value in self.env_vars.items()):
+            raise LocalExecutionContractError("invalid_env_vars", "env_vars must contain valid string keys and values")
 
         # Derive deterministic request_digest
         computed_digest = self.canonical_digest()

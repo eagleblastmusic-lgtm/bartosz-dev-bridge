@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -199,6 +200,10 @@ class HardenedOutputEvidenceFactory:
     INLINE_LIMIT_BYTES = 64 * 1024  # 64 KiB
 
     @classmethod
+    def capture_stream(cls, stream: str, storage_dir: Path | str) -> "OutputEvidenceCapture":
+        return OutputEvidenceCapture(stream, Path(storage_dir), cls.INLINE_LIMIT_BYTES)
+
+    @classmethod
     def create_evidence(
         cls,
         stream: str,
@@ -255,9 +260,63 @@ class HardenedOutputEvidenceFactory:
         if not art_file.exists() or not art_file.is_file():
             return False
 
-        actual_bytes = art_file.read_bytes()
-        actual_digest = "sha256:" + hashlib.sha256(actual_bytes).hexdigest()
-        return actual_digest == evidence.content_digest
+        if art_file.is_symlink() or evidence.content_reference not in {f"ref:sha256:{hex_digest}", f"cas:{evidence.content_digest}"}:
+            return False
+        digest = hashlib.sha256()
+        count = 0
+        with art_file.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(64 * 1024), b""):
+                count += len(chunk)
+                digest.update(chunk)
+        return count == evidence.raw_byte_count and "sha256:" + digest.hexdigest() == evidence.content_digest
+
+
+class OutputEvidenceCapture:
+    """Stream raw evidence to the existing artifact layout with bounded preview."""
+
+    def __init__(self, stream: str, storage_dir: Path, limit: int) -> None:
+        self.stream, self.storage_dir, self.limit = stream, storage_dir, limit
+        self.preview = bytearray()
+        self.count = 0
+        self.digest = hashlib.sha256()
+        folder = storage_dir / "evidence"
+        if folder.is_symlink():
+            raise LocalExecutionContractError("output_storage_invalid", "Raw evidence storage must not be a symlink")
+        folder.mkdir(parents=True, exist_ok=True)
+        self.handle = tempfile.NamedTemporaryFile(mode="w+b", prefix="capture-", suffix=".tmp", dir=folder, delete=False)
+        self.path = Path(self.handle.name)
+
+    def append(self, chunk: bytes) -> None:
+        self.handle.write(chunk)
+        self.digest.update(chunk)
+        self.count += len(chunk)
+        if len(self.preview) < self.limit:
+            self.preview.extend(chunk[:self.limit - len(self.preview)])
+
+    def finish(self) -> ExecutionOutputEvidence:
+        self.handle.flush()
+        os.fsync(self.handle.fileno())
+        self.handle.close()
+        hex_digest = self.digest.hexdigest()
+        artifact = self.storage_dir / "evidence" / f"{hex_digest}.bin"
+        evidence = ExecutionOutputEvidence(
+            stream=self.stream, raw_byte_count=self.count, content_digest=f"sha256:{hex_digest}",
+            is_truncated=self.count > self.limit, inline_content=bytes(self.preview).decode("utf-8", errors="replace"),
+            content_reference=f"cas:sha256:{hex_digest}",
+        )
+        if artifact.exists():
+            if not HardenedOutputEvidenceFactory.verify_external_artifact_integrity(evidence, self.storage_dir):
+                raise LocalExecutionContractError("output_artifact_corrupt", "Existing raw output artifact differs")
+            self.path.unlink()
+        else:
+            os.replace(self.path, artifact)
+        if not HardenedOutputEvidenceFactory.verify_external_artifact_integrity(evidence, self.storage_dir):
+            raise LocalExecutionContractError("output_artifact_corrupt", "Raw output artifact verification failed")
+        return evidence
+
+    def close(self) -> None:
+        self.handle.close()
+        self.path.unlink(missing_ok=True)
 
 
 # ==============================================================================

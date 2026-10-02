@@ -360,6 +360,18 @@ class ExecutionPolicyEvaluator:
         except LocalExecutionContractError:
             return deny("DENY_UNKNOWN_EFFECT_CLASS")
 
+        from .tool_adapters import classify_command, is_trusted_read_executable
+        try:
+            derived_effect, derived_targets, derived_network = classify_command(request)
+        except LocalExecutionContractError:
+            return deny("DENY_COMMAND_CLASSIFICATION", str(effect_class))
+        minimum = map_contract_effect_to_policy(derived_effect)
+        if minimum is PolicyEffectClass.READ_ONLY and not is_trusted_read_executable(request.argv[0], canon_project):
+            return deny("DENY_UNTRUSTED_EXECUTABLE", str(minimum))
+        if minimum is not PolicyEffectClass.READ_ONLY and effect_class is not minimum:
+            return deny("DENY_EFFECT_CLASS_MISMATCH", str(minimum))
+        network_requested = network_requested or derived_network
+
         # 3. Source State Validation (HEAD / TREE)
         if current_head is not None and request.expected_source_head != current_head:
             return deny("DENY_STALE_HEAD", str(effect_class))
@@ -375,11 +387,12 @@ class ExecutionPolicyEvaluator:
             resolved_cwd = raw_cwd
 
         canon_cwd = canonicalize_path(resolved_cwd)
+        filesystem_targets = tuple(filesystem_targets or ()) + tuple(canon_cwd / Path(target) for target in derived_targets)
         if effect_class is PolicyEffectClass.PROJECT_MUTATION:
             if canon_candidate == canon_project or not is_path_contained(canon_cwd, canon_candidate):
                 return deny("DENY_PROJECT_MUTATION_OUTSIDE_CANDIDATE", str(effect_class), str(canon_cwd))
         else:
-            if not is_path_contained(canon_cwd, canon_project):
+            if not is_path_contained(canon_cwd, canon_project) and not (effect_class is PolicyEffectClass.DESTRUCTIVE and is_path_contained(canon_cwd, canon_candidate)):
                 return deny("DENY_CWD_ESCAPE", str(effect_class), str(canon_cwd))
 
         # 5. Filesystem Targets Validation

@@ -92,7 +92,7 @@ def _make_mutation_req(exec_id: str = "exec:cand-1", **kwargs: Any) -> lec.Local
         "project_id": "proj:candidate-test",
         "adapter_id": "process.raw",
         "mode": lec.ExecutionMode.ARGV,
-        "argv": (sys.executable, "-c", "print('candidate-mutation-ok')"),
+        "argv": (sys.executable, "-I", "-S", "-c", "print('candidate-mutation-ok')"),
         "cwd": ".",
         "env_id": "env:default",
         "effect_class": lec.ExecutionEffectClass.PROJECT_MUTATION,
@@ -240,7 +240,7 @@ def test_git_mutation_routing_qualification(tmp_path: Path) -> None:
             expected_head="a" * 40,
             expected_tree="b" * 40,
         )
-        assert req.effect_class is lec.ExecutionEffectClass.PROJECT_MUTATION
+        assert req.effect_class is lec.ExecutionEffectClass.NON_REPLAYABLE_MUTATION
 
         # 1. NX-042 Policy evaluation with candidate_root = active_repo (direct active write attempt)
         decision_active = policy_evaluator.evaluate(
@@ -251,7 +251,7 @@ def test_git_mutation_routing_qualification(tmp_path: Path) -> None:
             current_tree="b" * 40,
         )
         assert decision_active.decision == "DENY"
-        assert decision_active.reason_code == "DENY_PROJECT_MUTATION_OUTSIDE_CANDIDATE"
+        assert decision_active.reason_code == "DENY_APPROVAL_REQUIRED"
 
         # 2. Bridge execution against ACTIVE directly -> blocked before process start
         with pytest.raises(lec.LocalExecutionContractError) as exc_blocked:
@@ -282,7 +282,10 @@ def test_git_mutation_routing_qualification(tmp_path: Path) -> None:
             current_head="a" * 40,
             current_tree="b" * 40,
         )
-        assert decision_cand_proper.decision == "ALLOW"
+        assert decision_cand_proper.reason_code == "DENY_APPROVAL_REQUIRED"
+        token = policy_evaluator.approval_registry.issue(req_cand, effect_class=ep.PolicyEffectClass.DESTRUCTIVE, validity_seconds=60)
+        assert policy_evaluator.evaluate(req_cand, candidate_root=candidate_root, project_root=active_repo,
+                                         current_head="a" * 40, current_tree="b" * 40, approval_token=token).decision == "ALLOW"
 
 
 # ==============================================================================

@@ -64,6 +64,48 @@ jobs:
       - name: Compile vNext sources
         run: python -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for p in pathlib.Path('bdb_vnext').glob('*.py')]"
 
+      - name: Verify Memory, GUI responsiveness, admission retention and Local Execution
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: >-
+          python -m pytest -q
+          tests/test_project_memory_persistence_contract.py
+          tests/test_project_memory_live_retention.py
+          tests/test_cc3_project_memory_slice3.py
+          tests/test_project_workflow_responsiveness.py
+          tests/test_nx030_project_center.py
+          tests/test_browser_admission_retention.py
+          tests/test_local_execution_remediation.py
+          tests/test_nx040_local_execution_contract.py
+          tests/test_nx042_execution_policy.py
+          tests/test_nx043_stateless_process_runner.py
+          tests/test_nx044_tool_adapters.py
+          tests/test_nx045_candidate_execution_bridge.py
+          tests/test_nx046_stateless_powershell.py
+          tests/test_nx049_output_cancellation_redaction.py
+          tests/test_nx050_same_chat_local_execution.py
+          tests/test_nx066_v1_v2_shadow_migration.py
+          -k "not machine_gate"
+
+      - name: Create current source-bound retention evidence
+        if: runner.os == 'Windows'
+        run: python scripts/run_million_event_harness.py
+
+      - name: Execute source-bound retention, migration and Local Execution gates on Windows
+        if: runner.os == 'Windows'
+        run: >-
+          python -m pytest -q
+          tests/test_nx018_retention_compaction.py
+          tests/test_nx042_execution_policy.py
+          tests/test_nx043_stateless_process_runner.py
+          tests/test_nx044_tool_adapters.py
+          tests/test_nx045_candidate_execution_bridge.py
+          tests/test_nx046_stateless_powershell.py
+          tests/test_nx049_output_cancellation_redaction.py
+          tests/test_nx050_same_chat_local_execution.py
+          tests/test_nx066_v1_v2_shadow_migration.py
+          -k machine_gate
+
       - name: Validate JSON schemas
         shell: python {0}
         run: |

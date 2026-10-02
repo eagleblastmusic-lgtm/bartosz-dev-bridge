@@ -47,7 +47,10 @@ class SubprocessCommandRunner:
         options: dict[str, object] = {}
         if os.name == "nt":
             options["creationflags"] = 0x08000000
-        result = subprocess.run([str(item) for item in args], cwd=str(cwd) if cwd is not None else None, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", shell=False, check=False, timeout=timeout_seconds, **options)
+        try:
+            result = subprocess.run([str(item) for item in args], cwd=str(cwd) if cwd is not None else None, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace", shell=False, check=False, timeout=timeout_seconds, **options)
+        except subprocess.TimeoutExpired as exc:
+            raise ProjectWorkflowError("command_timeout", f"{args[0]} exceeded {timeout_seconds:g}s; inspect existing effects before retry") from exc
         return CommandResult(tuple(str(item) for item in args), result.returncode, result.stdout, result.stderr)
 
 
@@ -90,6 +93,8 @@ class ProjectCreationResult:
     error_message: str | None = None
     local_repo_path: str | None = None
     github_repo: str | None = None
+
+    recovery_action: str | None = None
 
 
 def brief_markdown(brief: ProjectBrief, *, github_repo: str | None = None, local_repo_identity: str | None = None) -> str:
@@ -246,7 +251,10 @@ class ProjectWorkflow:
         if source.is_symlink() or not source.is_dir() or not source.joinpath(".git").exists():
             raise ProjectWorkflowError("repository_invalid", "existing project must be a Git checkout")
         if github_repo is None:
-            remote = self.runner.run(("git", "remote", "get-url", "origin"), cwd=source, timeout_seconds=30)
+            try:
+                remote = self.runner.run(("git", "remote", "get-url", "origin"), cwd=source, timeout_seconds=30)
+            except subprocess.TimeoutExpired as exc:
+                raise ProjectWorkflowError("command_timeout", "Repository origin lookup exceeded its timeout; the local checkout is preserved") from exc
             if remote.returncode == 0:
                 candidate = remote.stdout.strip().replace("https://github.com/", "").replace(".git", "")
                 if "/" in candidate:
@@ -275,6 +283,8 @@ class ProjectWorkflow:
             return ProjectCreationResult(False, error_code="repository_path_escape", error_message="project path escapes projects root")
         if source.exists():
             return ProjectCreationResult(False, error_code="repository_exists", error_message="project directory already exists")
+        record = None
+        created_github_repo = None
         try:
             source.mkdir()
             (source / ".bdb").mkdir()
@@ -287,14 +297,17 @@ class ProjectWorkflow:
             self._run(("git", "add", "--", "README.md", ".gitignore", ".bdb/project-brief.md"), cwd=source)
             self._run(("git", "commit", "-m", "chore: initialize project"), cwd=source)
             github_repo = self.github.create_private_repository(local_repo=source, repo_name=github_name.strip())
+            created_github_repo = github_repo
             record = new_project_record(project_id=None, display_name=display_name, repo_alias=repo_alias, local_repo_path=source, github_repo=github_repo, brief=brief)
             self.catalog.upsert(record)
             self._ensure_project_memory(record)
             return ProjectCreationResult(True, record, local_repo_path=str(source), github_repo=github_repo)
         except ProjectWorkflowError as exc:
-            return ProjectCreationResult(False, error_code=exc.code, error_message=str(exc), local_repo_path=str(source))
+            return ProjectCreationResult(False, project=record, error_code=exc.code, error_message=str(exc), local_repo_path=str(source), github_repo=created_github_repo, recovery_action="register_existing" if (source / ".git").exists() else "inspect_partial_directory")
+        except subprocess.TimeoutExpired as exc:
+            return ProjectCreationResult(False, project=record, error_code="command_timeout", error_message=f"Command exceeded {exc.timeout}s; inspect existing effects before retry", local_repo_path=str(source), github_repo=created_github_repo, recovery_action="register_existing" if (source / ".git").exists() else "inspect_partial_directory")
         except (OSError, ValueError) as exc:
-            return ProjectCreationResult(False, error_code="project_creation_failed", error_message=str(exc), local_repo_path=str(source))
+            return ProjectCreationResult(False, project=record, error_code="project_creation_failed", error_message=str(exc), local_repo_path=str(source), github_repo=created_github_repo, recovery_action="register_existing" if (source / ".git").exists() else "inspect_partial_directory")
 
     def import_plan(self, project_id: str, plan_path: str | Path) -> tuple[ProjectRecord, ProjectPlan]:
         try:
@@ -791,7 +804,10 @@ class ProjectWorkflow:
         return receipt
 
     def current_repo_head(self, project: ProjectRecord) -> str:
-        result = self.runner.run(("git", "rev-parse", "HEAD"), cwd=Path(project.local_repo_path), timeout_seconds=30)
+        try:
+            result = self.runner.run(("git", "rev-parse", "HEAD"), cwd=Path(project.local_repo_path), timeout_seconds=30)
+        except subprocess.TimeoutExpired as exc:
+            raise ProjectWorkflowError("command_timeout", "Repository HEAD lookup exceeded its timeout") from exc
         if result.returncode != 0 or not re.fullmatch(r"[0-9a-fA-F]{40,64}", result.stdout.strip()):
             raise ProjectWorkflowError("repo_head_unavailable", "registered project HEAD could not be read")
         return result.stdout.strip().lower()
@@ -960,7 +976,10 @@ class ProjectWorkflow:
         return launch
 
     def _run(self, args: Sequence[str], *, cwd: Path) -> CommandResult:
-        result = self.runner.run(args, cwd=cwd, timeout_seconds=120)
+        try:
+            result = self.runner.run(args, cwd=cwd, timeout_seconds=120)
+        except subprocess.TimeoutExpired as exc:
+            raise ProjectWorkflowError("command_timeout", f"{args[0]} exceeded {exc.timeout}s") from exc
         if result.returncode != 0:
             raise ProjectWorkflowError("git_command_failed", result.stderr.strip() or "Git command failed")
         return result

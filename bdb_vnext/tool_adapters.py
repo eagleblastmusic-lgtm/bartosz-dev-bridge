@@ -15,7 +15,9 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import ast
+import shutil
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -28,6 +30,108 @@ from .local_execution_contract import (
     LocalExecutionRequest,
     LocalExecutionResult,
 )
+
+
+def resolve_command_executable(executable: str) -> str | None:
+    """Resolve from the host's configured PATH, never from a request's cwd/env."""
+    supplied = Path(executable)
+    if supplied.is_absolute():
+        return str(supplied.resolve()) if supplied.is_file() else None
+    if supplied.parent != Path("."):
+        return None
+    for directory in os.get_exec_path():
+        if not directory or not Path(directory).is_absolute():
+            continue
+        found = shutil.which(executable, path=directory)
+        if found and Path(found).is_file() and Path(found).resolve().parent == Path(directory).resolve():
+            return str(Path(found).resolve())
+    return None
+
+
+def is_trusted_read_executable(executable: str, project_root: Path) -> bool:
+    resolved = resolve_command_executable(executable)
+    if not resolved:
+        return False
+    path = Path(resolved)
+    if path == Path(sys.executable).resolve():
+        return True
+    try:
+        path.relative_to(project_root.resolve())
+        return False
+    except ValueError:
+        pass
+    installed = resolve_command_executable(path.name)
+    return installed == resolved
+
+
+def classify_command(request: LocalExecutionRequest) -> tuple[ExecutionEffectClass, tuple[str, ...], bool]:
+    """Derive the minimum effect from executable/argv, never from adapter name."""
+    def reject(message: str) -> None:
+        raise LocalExecutionContractError("command_classification_invalid", message)
+    unsafe_environment = {"PATH", "PATHEXT", "COMSPEC", "PYTHONPATH", "PYTHONHOME", "NODE_OPTIONS", "LD_PRELOAD", "LD_LIBRARY_PATH"}
+    if any(key.upper() in unsafe_environment or key.upper().startswith(("GIT_", "NPM_CONFIG_", "CARGO_", "RUSTC_")) for key in request.env_vars):
+        reject("Environment can change executable, helper or output effects")
+    if request.mode is ExecutionMode.SCRIPT:
+        return ExecutionEffectClass.NON_REPLAYABLE_MUTATION, (), False
+    argv = tuple(request.argv or ())
+    if not argv or any("\x00" in arg for arg in argv): reject("Invalid executable/argv")
+    exe = Path(argv[0]).name.lower().removesuffix(".exe").removesuffix(".cmd")
+    expected = {"tool.pytest": {"python", "python3", "pytest"}, "tool.npm": {"npm", "npx"}, "tool.cargo": {"cargo"},
+                "tool.python": {"python", "python3"}, "tool.node": {"node"}, "shell.powershell": {"powershell", "pwsh"}}
+    if request.adapter_id in expected and exe not in expected[request.adapter_id]: reject("Executable does not match adapter contract")
+    args = argv[1:]
+    if exe == "git":
+        hardened = args[:3] == ("--no-pager", "-c", "core.fsmonitor=false")
+        if hardened: args = args[3:]
+        if not args: reject("Git subcommand required")
+        subcommand, flags = args[0], args[1:]
+        allowed = {
+            "status": {"--short", "-s", "--branch", "-b", "--porcelain", "--porcelain=v1", "--porcelain=v2", "--untracked-files=no", "--untracked-files=all", "--ignored", "-z"},
+            "rev-parse": {"--verify", "--short", "--show-toplevel", "--is-inside-work-tree", "--show-prefix", "--git-dir"},
+            "diff": {"--stat", "--numstat", "--name-only", "--name-status", "--check", "--cached", "--staged", "--no-ext-diff", "--no-textconv", "--no-color", "--exit-code", "--quiet", "--binary", "--patch", "-p", "-z"},
+            "log": {"--oneline", "--no-decorate", "--no-color", "--all", "--stat", "--name-only", "--no-ext-diff", "--no-textconv"},
+            "show": {"--stat", "--name-only", "--name-status", "--no-color", "--no-ext-diff", "--no-textconv"},
+        }
+        if subcommand in allowed:
+            if not hardened: reject("Read-only Git requires disabled pager and fsmonitor")
+            if subcommand in {"diff", "show", "log"} and not {"--no-ext-diff", "--no-textconv"}.issubset(flags):
+                reject("Read-only Git requires disabled external diff/textconv")
+            targets, paths = [], False
+            for flag in flags:
+                if flag == "--": paths = True; continue
+                if not paths and flag.startswith("-"):
+                    if flag not in allowed[subcommand] and not (subcommand == "log" and re.fullmatch(r"-(?:n)?\d+|--max-count=\d+|--format=(?:%[Hhstds]|[ :.-])+", flag)):
+                        reject(f"Unsupported Git {subcommand} flag: {flag}")
+                elif paths:
+                    targets.append(flag)
+                elif not re.fullmatch(r"[A-Za-z0-9_.^~:/-]+", flag): reject("Unsupported Git revision")
+            return ExecutionEffectClass.READ_ONLY, tuple(targets), False
+        if subcommand in {"commit", "checkout", "branch", "apply", "add"}:
+            # Hooks and configurable helpers can execute arbitrary programs.
+            return ExecutionEffectClass.NON_REPLAYABLE_MUTATION, (), False
+        reject("Unsupported Git subcommand")
+    if exe in {"node", "python", "python3"} and args in {("--version",), ("-V",), ("-v",)}:
+        return ExecutionEffectClass.READ_ONLY, (), False
+    if exe in {"python", "python3"} and len(args) == 4 and args[:3] == ("-I", "-S", "-c"):
+        # Only literal print expressions can be established as read-only.
+        try:
+            tree = ast.parse(args[3])
+            if tree.body and all(isinstance(node, ast.Expr) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == "print" and not node.value.keywords and all(isinstance(arg, ast.Constant) for arg in node.value.args) for node in tree.body):
+                return ExecutionEffectClass.READ_ONLY, (), False
+        except (SyntaxError, ValueError): pass
+    network = exe in {"npm", "npx", "rustc", "cargo", "tauri", "curl", "wget", "ssh", "gh"}
+    # Scripts, test plugins and unrecognized argv need request-bound approval.
+    return ExecutionEffectClass.NON_REPLAYABLE_MUTATION, (), network
+
+
+def classified_request(**kwargs: Any) -> LocalExecutionRequest:
+    argv = tuple(kwargs.get("argv") or ())
+    if argv and Path(argv[0]).name.lower().removesuffix(".exe") == "git" and len(argv) > 1 and argv[1] in {"status", "rev-parse", "diff", "show", "log"}:
+        extras = ("--no-ext-diff", "--no-textconv") if argv[1] in {"diff", "show", "log"} else ()
+        kwargs["argv"] = (argv[0], "--no-pager", "-c", "core.fsmonitor=false", argv[1], *extras, *argv[2:])
+    request = LocalExecutionRequest(**kwargs)
+    effect, _, _ = classify_command(request)
+    return replace(request, effect_class=effect, idempotency=IdempotencyClass.IDEMPOTENT_REPLAYABLE if effect is ExecutionEffectClass.READ_ONLY else IdempotencyClass.NON_REPLAYABLE, request_digest="")
 
 
 # ==============================================================================
@@ -165,7 +269,7 @@ class GitToolAdapter(TypedToolAdapter):
     ) -> LocalExecutionRequest:
         self.validate_operation(operation)
 
-        # Classify effect class strictly
+        # The command validator below derives effects from the final argv.
         if operation in self.READ_OPS:
             effect_class = ExecutionEffectClass.READ_ONLY
             idempotency = IdempotencyClass.IDEMPOTENT_REPLAYABLE
@@ -177,7 +281,7 @@ class GitToolAdapter(TypedToolAdapter):
         subcmd = operation.split(".", 1)[1].replace("_", "-")
         argv = ("git", subcmd, *args)
 
-        return LocalExecutionRequest(
+        return classified_request(
             execution_id=execution_id,
             project_id=project_id,
             adapter_id="process.raw",
@@ -236,7 +340,7 @@ class NodeToolAdapter(TypedToolAdapter):
     ) -> LocalExecutionRequest:
         self.validate_operation(operation)
         argv = ("node", *args)
-        return LocalExecutionRequest(
+        return classified_request(
             execution_id=execution_id,
             project_id=project_id,
             adapter_id="process.raw",
@@ -287,7 +391,7 @@ class NpmToolAdapter(TypedToolAdapter):
         )
 
         argv = (self.executable_name, subcmd, *args)
-        return LocalExecutionRequest(
+        return classified_request(
             execution_id=execution_id,
             project_id=project_id,
             adapter_id="process.raw",
@@ -372,7 +476,7 @@ class RustcToolAdapter(TypedToolAdapter):
     ) -> LocalExecutionRequest:
         self.validate_operation(operation)
         argv = ("rustc", *args)
-        return LocalExecutionRequest(
+        return classified_request(
             execution_id=execution_id,
             project_id=project_id,
             adapter_id="process.raw",
@@ -423,7 +527,7 @@ class CargoToolAdapter(TypedToolAdapter):
         )
 
         argv = ("cargo", subcmd, *args)
-        return LocalExecutionRequest(
+        return classified_request(
             execution_id=execution_id,
             project_id=project_id,
             adapter_id="process.raw",
@@ -483,7 +587,7 @@ class TauriToolAdapter(TypedToolAdapter):
         )
 
         argv = (self.executable_name, subcmd, *args)
-        return LocalExecutionRequest(
+        return classified_request(
             execution_id=execution_id,
             project_id=project_id,
             adapter_id="process.raw",
@@ -558,7 +662,7 @@ class TestRunnerToolAdapter(TypedToolAdapter):
         else:
             argv = ("python", "-m", "pytest", *args)
 
-        return LocalExecutionRequest(
+        return classified_request(
             execution_id=execution_id,
             project_id=project_id,
             adapter_id="process.raw",

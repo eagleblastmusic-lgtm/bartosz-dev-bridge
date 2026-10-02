@@ -105,11 +105,11 @@ def test_git_adapter_read_vs_mutation_split() -> None:
     # Read op: git.status
     req_status = adapter.build_request("git.status", "exec:git-1", "proj:1", "c:/repo")
     assert req_status.effect_class is lec.ExecutionEffectClass.READ_ONLY
-    assert req_status.argv == ("git", "status")
+    assert req_status.argv == ("git", "--no-pager", "-c", "core.fsmonitor=false", "status")
 
     # Mutation op: git.commit
     req_commit = adapter.build_request("git.commit", "exec:git-2", "proj:1", "c:/repo", args=["-m", "msg"])
-    assert req_commit.effect_class is lec.ExecutionEffectClass.PROJECT_MUTATION
+    assert req_commit.effect_class is lec.ExecutionEffectClass.NON_REPLAYABLE_MUTATION
     assert req_commit.argv == ("git", "commit", "-m", "msg")
 
 
@@ -256,7 +256,7 @@ def run_nx044_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
 
     # 3. Hidden argv/cwd/exit/effect-class divergences
     req_status = git_adapter.build_request("git.status", "e1", "p1", "c:/repo")
-    hidden_argv_div = 0 if req_status.argv == ("git", "status") else 1
+    hidden_argv_div = 0 if req_status.argv == ("git", "--no-pager", "-c", "core.fsmonitor=false", "status") else 1
     hidden_cwd_div = 0 if req_status.cwd == "c:/repo" else 1
     hidden_exit_div = 0
     effect_class_div = 0
