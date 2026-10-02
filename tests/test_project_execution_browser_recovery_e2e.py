@@ -65,7 +65,8 @@ def _execution_result(project_id: str, binding, *, head_before: str, head_after:
     }
 
 
-def test_truncated_send_attempted_recovers_existing_result_through_canonical_native_and_advances_auto(tmp_path: Path) -> None:
+@pytest.mark.parametrize("dom_mode", ["nested-selection", "direct-selection"], ids=["current-live-wrapper", "old-direct-child"])
+def test_truncated_send_attempted_recovers_existing_result_through_canonical_native_and_advances_auto(tmp_path: Path, dom_mode: str) -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for the Browser/Native recovery contract")
@@ -244,7 +245,12 @@ def test_truncated_send_attempted_recovers_existing_result_through_canonical_nat
         sys.executable,
         str(ROOT),
     ]
-    for negative_mode in ("ambiguous-turn", "identity-mismatch", "duplicate-candidate-turn"):
+    for negative_mode in (
+        "ambiguous-turn", "identity-mismatch", "duplicate-candidate-turn",
+        "foreign-nested-unit", "multiple-selections", "wrong-message-id",
+        "wrong-selection-conversation", "wrong-role", "missing-role",
+        "multiple-roles", "multiple-code-results",
+    ):
         rejected = subprocess.run(
             browser_args,
             input=json.dumps({"conversation_id": CONVERSATION_ID, "launch": launch.to_dict(), "result": result, "dom_mode": negative_mode}),
@@ -269,7 +275,7 @@ def test_truncated_send_attempted_recovers_existing_result_through_canonical_nat
         assert coordinator.launch_outbox_record(PROJECT_ID, P3_LAUNCH_ID).status == "PUBLISHED"
         assert not [item for item in after_rejection["attempts"] if item["task_id"] == "P3-03"]
 
-    payload = {"conversation_id": CONVERSATION_ID, "launch": launch.to_dict(), "result": result}
+    payload = {"conversation_id": CONVERSATION_ID, "launch": launch.to_dict(), "result": result, "dom_mode": dom_mode}
     completed = subprocess.run(
         browser_args,
         input=json.dumps(payload),
