@@ -290,6 +290,16 @@ class ProjectCenterWindow(QMainWindow):
         self._thread_pool.start(worker)
         return True
 
+    def drain_operations(self, timeout: float = 5.0) -> None:
+        from PySide6.QtTest import QTest
+        import time
+        end = time.monotonic() + timeout
+        while self._operations and time.monotonic() < end:
+            QTest.qWait(20)
+            time.sleep(0.005)
+        if self._operations:
+            raise TimeoutError("Workflow operations did not complete within timeout")
+
     @Slot(object)
     def _workflow_completed(self, outcome: WorkflowOutcome) -> None:
         entry = self._operations.pop(outcome.key, None)
@@ -1105,8 +1115,13 @@ class ProjectCenterWindow(QMainWindow):
         if not self._confirm_auto_prerequisite(kind, identifier, action):
             self._status.setText("BDB AUTO: działanie prerequisite anulowane — stan nie został zmieniony")
             return
-        def run() -> Any:
+        try:
             revision = self._resolve_auto_prerequisite_revision(project, kind, identifier)
+        except (ProjectCenterAutoCommandError, ProjectWorkflowError, ProjectMemoryError) as exc:
+            self._status.setText(f"BDB AUTO: działanie prerequisite odrzucone — {getattr(exc, 'code', 'prerequisite_failed')}")
+            self._render_auto(project)
+            return
+        def run() -> Any:
             if kind == "milestone_gate":
                 return self._workflow.pass_milestone_gate(project.project_id, identifier, expected_revision=revision)
             elif kind == "planning_gate":
@@ -1116,7 +1131,7 @@ class ProjectCenterWindow(QMainWindow):
         def completed(result: Any) -> None:
             self._mutation_operations_invoked += 1
             self._set_auto_status_from_receipt(result)
-            self._refresh_project_projections(project.project_id)
+            self._render_auto(project)
         self._run_workflow("prerequisite", "Zapis prerequisite", run, completed)
 
     def _set_auto_status_from_receipt(self, receipt: Any) -> None:
@@ -1192,7 +1207,7 @@ class ProjectCenterWindow(QMainWindow):
                 self._status.setText("BDB AUTO: WAITING_FOR_RESULT — wysyłka potwierdzona; oczekiwanie na wynik zadania.")
             else:
                 self._set_auto_status_from_receipt(receipt)
-            self._refresh_project_projections(self._current_project_id or project.project_id)
+            self._render_auto(project)
         self._run_workflow("auto", f"AUTO {action}", run, completed)
 
     def _stop_auto_from_gui(self) -> None:
@@ -1219,7 +1234,7 @@ class ProjectCenterWindow(QMainWindow):
             receipt, error = result
             self._mutation_operations_invoked += 1
             self._set_auto_status_from_receipt(receipt)
-            self._refresh_project_projections(self._current_project_id or project.project_id)
+            self._render_auto(project)
             if error:
                 self._status.setText(f"BDB AUTO: STOP fence zapisany; projekcja STOP wymaga ponowienia — {error}")
         self._run_workflow("stop", "Zapisywanie STOP", run, completed)
