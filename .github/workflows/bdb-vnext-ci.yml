@@ -73,6 +73,7 @@ jobs:
           tests/test_project_memory_live_retention.py
           tests/test_cc3_project_memory_slice3.py
           tests/test_project_workflow_responsiveness.py
+          tests/test_remediation_guidance.py
           tests/test_nx030_project_center.py
           tests/test_browser_admission_retention.py
           tests/test_local_execution_remediation.py

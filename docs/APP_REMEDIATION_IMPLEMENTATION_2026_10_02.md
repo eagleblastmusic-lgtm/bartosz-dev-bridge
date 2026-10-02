@@ -10,7 +10,7 @@ Zakres odpowiada T01–T07 z planu z 2 października 2026. Audyt i plan pozostaj
 | T04 Browser | Retencja usuwa tylko ACKED z dokładnie potwierdzonym canonical receipt. Replay usuniętego key odwołuje się do Native lookup. SENT/UNKNOWN zachowują recovery. Digest admission jest zgodny z M3a. | Worker harness; framed Native + trwały store, lost-ACK/restart/replay |
 | T05 Wzrost v1 | `memory.json` pozostaje authority. Istniejący retention controller/CAS przechowuje immutable historię, a pointer wiąże ją digestem. Active/unresolved pozostają w bieżącej projekcji. | Rzeczywisty workflow ponad 2048 events i 512 bindingów/prób/receipts; crash, parity, export/restore, STOP przy pełnej projekcji; NX-018/066 |
 | T06 Local Execution | Efekt pochodzi z executable/argv/environment; Git read wyłącza pager/fsmonitor/external diff/textconv. Dowolne skrypty wymagają approval. Raw stdout/stderr są strumieniowane do istniejącego storage z preview do 64 KiB. Windows proces pozostaje suspended do poprawnego przypisania Job Object. | NX-042/043/044/049, integration, adversarial argv/env, 4 MiB stdout + stderr, tamper i Job Object fault injection |
-| T07 Guidance/CI | README wskazuje repo-local runtime, a historyczny snapshot podaje swój zakres czasowy. CI uruchamia regresje zmienionych producentów. | Aktualny czysty source subject i wyniki faktycznie wykonanych gate |
+| T07 Guidance/CI | README wskazuje repo-local runtime, a historyczny snapshot podaje swój zakres czasowy. CI uruchamia regresje zmienionych producentów. | `test_remediation_guidance.py`, aktualny czysty source subject i wykonane gate |
 
 ## Authority, capacity i recovery
 
@@ -31,3 +31,7 @@ Raw artefakt jest utrwalany również dla małego outputu; presentation/redactio
 ## Release evidence
 
 Aktualne wyniki i source identities są zapisywane w `artifacts/remediation-20261002/`. Źródłowy harness nie potwierdza załadowanej identity Chrome. Przygotowanie maintenance nie jest aktywacją. Readback ACTIVE i realny Browser witness należy dopisać dopiero po konkretnym zatwierdzonym transition i reload używanego profilu.
+
+Historyczny gate NX-070 kwalifikuje zmianę wyłącznie dokumentacyjną względem swojego source subject i sierpniowej obserwacji Bootstrap. Zachowuje te warunki; nie jest release gate tego zadania implementacyjnego. Aktualne guidance ma osobny test runtime resolvera, zakresu czasowego snapshotu oraz aktywnego CI.
+
+Przed publikacją nowego Bootstrap procedura maintenance odtwarza stare routes/client bytes w razie awarii. Po publikacji obowiązuje istniejący `ROLL_FORWARD_ONLY`. Nowy pointer retencji v1 wymaga readera z tej generacji; PREVIOUS nie służy do odczytu nowej historii przez stary reader.
