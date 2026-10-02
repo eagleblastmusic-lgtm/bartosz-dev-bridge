@@ -1,11 +1,39 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 from .projects import PreparePlan, PrepareResult, ProjectPrepareService
+
+
+@dataclass(frozen=True)
+class WorkflowOutcome:
+    key: str
+    result: Any = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+class WorkflowWorker(QRunnable):
+    """Run the active vNext API using the existing Qt worker/signals pattern."""
+
+    def __init__(self, key: str, operation: Callable[[], Any]) -> None:
+        super().__init__()
+        self.key = key
+        self.operation = operation
+        self.signals = PlanWorkerSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            outcome = WorkflowOutcome(self.key, result=self.operation())
+        except Exception as exc:
+            import subprocess
+            code = "command_timeout" if isinstance(exc, subprocess.TimeoutExpired) else getattr(exc, "code", "workflow_internal_error")
+            outcome = WorkflowOutcome(self.key, error_code=code, error_message=str(exc))
+        self.signals.completed.emit(outcome)
 
 
 @dataclass(frozen=True)

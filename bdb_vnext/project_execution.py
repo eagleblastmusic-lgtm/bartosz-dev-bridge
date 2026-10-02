@@ -31,7 +31,7 @@ from .binding_lifecycle import (
     validate_binding_transition,
 )
 from .project_catalog import ProjectCatalog, ProjectPlan, ProjectRecord, ProjectTask
-from .project_memory import ProjectMemoryState, ProjectMemoryStore, available_project_tasks, milestone_auto_progress, task_prerequisite_blockers
+from .project_memory import ProjectMemoryError, ProjectMemoryState, ProjectMemoryStore, available_project_tasks, milestone_auto_progress, task_prerequisite_blockers, validate_execution_document
 from .result_identity import (
     CURRENT_IDENTITY_VERSION,
     IDENTITY_VERSION_V1,
@@ -302,18 +302,10 @@ def _execution_document(state: ProjectMemoryState) -> dict[str, Any]:
     result.setdefault("launch_outbox", {})
     result.setdefault("completion_invalidations", [])
     result.setdefault("code_evidence_retries", [])
-    for key in ("bindings", "attempts", "acceptance_results", "completion_invalidations", "code_evidence_retries"):
-        if not isinstance(result[key], list) or len(result[key]) > 512 or any(not isinstance(item, Mapping) for item in result[key]):
-            _fail("execution_shape_invalid", f"execution.{key} is invalid")
-    if not isinstance(result["task_statuses"], Mapping) or len(result["task_statuses"]) > 2_048:
-        _fail("execution_shape_invalid", "execution.task_statuses is invalid")
-    if not isinstance(result["milestone_runs"], Mapping) or len(result["milestone_runs"]) > 128:
-        _fail("execution_shape_invalid", "execution.milestone_runs is invalid")
-    if not isinstance(result["checkpoints"], Mapping) or len(result["checkpoints"]) > 512:
-        _fail("execution_shape_invalid", "execution.checkpoints is invalid")
-    for key in ("gate_statuses", "open_question_statuses", "launch_handoffs", "launch_outbox"):
-        if not isinstance(result[key], Mapping) or len(result[key]) > 512:
-            _fail("execution_shape_invalid", f"execution.{key} is invalid")
+    try:
+        validate_execution_document(result, bounded=False)
+    except ProjectMemoryError as exc:
+        raise ProjectExecutionError("execution_shape_invalid", str(exc)) from exc
     return result
 
 

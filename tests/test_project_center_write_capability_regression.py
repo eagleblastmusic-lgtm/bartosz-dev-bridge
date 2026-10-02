@@ -212,7 +212,13 @@ def test_real_gui_continue_uses_canonical_workflow(tmp_path: Path, monkeypatch: 
     try:
         assert window._auto_continue_button.isEnabled()
         window._auto_continue_button.click()
-        app.processEvents()
+        from PySide6.QtTest import QTest
+        for _ in range(250):
+            if not window._operations: break
+            QTest.qWait(20)
+            import time
+            time.sleep(0.005)
+        assert not window._operations
         if delivery_failure:
             assert "queue_write_failed" in window._status.text()
             assert "TASK_IN_PROGRESS" not in window._status.text()
@@ -224,6 +230,11 @@ def test_real_gui_continue_uses_canonical_workflow(tmp_path: Path, monkeypatch: 
             assert workflow.execution.snapshot(project_id)["current_binding_id"] == launch.execution_binding_id
             assert "QUEUED" in window._status.text()
             window._auto_continue_button.click()
+            for _ in range(250):
+                if not window._operations: break
+                QTest.qWait(20)
+                time.sleep(0.005)
+            assert not window._operations
             assert workflow.queue.peek().launch_id == launch.launch_id
             assert len(workflow.execution.snapshot(project_id)["bindings"]) == 1
     finally:

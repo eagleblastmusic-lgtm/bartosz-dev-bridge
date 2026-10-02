@@ -139,13 +139,13 @@ Legacy host `com.bartosz.dev_bridge` nie jest hostem vNext Project Execution.
 Canonical vNext runtime root:
 
 ```text
-%LOCALAPPDATA%\BartoszDevBridge-vNext
+<repo>\runtime
 ```
 
 Docelowy client layout:
 
 ```text
-BartoszDevBridge-vNext\
+runtime\
 ├─ clients\
 │  ├─ browser-extension\
 │  ├─ native-host\
@@ -155,6 +155,11 @@ BartoszDevBridge-vNext\
 ```
 
 Branch HEAD i aktualnie zainstalowany runtime są odrębnymi faktami. Wersję produkcyjną należy potwierdzać przez source identity/client plan/digests i aktywne authority, a nie przez założenie, że najnowszy commit jest już wdrożony.
+
+W tym checkoutcie resolver wskazuje `C:\Projekty\DevMaster\bartosz-dev-bridge-vnext\runtime`.
+Chroniona authority Bootstrap znajduje się osobno w `C:\ProgramData\BartoszDevBridge-Next\bootstrap`.
+Procedura przygotowania pakietu i zatwierdzenia maintenance jest opisana w
+[VNEXT_PRODUCTION_RUNTIME.md](docs/VNEXT_PRODUCTION_RUNTIME.md). Załadowaną identity rozszerzenia należy potwierdzić w używanym profilu Chrome po reload.
 
 Production admission wymaga zgodności zewnętrznego Bootstrap ACTIVE, M9b Browser/Native gate oraz M3c intake/admission.
 

@@ -132,6 +132,17 @@ async function digestBytes(bytes) {
   return `sha256:${Array.from(hash, (v) => v.toString(16).padStart(2, "0")).join("")}`;
 }
 
+async function admissionDigest(payload) {
+  // Match the canonical M3a semantic producer, including its terminal newline.
+  const omitted = new Set(["inventory_id", "observed_at", "started_at", "finished_at", "duration_ms", "mtime_ns", "ctime_ns", "message", "semantic_digest", "representation", "sanitization"]);
+  function semantic(value) {
+    if (Array.isArray(value)) return value.map(semantic);
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([key]) => !omitted.has(key)).map(([key, item]) => [key, semantic(item)]));
+    return value;
+  }
+  return digestBytes(new TextEncoder().encode(canonicalJson(semantic(payload)) + "\n"));
+}
+
 function validateNativeResponse(response) {
   const value = object(response, "native response");
   if (
@@ -163,7 +174,7 @@ async function canonicalRequest(input) {
   if (typeof source.expected_intent_revision_id === "string" && source.expected_intent_revision_id) {
     payload.expected_intent_revision_id = source.expected_intent_revision_id;
   }
-  const request_digest = await digest(payload);
+  const request_digest = await admissionDigest(payload);
   const request = { ...payload, request_digest };
   if (new TextEncoder().encode(JSON.stringify(request)).byteLength > MAX_REQUEST_BYTES) {
     throw new Error("Canonical request exceeds Browser bound");
@@ -301,10 +312,30 @@ async function mutateEntry(key, updater) {
     const entries = { ...outbox.entries };
     const next = updater(entries[key] || null);
     if (next === null) delete entries[key]; else entries[key] = next;
-    if (Object.keys(entries).length > MAX_ENTRIES) throw new Error("vNext Browser outbox quota is full");
+    if (Object.keys(entries).length > MAX_ENTRIES) {
+      // Only a matching durable Native lookup permits eviction. SENT/UNKNOWN
+      // remain recovery evidence even when the profile has reached its quota.
+      for (const entry of Object.values(entries)) {
+        if (Object.keys(entries).length <= MAX_ENTRIES - 32) break;
+        if (!entry || entry.submission_key === key || entry.state !== "ACKED") continue;
+        const response = await sendNative(native("admission.lookup", {
+          submission_key: entry.submission_key, request_digest: entry.request_digest
+        }));
+        if (response.status === "success" && exactAdmissionReceipt(response.receipt, entry.submission_key, entry.request_digest)) {
+          delete entries[entry.submission_key];
+        }
+      }
+      if (Object.keys(entries).length > MAX_ENTRIES) throw new Error("vNext Browser outbox quota is full");
+    }
     await chrome.storage.local.set({ [OUTBOX_KEY]: { schema: OUTBOX_SCHEMA, entries } });
     return next;
   });
+}
+
+function exactAdmissionReceipt(receipt, key, digest) {
+  return receipt && receipt.submission_key === key && receipt.request_digest === digest &&
+    ((receipt.status === "ACCEPTED" && typeof receipt.task_id === "string" && typeof receipt.intent_revision_id === "string") ||
+     (receipt.status === "TOMBSTONED" && receipt.task_id === null));
 }
 
 async function prepare(request) {
@@ -333,10 +364,15 @@ async function submit(input) {
     if (recovered.receipt) return { ok: true, replay: true, receipt: recovered.receipt };
     return { ok: false, uncertain: true, submission_key: current.submission_key, request_digest: current.request_digest };
   }
+  // A retained-out ACK can only be recovered from canonical authority. This
+  // also rejects a conflicting digest before a new admission send.
+  const prior = await lookup(current.submission_key, current.request_digest);
+  if (!prior.ok) return prior;
+  if (prior.receipt) return { ok: true, replay: true, receipt: prior.receipt };
   await transition(request.submission_key, "SENT");
   try {
     const response = await sendNative(native("admission.submit", { request }));
-    if (response.status !== "success" || !response.receipt) {
+    if (response.status !== "success" || !exactAdmissionReceipt(response.receipt, request.submission_key, request.request_digest)) {
       await transition(request.submission_key, "UNKNOWN");
       return { ok: false, uncertain: true, response };
     }
@@ -354,7 +390,10 @@ async function lookup(submissionKey, requestDigest) {
   }
   const response = await sendNative(native("admission.lookup", { submission_key: submissionKey, request_digest: requestDigest }));
   if (response.status !== "success") return { ok: false, response };
-  if (response.receipt) await transition(submissionKey, "ACKED", response.receipt);
+  if (response.receipt) {
+    if (!exactAdmissionReceipt(response.receipt, submissionKey, requestDigest)) throw new Error("canonical admission receipt identity mismatch");
+    await mutateEntry(submissionKey, current => current ? { ...current, state: "ACKED", receipt: response.receipt } : null);
+  }
   return { ok: true, receipt: response.receipt || null };
 }
 

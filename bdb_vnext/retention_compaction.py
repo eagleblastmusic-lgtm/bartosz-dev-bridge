@@ -15,6 +15,7 @@ Implements:
 from __future__ import annotations
 
 import enum
+import copy
 import hashlib
 import json
 import sqlite3
@@ -182,6 +183,17 @@ class ContentAddressedStore:
             (content_ref,),
         ).fetchone()
         return row is not None
+
+    @staticmethod
+    def resolve_verified(conn: sqlite3.Connection, content_ref: str) -> str:
+        row = conn.execute("SELECT payload, digest, size_bytes FROM content_blobs WHERE content_ref = ?", (content_ref,)).fetchone()
+        if row is None:
+            raise ValueError("retention content is missing")
+        payload, digest, size = row
+        raw = payload.encode("utf-8")
+        if _sha256_hex(raw) != digest or len(raw) != size or content_ref != f"cref:{digest}:{size}":
+            raise ValueError("retention content integrity differs")
+        return payload
 
     def verify_corpus_integrity(self) -> tuple[bool, int, list[str]]:
         """Verifies no collisions and no corrupted digests in CAS."""
@@ -480,6 +492,93 @@ class RetentionCompactionController:
             );
         """)
         self.conn.commit()
+
+    @staticmethod
+    def project_v1(document: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Bound v1's physical projection; archive only audit/terminal records.
+
+        The pointer in memory.json remains authority. CAS is immutable content,
+        not a second writable project state. Slots preserve exact list order.
+        """
+        live = copy.deepcopy(dict(document))
+        archive: dict[str, Any] = {"schema": "bdb-vnext-v1-retention-content-v1", "project_id": document["project_id"], "lists": {}, "maps": {}}
+        events = live.get("events", [])
+        prefix_count = max(0, (len(events) // 1024 - 1) * 1024)
+        if prefix_count:
+            archive["events"] = events[:prefix_count]
+            live["events"] = events[prefix_count:]
+        else:
+            archive["events"] = []
+        execution = live.get("execution", {})
+        current_binding = execution.get("current_binding_id")
+        active_run = execution.get("active_milestone_run") or {}
+        statuses = execution.get("task_statuses", {})
+        terminal_bindings = {item.get("execution_binding_id") for item in execution.get("bindings", [])
+                             if item.get("status") in {"ACCEPTED", "SUPERSEDED"} and item.get("execution_binding_id") != current_binding
+                             and statuses.get(item.get("task_id")) in {"completed", "skipped"}}
+
+        def split_list(container: dict[str, Any], key: str, path: str, eligible: Callable[[Mapping[str, Any]], bool]) -> None:
+            rows = container.get(key, [])
+            cutoff = max(0, (len(rows) // 128 - 1) * 128)
+            if not cutoff: return
+            slots = [row if index < cutoff and eligible(row) else None for index, row in enumerate(rows)]
+            if any(row is not None for row in slots):
+                archive["lists"][path] = slots
+                container[key] = [row for index, row in enumerate(rows) if slots[index] is None]
+                while slots and slots[-1] is None: slots.pop()
+
+        for key in ("bindings", "attempts", "acceptance_results", "completion_invalidations", "code_evidence_retries"):
+            def eligible(row: Mapping[str, Any], key: str = key) -> bool:
+                if key == "completion_invalidations": return True  # immutable audit
+                if key == "bindings": return row.get("execution_binding_id") in terminal_bindings
+                if key == "acceptance_results": return row.get("overall") == "PASS" and statuses.get(row.get("task_id")) in {"completed", "skipped"}
+                return row.get("execution_binding_id") in terminal_bindings and (key != "attempts" or row.get("result_status") == "PASS")
+            split_list(execution, key, f"execution.{key}", eligible)
+        for key in ("milestone_runs", "launch_outbox", "launch_handoffs", "checkpoints"):
+            rows = execution.get(key, {})
+            cutoff = max(0, (len(rows) // 64 - 1) * 64)
+            if not cutoff: continue
+            archived = {}
+            for identifier, row in list(rows.items())[:cutoff]:
+                if not isinstance(row, Mapping): continue
+                safe = (key == "milestone_runs" and row.get("status") in {"completed", "stopped"} and identifier != active_run.get("milestone_run_id")) or (
+                    key != "milestone_runs" and row.get("execution_binding_id", identifier) in terminal_bindings
+                    and (key != "launch_outbox" or row.get("status") == "ACKNOWLEDGED")
+                    and (key != "launch_handoffs" or row.get("status") == "SENT"))
+                if safe: archived[identifier] = rows.pop(identifier)
+            if archived: archive["maps"][f"execution.{key}"] = archived
+        for key in ("decisions", "inbox", "risks", "technical_debt", "attention", "checkpoints"):
+            split_list(live, key, key, lambda row, key=key: key == "checkpoints" or row.get("status") in {"resolved", "superseded"})
+        return live, archive
+
+    @staticmethod
+    def rehydrate_v1(live: Mapping[str, Any], archive: Mapping[str, Any]) -> dict[str, Any]:
+        if archive.get("schema") != "bdb-vnext-v1-retention-content-v1" or archive.get("project_id") != live.get("project_id"):
+            raise ValueError("retention archive identity differs")
+        result = copy.deepcopy(dict(live))
+        result.pop("retention", None)
+        result["events"] = list(archive["events"]) + result.get("events", [])
+        for path, slots in archive["lists"].items():
+            container, key = (result["execution"], path.split(".", 1)[1]) if path.startswith("execution.") else (result, path)
+            iterator = iter(container.get(key, []))
+            rows = [next(iterator) if row is None else row for row in slots]
+            rows.extend(iterator)
+            container[key] = rows
+        for path, rows in archive["maps"].items():
+            key = path.split(".", 1)[1]
+            if set(rows) & set(result["execution"].get(key, {})): raise ValueError("duplicate retained identity")
+            result["execution"][key] = {**rows, **result["execution"].get(key, {})}
+        return result
+
+    def compact_v1(self, document: Mapping[str, Any]) -> dict[str, Any]:
+        live, archive = self.project_v1(document)
+        if not archive["events"] and not archive["lists"] and not archive["maps"]: return live
+        reference = self.cas.store_content(archive)  # durable content before authority replace
+        verified = json.loads(ContentAddressedStore.resolve_verified(self.conn, reference))
+        if self.rehydrate_v1(live, verified) != document: raise ValueError("v1 retention logical parity failed")
+        live["retention"] = {"schema": "bdb-vnext-v1-retention-v1", "archive_ref": reference,
+                             "logical_digest": _sha256_hex(_canonical_json_str(document)), "event_offset": len(archive["events"])}
+        return live
 
     def register_entity(
         self,

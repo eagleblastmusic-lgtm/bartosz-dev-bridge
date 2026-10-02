@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import shutil
 import threading
 import time
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .execution_policy import PolicyDecision, canonicalize_path
+from .output_cancellation_hardening import HardenedOutputEvidenceFactory
 from .local_execution_contract import (
     ExecutionOutputEvidence,
     INLINE_OUTPUT_BYTE_LIMIT,
@@ -130,6 +132,12 @@ class WindowsJobObject:
         if os.name == "nt":
             try:
                 kernel32 = ctypes.windll.kernel32
+                kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+                kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+                kernel32.SetInformationJobObject.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+                kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+                kernel32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+                kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
                 # CreateJobObjectW(lpJobAttributes=NULL, lpName=NULL)
                 self.handle = kernel32.CreateJobObjectW(None, None)
                 if self.handle:
@@ -170,12 +178,15 @@ class WindowsJobObject:
                     info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
                     info.BasicLimitInformation.LimitFlags = 0x00002000  # KILL_ON_JOB_CLOSE
                     JobObjectExtendedLimitInformation = 9
-                    kernel32.SetInformationJobObject(
+                    configured = kernel32.SetInformationJobObject(
                         self.handle,
                         JobObjectExtendedLimitInformation,
                         ctypes.byref(info),
                         ctypes.sizeof(info),
                     )
+                    if not configured:
+                        kernel32.CloseHandle(self.handle)
+                        self.handle = None
             except Exception:
                 self.handle = None
 
@@ -213,7 +224,7 @@ def kill_process_tree(pid: int) -> None:
         )
     else:
         try:
-            os.kill(pid, 9)
+            os.killpg(pid, 9)
         except OSError:
             pass
 
@@ -240,7 +251,7 @@ class StatelessWindowsProcessRunner:
     ) -> LocalExecutionResult:
         """Execute request under policy decision, managing streams, timeout, and process lifecycle."""
         started_at = datetime.now(timezone.utc).isoformat()
-        start_time = time.time()
+        start_time = time.monotonic()
 
         # 1. Revalidate policy immediately before process spawn (TOCTOU defense)
         if not policy_decision.revalidate(request, current_head, current_tree, candidate_root):
@@ -290,6 +301,15 @@ class StatelessWindowsProcessRunner:
 
         # Validate executable presence
         target_executable = argv_list[0]
+        from .tool_adapters import resolve_command_executable, classify_command, is_trusted_read_executable
+        resolved_executable = resolve_command_executable(target_executable)
+        derived_effect, _, _ = classify_command(request)
+        if derived_effect.value == "READ_ONLY" and not is_trusted_read_executable(target_executable, Path(candidate_root)):
+            raise LocalExecutionContractError("command_classification_invalid", "Read-only executable is no longer trusted")
+        if resolved_executable:
+            argv_list[0] = str(Path(resolved_executable).resolve())
+        else:
+            raise LocalExecutionContractError("executable_unavailable", f"Executable cannot be resolved from the host environment: {target_executable}")
         # Resolve CWD
         cwd_path = Path(policy_decision.canonical_cwd)
         if not cwd_path.exists():
@@ -310,13 +330,19 @@ class StatelessWindowsProcessRunner:
             )
 
         # 4. Prepare Environment
-        proc_env = os.environ.copy()
+        proc_env = {key: value for key, value in os.environ.items()
+                    if key.upper() in {"SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATH", "PATHEXT", "COMSPEC", "USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"}}
         proc_env.update(request.env_vars)
+        proc_env["GIT_OPTIONAL_LOCKS"] = "0"
 
         # 5. Spawn Process under Job Object
         job = WindowsJobObject()
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
+        if os.name == "nt" and not job.handle:
+            raise LocalExecutionContractError("process_containment_failed", "Cannot create/configure the Windows Job Object")
+        output_root = Path(candidate_root)
+        stdout_capture = HardenedOutputEvidenceFactory.capture_stream("stdout", output_root)
+        stderr_capture = HardenedOutputEvidenceFactory.capture_stream("stderr", output_root)
+        stream_errors: list[Exception] = []
 
         timed_out = False
         cancelled = False
@@ -331,30 +357,42 @@ class StatelessWindowsProcessRunner:
                 stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL if request.stdin_policy.value == "DISABLED" else subprocess.PIPE,
                 shell=False,
+                **({"creationflags": 0x08000004} if os.name == "nt" else {"start_new_session": True}),
             )
 
-            # Assign process to Windows Job Object
-            if proc._handle:
-                job.assign_process(proc._handle)
+            # The Windows process is suspended until containment is proven.
+            # No user code can spawn an uncontained child before assignment.
+            if os.name == "nt":
+                if not job.assign_process(proc._handle):
+                    proc.kill()
+                    proc.wait(timeout=5)
+                    raise LocalExecutionContractError("process_containment_failed", "Windows Job Object assignment failed before resume")
+                resume = ctypes.windll.ntdll.NtResumeProcess
+                resume.argtypes = [ctypes.c_void_p]
+                resume.restype = ctypes.c_long
+                if resume(proc._handle) != 0:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                    raise LocalExecutionContractError("process_containment_failed", "Contained process could not be resumed")
 
             # 6. Concurrent Stream Reader Threads (prevent deadlock)
-            def read_stream(stream, chunks: list[bytes]) -> None:
+            def read_stream(stream, capture) -> None:
                 try:
                     while True:
                         data = stream.read(8192)
                         if not data:
                             break
-                        chunks.append(data)
-                except Exception:
-                    pass
+                        capture.append(data)
+                except Exception as exc:
+                    stream_errors.append(exc)
                 finally:
                     try:
                         stream.close()
                     except Exception:
                         pass
 
-            t_out = threading.Thread(target=read_stream, args=(proc.stdout, stdout_chunks), daemon=True)
-            t_err = threading.Thread(target=read_stream, args=(proc.stderr, stderr_chunks), daemon=True)
+            t_out = threading.Thread(target=read_stream, args=(proc.stdout, stdout_capture), daemon=True)
+            t_err = threading.Thread(target=read_stream, args=(proc.stderr, stderr_capture), daemon=True)
             t_out.start()
             t_err.start()
 
@@ -367,7 +405,7 @@ class StatelessWindowsProcessRunner:
                 if ret is not None:
                     break
 
-                elapsed = time.time() - start_time
+                elapsed = time.monotonic() - start_time
                 if elapsed > timeout_limit:
                     timed_out = True
                     break
@@ -378,6 +416,11 @@ class StatelessWindowsProcessRunner:
                     break
 
                 time.sleep(poll_interval)
+
+            # A completed parent may have left descendants holding its pipes.
+            # Close containment before joining readers, preserving bounded wait.
+            if not timed_out and not cancelled:
+                job.close()
 
             if timed_out or cancelled:
                 # Terminate Job Object and kill full process tree
@@ -390,6 +433,13 @@ class StatelessWindowsProcessRunner:
 
             t_out.join(timeout=2.0)
             t_err.join(timeout=2.0)
+            if t_out.is_alive() or t_err.is_alive():
+                kill_process_tree(proc.pid)
+                t_out.join(timeout=2.0)
+                t_err.join(timeout=2.0)
+                if t_out.is_alive() or t_err.is_alive():
+                    raise LocalExecutionContractError("output_capture_incomplete", "Output streams did not reach EOF after containment closed")
+            proc.wait(timeout=5)
             exit_code = proc.poll() if proc.poll() is not None else (124 if timed_out else (130 if cancelled else -1))
 
         except FileNotFoundError as e:
@@ -408,14 +458,40 @@ class StatelessWindowsProcessRunner:
                 adapter_id=request.adapter_id,
                 status=MechanicalExecutionStatus.FAILED_TO_START,
             )
+        except Exception:
+            job.terminate()
+            if 'proc' in locals():
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except OSError:
+                    pass
+            if 't_out' in locals():
+                t_out.join(timeout=2)
+                t_err.join(timeout=2)
+            stdout_capture.close()
+            stderr_capture.close()
+            raise
         finally:
             job.close()
+            if 'proc' not in locals() or ('t_out' not in locals()):
+                if 'proc' in locals():
+                    proc.stdout.close()
+                    proc.stderr.close()
+                stdout_capture.close()
+                stderr_capture.close()
 
         # 8. Assemble Evidence & Decoupled Result
-        raw_stdout = b"".join(stdout_chunks)
-        raw_stderr = b"".join(stderr_chunks)
+        try:
+            stdout_evidence = stdout_capture.finish()
+            stderr_evidence = stderr_capture.finish()
+        finally:
+            stdout_capture.close()
+            stderr_capture.close()
+        if stream_errors:
+            raise LocalExecutionContractError("output_capture_incomplete", f"Raw output capture failed: {stream_errors[0]}")
         completed_at = datetime.now(timezone.utc).isoformat()
-        duration_ms = max(0, int((time.time() - start_time) * 1000))
+        duration_ms = max(0, int((time.monotonic() - start_time) * 1000))
 
         if timed_out:
             status = MechanicalExecutionStatus.TIMED_OUT
@@ -431,8 +507,8 @@ class StatelessWindowsProcessRunner:
             completed_at=completed_at,
             duration_ms=duration_ms,
             exit_code=exit_code,
-            stdout=ExecutionOutputEvidence.from_bytes("stdout", raw_stdout),
-            stderr=ExecutionOutputEvidence.from_bytes("stderr", raw_stderr),
+            stdout=stdout_evidence,
+            stderr=stderr_evidence,
             observed_source_head=current_head,
             observed_source_tree=current_tree,
             adapter_id=request.adapter_id,

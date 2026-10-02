@@ -305,6 +305,10 @@ def discover_v1_inventory(source_input: Path | str | dict[str, Any]) -> V1Source
     schema_ver = str(data.get("schema") or data.get("schema_version") or "unknown")
     proj_id = str(data.get("project_id") or "")
 
+    if "retention" in data:
+        return V1SourceInventory(source_path_str, schema_ver, proj_id, False, False, False, True, {}, {}, raw_digest,
+                                 "Retained v1 authority requires ProjectMemoryStore.export_archive(); a memory.json tail cannot be imported alone")
+
     # Check for unsupported version
     if schema_ver not in ("bdb-vnext-project-memory-v1", "1.0.0", "1.0", "1"):
         return V1SourceInventory(
@@ -418,6 +422,8 @@ class V1BackupService:
         backup_id: str | None = None,
     ) -> V1BackupManifest:
         """Create byte-verified immutable backup."""
+        if not inventory.is_valid:
+            raise ValueError(f"Cannot back up an unsupported migration source: {inventory.error_message}")
         now_str = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
         if isinstance(source_input, (Path, str)):
@@ -589,6 +595,8 @@ class V1ToV2Importer:
         interruption_after_step: str | None = None,
     ) -> Mapping[str, int]:
         """Execute lossless idempotent import with optional interruption injection for recovery testing."""
+        if "retention" in v1_data:
+            raise ValueError("Retained v1 authority must be exported and verified before shadow import")
         if not inventory.is_valid:
             self._journal.record_step("PROJECT", inventory.project_id, "FAILED", error_message=inventory.error_message)
             self._journal.set_status(ImportStatus.FAILED)

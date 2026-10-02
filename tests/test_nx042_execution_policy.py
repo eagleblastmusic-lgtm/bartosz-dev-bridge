@@ -97,7 +97,7 @@ def _make_req(exec_id: str = "exec:policy-1", **kwargs: Any) -> lec.LocalExecuti
         "project_id": "proj:policy-test",
         "adapter_id": "process.raw",
         "mode": lec.ExecutionMode.ARGV,
-        "argv": ("python", "-c", "print(1)"),
+        "argv": ("python", "-I", "-S", "-c", "print(1)"),
         "cwd": ".",
         "env_id": "env:default",
         "expected_source_head": "a" * 40,

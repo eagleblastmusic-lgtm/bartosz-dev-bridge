@@ -13,7 +13,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QThreadPool, QTimer, Qt, Signal, Slot
+from .project_workers import WorkflowOutcome, WorkflowWorker
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -138,6 +139,7 @@ class _WorkPlanningDialog(QDialog):
         self.setObjectName("WorkPlanningPromptDialog")
         self.resize(900, 700)
         self._build_prompt = build_prompt
+        self._prompt_worker: WorkflowWorker | None = None
         layout = QVBoxLayout(self)
         heading = QLabel(f"Projekt: {project.display_name} ({project.project_id})")
         heading.setObjectName("WorkPlanningProjectIdentity")
@@ -181,13 +183,25 @@ class _WorkPlanningDialog(QDialog):
         layout.addWidget(close)
 
     def _generate_prompt(self) -> None:
-        try:
-            result = self._build_prompt(self._directive.toPlainText())
-        except ProjectWorkflowError as exc:
+        if self._prompt_worker is not None: return
+        directive = self._directive.toPlainText()
+        self._prompt_worker = WorkflowWorker("work_prompt", lambda: self._build_prompt(directive))
+        self._prompt_worker.signals.completed.connect(self._prompt_generated, Qt.ConnectionType.QueuedConnection)
+        self._generate.setEnabled(False)
+        self._copy.setEnabled(False)
+        self._validation.setText("Przygotowanie promptu…")
+        QThreadPool.globalInstance().start(self._prompt_worker)
+
+    @Slot(object)
+    def _prompt_generated(self, outcome: WorkflowOutcome) -> None:
+        self._prompt_worker = None
+        self._generate.setEnabled(True)
+        if outcome.error_code:
             self._copy.setEnabled(False)
             self._preview.clear()
-            self._validation.setText(f"Nie można przygotować promptu: {exc.code} — {exc}")
+            self._validation.setText(f"Nie można przygotować promptu: {outcome.error_code} — {outcome.error_message}")
             return
+        result = outcome.result
         self._preview.setPlainText(result.prompt)
         self._copy.setEnabled(True)
         self._validation.setText(f"Wygenerowano prompt dla Work · {result.mode} · schema {result.schema_digest}")
@@ -250,7 +264,91 @@ class ProjectCenterWindow(QMainWindow):
         self._mutation_operations_invoked = 0
         self._pending_plan_preview: Any | None = None
         self._pending_plan_path: str | None = None
+        self._thread_pool = QThreadPool.globalInstance()
+        self._operations: dict[str, tuple[WorkflowWorker, Callable[[Any], None]]] = {}
+        self._auto_stop_requests: set[str] = set()
+        self._projection_cache: tuple[str, dict[str, Any]] | None = None
         self._build_shell()
+        self._projection_timer = QTimer(self)
+        self._projection_timer.setInterval(1500)
+        self._projection_timer.timeout.connect(self._poll_project_projection)
+        self._projection_timer.start()
+
+    def _cached_projection(self, project: ProjectRecord) -> dict[str, Any] | None:
+        return self._projection_cache[1] if self._projection_cache and self._projection_cache[0] == project.project_id else None
+
+    def _run_workflow(self, key: str, label: str, operation: Callable[[], Any], completed: Callable[[Any], None]) -> bool:
+        if key in self._operations or (key not in {"projection", "stop"} and any(k != "projection" for k in self._operations)):
+            return False
+        worker = WorkflowWorker(key, operation)
+        self._operations[key] = (worker, completed)
+        worker.signals.completed.connect(self._workflow_completed, Qt.ConnectionType.QueuedConnection)
+        if key != "projection":
+            self._status.setText(f"BDB: {label}…")
+            self._set_project_action_state()
+            self._projection_cache = None
+        self._thread_pool.start(worker)
+        return True
+
+    def drain_operations(self, timeout: float = 5.0) -> None:
+        from PySide6.QtTest import QTest
+        import time
+        end = time.monotonic() + timeout
+        while self._operations and time.monotonic() < end:
+            QTest.qWait(20)
+            time.sleep(0.005)
+        if self._operations:
+            raise TimeoutError("Workflow operations did not complete within timeout")
+
+    @Slot(object)
+    def _workflow_completed(self, outcome: WorkflowOutcome) -> None:
+        entry = self._operations.pop(outcome.key, None)
+        if entry is None:
+            return
+        if outcome.key == "projection" and self._operations:
+            return
+        if outcome.error_code:
+            logging.getLogger(__name__).error("%s: %s — %s", outcome.key, outcome.error_code, outcome.error_message)
+            self._status.setText(f"BDB: operacja zatrzymana — {outcome.error_code}: {outcome.error_message}")
+        else:
+            try:
+                entry[1](outcome.result)
+            except Exception as exc:
+                logging.getLogger(__name__).exception("Workflow result projection failed")
+                self._status.setText(f"BDB: wynik wymaga odświeżenia — {getattr(exc, 'code', 'projection_failed')}: {exc}")
+        if outcome.key != "projection": self._set_project_action_state()
+
+    def _poll_project_projection(self) -> None:
+        if not self._bootstrap_ok or self._operations or self._current_project_id is None:
+            return
+        project_id = self._current_project_id
+        project = next((item for item in self._projects if item.project_id == project_id), None)
+        if project is None: return
+        commands = self._auto_commands_for_project(project)
+        def read_projection() -> tuple[Any, ...]:
+            projects = self._catalog.read()
+            memory = self._workflow.memory(project_id)
+            state = memory.read_state()
+            plan = memory.current_plan()
+            return projects, {"state": state, "plan": plan, "versions": memory.plan_versions(),
+                              "capacity": memory.capacity_status(), "execution": self._workflow.execution.snapshot(project_id),
+                              "canonical": commands.snapshot(plan_available=plan is not None, plan_version=plan.plan_version if plan else None)}
+        def show_projection(result: tuple[Any, ...]) -> None:
+            if self._current_project_id == project_id:
+                self._projects = result[0]
+                self._projection_cache = (project_id, result[1])
+                current = next((item for item in self._projects if item.project_id == project_id), None)
+                if current is None: return
+                self._project_progress.setText(f"Postęp: {current.completed_tasks}/{current.total_tasks}" if current.plan_imported else "Nie zaimportowano planu projektu.")
+                self._project_detail.setPlainText(json.dumps(current.to_dict(), ensure_ascii=False, sort_keys=True, indent=2))
+                for row, item in enumerate(self._projects):
+                    if row < self._project_table.rowCount():
+                        self._project_table.setItem(row, 1, QTableWidgetItem(item.project_status))
+                        self._project_table.setItem(row, 2, QTableWidgetItem(f"{item.completed_tasks}/{item.total_tasks}"))
+                self._render_memory(current)
+                self._render_execution(current)
+                self._set_project_action_state()
+        self._run_workflow("projection", "Odczyt projektu", read_projection, show_projection)
 
     def _build_shell(self) -> None:
         host = QWidget(self); root = QVBoxLayout(host)
@@ -641,19 +739,8 @@ class ProjectCenterWindow(QMainWindow):
 
     def start_bootstrap(self) -> None:
         self._bootstrap_completed = False; self._bootstrap_ok = False; self._bootstrap_error_code = None; self._status.setText("BDB: odczyt canonical state…")
-        try:
-            from bdb_vnext.m9b_reconciliation import ensure_post_active_m9b_reconciled
-            config_path = self._runtime_root / "config" / "native-host.json"
-            if config_path.is_file():
-                try:
-                    config = json.loads(config_path.read_text(encoding="utf-8"))
-                    auth_root = config.get("bootstrap_authority_root")
-                    if auth_root:
-                        ensure_post_active_m9b_reconciled(authority_root=auth_root, deployed_runtime_root=self._runtime_root)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        # Projection is read-only. Canonical Native/maintenance operations own
+        # reconciliation and expose its receipt; a GUI refresh never runs it.
         try:
             self._snapshot = self._snapshot_loader(self._runtime_root)
             self._projects = self._catalog.read()
@@ -698,6 +785,7 @@ class ProjectCenterWindow(QMainWindow):
         self._select_project(str(item.data(32))); self.select_page("Current project")
 
     def _select_project(self, project_id: str | None) -> None:
+        self._projection_cache = None
         self._current_project_id = project_id
         self._auto_selected_scope = DEFAULT_AUTO_SCOPE
         self._auto_scope_user_changed = False
@@ -744,7 +832,9 @@ class ProjectCenterWindow(QMainWindow):
         review = False
         if has_project and not is_ro:
             try:
-                review = self._workflow.execution.snapshot(project.project_id).get("task_statuses", {}).get(project.current_task or "") == "review"
+                projection = self._cached_projection(project)
+                execution = projection["execution"] if projection else self._workflow.execution.snapshot(project.project_id)
+                review = execution.get("task_statuses", {}).get(project.current_task or "") == "review"
             except Exception:
                 review = False
         self._approve_review_button.setEnabled(review and not is_ro)
@@ -756,6 +846,18 @@ class ProjectCenterWindow(QMainWindow):
                 btn.setAccessibleDescription(read_only_tip)
         self._render_auto(project)
         self._render_environment(project)
+        if any(key != "projection" for key in self._operations):
+            for button in (self._import_plan_button, self._plan_prompt_button, self._work_prompt_button,
+                           self._start_button, self._continue_button, self._handoff_button,
+                           self._approve_review_button, self._changes_review_button, self._project_review_button,
+                           self._auto_start_button, self._auto_continue_button, self._auto_resume_button):
+                button.setEnabled(False)
+            self._new_button.setEnabled(False)
+            self._open_button.setEnabled(False)
+            self._auto_stop_button.setEnabled(has_project and not is_ro and "stop" not in self._operations)
+        else:
+            self._new_button.setEnabled(not is_ro)
+            self._open_button.setEnabled(not is_ro)
 
     def _auto_commands_for_project(self, project: ProjectRecord) -> ProjectCenterAutoCommands:
         if self._auto_commands is not None and self._auto_commands_project_id == project.project_id:
@@ -813,7 +915,8 @@ class ProjectCenterWindow(QMainWindow):
             canonical = CanonicalAutoState(reason_code="PROJECT_NOT_SELECTED", reason=AUTO_STATUS_REASON_TEXT["PROJECT_NOT_SELECTED"])
         else:
             try:
-                raw = self._auto_commands_for_project(project).snapshot(
+                projection = self._cached_projection(project)
+                raw = projection["canonical"] if projection else self._auto_commands_for_project(project).snapshot(
                     plan_available=project.plan_imported,
                     plan_version=project.plan_version,
                 )
@@ -985,9 +1088,11 @@ class ProjectCenterWindow(QMainWindow):
 
     def _refresh_project_projections(self, project_id: str) -> None:
         """Reload catalog, memory, execution, and AUTO projections together."""
+        status_text = self._status.text()
         self.start_bootstrap()
         if any(item.project_id == project_id for item in self._projects):
             self._select_project(project_id)
+        self._status.setText(status_text)
 
     def _approve_auto_prerequisite(self, kind: str) -> None:
         if self._is_read_only():
@@ -1012,19 +1117,22 @@ class ProjectCenterWindow(QMainWindow):
             return
         try:
             revision = self._resolve_auto_prerequisite_revision(project, kind, identifier)
-            if kind == "milestone_gate":
-                result = self._workflow.pass_milestone_gate(project.project_id, identifier, expected_revision=revision)
-            elif kind == "planning_gate":
-                result = self._workflow.pass_gate(project.project_id, identifier, expected_revision=revision)
-            else:
-                result = self._workflow.resolve_open_question(project.project_id, identifier, expected_revision=revision)
         except (ProjectCenterAutoCommandError, ProjectWorkflowError, ProjectMemoryError) as exc:
             self._status.setText(f"BDB AUTO: działanie prerequisite odrzucone — {getattr(exc, 'code', 'prerequisite_failed')}")
             self._render_auto(project)
             return
-        self._mutation_operations_invoked += 1
-        self._set_auto_status_from_receipt(result)
-        self._refresh_project_projections(project.project_id)
+        def run() -> Any:
+            if kind == "milestone_gate":
+                return self._workflow.pass_milestone_gate(project.project_id, identifier, expected_revision=revision)
+            elif kind == "planning_gate":
+                return self._workflow.pass_gate(project.project_id, identifier, expected_revision=revision)
+            else:
+                return self._workflow.resolve_open_question(project.project_id, identifier, expected_revision=revision)
+        def completed(result: Any) -> None:
+            self._mutation_operations_invoked += 1
+            self._set_auto_status_from_receipt(result)
+            self._render_auto(project)
+        self._run_workflow("prerequisite", "Zapis prerequisite", run, completed)
 
     def _set_auto_status_from_receipt(self, receipt: Any) -> None:
         if hasattr(receipt, "reason_code"):
@@ -1076,39 +1184,60 @@ class ProjectCenterWindow(QMainWindow):
         if not self._confirm_auto_start(view_model):
             self._status.setText("BDB AUTO: start anulowany — wymagane jest jawne potwierdzenie")
             return
-        try:
-            receipt = self._auto_commands_for_project(project).start_auto(view_model.selected_scope, confirmed=True)
-            self._synchronize_auto_execution_on_start(project, receipt)
-        except (ProjectCenterAutoCommandError, ProjectExecutionError, ProjectWorkflowError) as exc:
-            self._status.setText(f"BDB AUTO zatrzymany — {getattr(exc, 'code', 'auto_start_failed')}")
-            return
-        self._mutation_operations_invoked += 1
-        self._set_auto_status_from_receipt(receipt)
-        self._render_auto(project)
+        self._queue_auto_action(project, "start", view_model.selected_scope)
+
+    def _queue_auto_action(self, project: ProjectRecord, action: str, scope: Any = None) -> None:
+        if any(key != "projection" for key in self._operations): return
+        commands = self._auto_commands_for_project(project)
+        self._auto_stop_requests.discard(project.project_id)
+        def run() -> tuple[Any, str]:
+            receipt = commands.start_auto(scope, confirmed=True) if action == "start" else getattr(commands, f"{action}_auto")()
+            if project.project_id in self._auto_stop_requests:
+                return commands.stop_auto(), "stopped"
+            launch_status = self._synchronize_auto_execution_on_continue(project, receipt)
+            return receipt, launch_status
+        def completed(result: tuple[Any, str]) -> None:
+            receipt, launch_status = result
+            self._mutation_operations_invoked += 1
+            if project.project_id in self._auto_stop_requests or launch_status == "stopped":
+                self._status.setText("BDB AUTO: STOPPED")
+            elif launch_status in {"ready", "rearmed"}:
+                self._status.setText("BDB AUTO: QUEUED — prompt czeka na przekazanie do właściwej rozmowy ChatGPT. Wysyłka nie jest jeszcze potwierdzona.")
+            elif launch_status == "already_sent":
+                self._status.setText("BDB AUTO: WAITING_FOR_RESULT — wysyłka potwierdzona; oczekiwanie na wynik zadania.")
+            else:
+                self._set_auto_status_from_receipt(receipt)
+            self._render_auto(project)
+        self._run_workflow("auto", f"AUTO {action}", run, completed)
 
     def _stop_auto_from_gui(self) -> None:
         if self._is_read_only():
             self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
             return
         project = next((item for item in self._projects if item.project_id == self._current_project_id), None)
-        if project is None or not self._auto_view_model.can_stop:
+        if project is None or (not self._auto_view_model.can_stop and "auto" not in self._operations):
             self._status.setText(self._auto_view_model.disabled_reason("stop") or AUTO_STATUS_REASON_TEXT["PROJECT_NOT_SELECTED"])
             return
-        try:
-            receipt = self._auto_commands_for_project(project).stop_auto()
-            exec_snapshot = self._workflow.execution.snapshot(project.project_id)
-            auto = exec_snapshot.get("milestone_auto") or {}
-            run_id = auto.get("milestone_run_id")
-            if run_id and auto.get("status") in {"RUNNABLE", "running"}:
-                self._workflow.execution.stop_milestone_auto(project.project_id, run_id=run_id)
-        except Exception as exc:
-            code = getattr(exc, 'code', 'auto_stop_sync_failed')
-            logging.getLogger(__name__).exception("AUTO STOP: %s", code)
-            self._status.setText(f"BDB AUTO STOP wymaga ponowienia — {code}: {exc}")
-            return
-        self._mutation_operations_invoked += 1
-        self._set_auto_status_from_receipt(receipt)
-        self._render_auto(project)
+        self._auto_stop_requests.add(project.project_id)
+        commands = self._auto_commands_for_project(project)
+        def run() -> tuple[Any, str | None]:
+            receipt = commands.stop_auto()  # Durable fence precedes the v1 projection.
+            try:
+                auto = self._workflow.execution.snapshot(project.project_id).get("milestone_auto") or {}
+                run_id = auto.get("milestone_run_id")
+                if run_id and auto.get("status") in {"RUNNABLE", "running"}:
+                    self._workflow.execution.stop_milestone_auto(project.project_id, run_id=run_id)
+                return receipt, None
+            except Exception as exc:
+                return receipt, f"{getattr(exc, 'code', 'auto_stop_sync_failed')}: {exc}"
+        def completed(result: tuple[Any, str | None]) -> None:
+            receipt, error = result
+            self._mutation_operations_invoked += 1
+            self._set_auto_status_from_receipt(receipt)
+            self._render_auto(project)
+            if error:
+                self._status.setText(f"BDB AUTO: STOP fence zapisany; projekcja STOP wymaga ponowienia — {error}")
+        self._run_workflow("stop", "Zapisywanie STOP", run, completed)
 
     def _continue_auto_from_gui(self) -> None:
         if self._is_read_only():
@@ -1118,26 +1247,7 @@ class ProjectCenterWindow(QMainWindow):
         if project is None or not self._auto_view_model.can_continue:
             self._status.setText(self._auto_view_model.disabled_reason("continue") or AUTO_STATUS_REASON_TEXT["PROJECT_NOT_SELECTED"])
             return
-        try:
-            # No task or milestone is passed here; canonical orchestrator owns
-            # the next-action decision.
-            receipt = self._auto_commands_for_project(project).continue_auto()
-            launch_status = self._synchronize_auto_execution_on_continue(project, receipt)
-        except (ProjectCenterAutoCommandError, ProjectExecutionError, ProjectWorkflowError) as exc:
-            code = getattr(exc, "code", "auto_continue_failed")
-            self._status.setText(f"BDB AUTO Kontynuuj zatrzymane — {code}: {exc}")
-            self._render_auto(project)
-            return
-        self._mutation_operations_invoked += 1
-        if launch_status in {"ready", "rearmed"}:
-            self._status.setText(
-                "BDB AUTO: QUEUED — prompt czeka na przekazanie do właściwej rozmowy ChatGPT. Wysyłka nie jest jeszcze potwierdzona."
-            )
-        elif launch_status == "already_sent":
-            self._status.setText("BDB AUTO: WAITING_FOR_RESULT — wysyłka potwierdzona; oczekiwanie na wynik zadania.")
-        else:
-            self._set_auto_status_from_receipt(receipt)
-        self._render_auto(project)
+        self._queue_auto_action(project, "continue")
 
     def _resume_auto_from_gui(self) -> None:
         if self._is_read_only():
@@ -1147,15 +1257,7 @@ class ProjectCenterWindow(QMainWindow):
         if project is None or not self._auto_view_model.can_resume:
             self._status.setText(self._auto_view_model.disabled_reason("resume") or AUTO_STATUS_REASON_TEXT["PROJECT_NOT_SELECTED"])
             return
-        try:
-            receipt = self._auto_commands_for_project(project).resume_auto()
-            self._synchronize_auto_execution_on_continue(project, receipt)
-        except (ProjectCenterAutoCommandError, ProjectExecutionError, ProjectWorkflowError) as exc:
-            self._status.setText(f"BDB AUTO Wznów zatrzymane — {getattr(exc, 'code', 'auto_resume_failed')}")
-            return
-        self._mutation_operations_invoked += 1
-        self._set_auto_status_from_receipt(receipt)
-        self._render_auto(project)
+        self._queue_auto_action(project, "resume")
 
     # Compatibility entry points retain their names but now use canonical
     # Project Center AUTO commands rather than the legacy milestone shortcut.
@@ -1170,7 +1272,8 @@ class ProjectCenterWindow(QMainWindow):
             self._execution_status.setText("Wykonanie: brak aktywnej próby")
             return
         try:
-            snapshot = self._workflow.execution.snapshot(project.project_id)
+            projection = self._cached_projection(project)
+            snapshot = projection["execution"] if projection else self._workflow.execution.snapshot(project.project_id)
             statuses = snapshot.get("task_statuses", {})
             attempts = snapshot.get("attempts", [])
             last = attempts[-1] if attempts else None
@@ -1204,11 +1307,7 @@ class ProjectCenterWindow(QMainWindow):
         if project is None or not project.current_task: return
         reason, accepted = QInputDialog.getText(self, "Zatwierdź review", "Uzasadnienie:")
         if not accepted: return
-        try:
-            self._workflow.execution.approve_review(project.project_id, project.current_task, reason=reason or "approved by user")
-        except Exception as exc:
-            self._status.setText(f"BDB: review zatrzymany — {getattr(exc, 'code', 'review_failed')}"); return
-        self.start_bootstrap(); self._select_project(project.project_id)
+        self._run_workflow("review", "Zatwierdzanie review", lambda: self._workflow.execution.approve_review(project.project_id, project.current_task, reason=reason or "approved by user"), lambda result: self._refresh_project_projections(project.project_id))
 
     def _request_changes(self) -> None:
         if self._is_read_only():
@@ -1219,22 +1318,18 @@ class ProjectCenterWindow(QMainWindow):
         if project is None or not project.current_task: return
         reason, accepted = QInputDialog.getText(self, "Wymaga poprawki", "Co należy poprawić?")
         if not accepted: return
-        try:
-            self._workflow.execution.request_changes(project.project_id, project.current_task, reason=reason or "changes requested")
-        except Exception as exc:
-            self._status.setText(f"BDB: poprawka zatrzymana — {getattr(exc, 'code', 'review_failed')}"); return
-        self.start_bootstrap(); self._select_project(project.project_id)
+        self._run_workflow("review", "Zapisywanie zmian review", lambda: self._workflow.execution.request_changes(project.project_id, project.current_task, reason=reason or "changes requested"), lambda result: self._refresh_project_projections(project.project_id))
 
     def _request_project_review(self) -> None:
         if self._is_read_only():
             self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
             return
         if self._current_project_id is None: return
-        try:
-            self._workflow.execution.request_project_review(self._current_project_id)
-        except Exception as exc:
-            self._status.setText(f"BDB: review projektu zatrzymany — {getattr(exc, 'code', 'review_failed')}"); return
-        self._status.setText("BDB: przegląd projektu zapisany w Project Memory")
+        project_id = self._current_project_id
+        def completed(result: Any) -> None:
+            self._status.setText("BDB: przegląd projektu zapisany w Project Memory")
+            self._refresh_project_projections(project_id)
+        self._run_workflow("review", "Zapisywanie review projektu", lambda: self._workflow.execution.request_project_review(project_id), completed)
 
     def _render_memory(self, project: ProjectRecord | None) -> None:
         views = [self._memory_tabs.widget(index) for index in range(self._memory_tabs.count())]
@@ -1243,11 +1338,17 @@ class ProjectCenterWindow(QMainWindow):
             return
         try:
             memory = self._workflow.memory(project.project_id)
-            state = memory.read_state(); plan = memory.current_plan()
+            projection = self._cached_projection(project)
+            state = projection["state"] if projection else memory.read_state()
+            plan = projection["plan"] if projection else memory.current_plan()
             next_action = resolve_next_action(project, plan, state, plan_update_pending=self._pending_plan_preview is not None)
             health = project_health(state, plan)
             sentence = project_status_sentence(project, plan, state)
-            plan_lines = [sentence, f"Health: {health}", f"Co teraz?: {next_action.title} — {next_action.detail}", "", f"Aktywny plan: v{plan.plan_version}" if plan else "Plan: brak", "Historia wersji: " + ", ".join(f"v{item.plan_version}" for item in memory.plan_versions())]
+            versions = projection["versions"] if projection else memory.plan_versions()
+            plan_lines = [sentence, f"Health: {health}", f"Co teraz?: {next_action.title} — {next_action.detail}", "", f"Aktywny plan: v{plan.plan_version}" if plan else "Plan: brak", "Historia wersji: " + ", ".join(f"v{item.plan_version}" for item in versions)]
+            capacity = projection["capacity"] if projection else memory.capacity_status()
+            if capacity["status"] == "CAPACITY_WARNING":
+                plan_lines.append("Memory: zbliża się limit aktywnych/niezakończonych danych; zakończ lub rozstrzygnij oczekujące operacje.")
             if self._pending_plan_preview is not None:
                 plan_lines.extend(["", "Oczekuje aktualizacja planu:", *self._pending_plan_preview.diff.summary_lines()])
             views[0].setPlainText("\n".join(plan_lines))
@@ -1262,12 +1363,8 @@ class ProjectCenterWindow(QMainWindow):
             self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
             return
         if self._current_project_id is None: return
-        try:
-            launch = self._workflow.queue_handoff_prompt(self._current_project_id, self._handoff_mode.currentText())
-        except ProjectWorkflowError as exc:
-            self._status.setText(f"BDB: handoff zatrzymany — {exc.code}"); return
-        self._status.setText(f"BDB: handoff oczekuje w ChatGPT ({launch.launch_id}); Send pozostaje ręczny")
-        self._projects = self._catalog.read(); self._render_catalog(self._projects)
+        project_id, mode = self._current_project_id, self._handoff_mode.currentText()
+        self._run_workflow("prompt", "Przygotowanie handoff", lambda: self._workflow.queue_handoff_prompt(project_id, mode), self._prompt_completed)
 
     def _prepare_for_work(self) -> None:
         if self._current_project_id is None:
@@ -1284,26 +1381,33 @@ class ProjectCenterWindow(QMainWindow):
         dialog.exec()
 
     def _new_project(self) -> None:
+        if any(key != "projection" for key in self._operations): return
         if self._is_read_only():
             self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
             return
         dialog = _NewProjectDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted: return
-        brief = dialog.brief(); alias = slugify_project_alias(brief.name); result = self._workflow.create_new(display_name=brief.name, repo_alias=alias, projects_root=Path.home() / "BDB Projects", brief=brief, github_name=alias)
+        brief = dialog.brief(); alias = slugify_project_alias(brief.name)
+        self._run_workflow("create", "Tworzenie projektu", lambda: self._workflow.create_new(display_name=brief.name, repo_alias=alias, projects_root=Path.home() / "BDB Projects", brief=brief, github_name=alias), self._creation_completed)
+
+    def _creation_completed(self, result: Any) -> None:
         if not result.ok:
-            self._status.setText(f"BDB: projekt zatrzymany — {result.error_code}"); return
-        self.start_bootstrap(); self._select_project(result.project.project_id if result.project else None); self.select_page("Current project")
+            recovery = f" Otwórz istniejący projekt: {result.local_repo_path}. Sprawdź origin przed ponowieniem GitHub." if result.recovery_action == "register_existing" else f" Sprawdź pozostawiony katalog: {result.local_repo_path}."
+            self._status.setText(f"BDB: projekt zatrzymany — {result.error_code}.{recovery}"); return
+        self._project_completed(result.project)
+
+    def _project_completed(self, project: ProjectRecord) -> None:
+        self.start_bootstrap(); self._select_project(project.project_id); self.select_page("Current project")
 
     def _open_existing_project(self) -> None:
+        if any(key != "projection" for key in self._operations): return
         if self._is_read_only():
             self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
             return
         source = QFileDialog.getExistingDirectory(self, "Wybierz istniejący Git checkout")
         if not source: return
         name = Path(source).name or "Projekt"; brief = ProjectBrief(name, "Kontynuacja istniejącego projektu", "Projekt zarejestrowany przez BDB vNext.", "jeszcze nie wiem")
-        try: project = self._workflow.register_existing(display_name=name, repo_alias=slugify_project_alias(name), local_repo_path=source, brief=brief)
-        except ProjectWorkflowError as exc: self._status.setText(f"BDB: rejestracja zatrzymana — {exc.code}"); return
-        self.start_bootstrap(); self._select_project(project.project_id); self.select_page("Current project")
+        self._run_workflow("open", "Otwieranie projektu", lambda: self._workflow.register_existing(display_name=name, repo_alias=slugify_project_alias(name), local_repo_path=source, brief=brief), self._project_completed)
 
     def _import_plan(self) -> None:
         if self._is_read_only():
@@ -1312,33 +1416,38 @@ class ProjectCenterWindow(QMainWindow):
         if self._current_project_id is None: return
         path, _ = QFileDialog.getOpenFileName(self, "Wybierz project-plan.json", "", "Project Plan (*.json)")
         if not path: return
-        try:
-            selected = next((item for item in self._projects if item.project_id == self._current_project_id), None)
-            if selected is not None and selected.plan_imported:
-                preview = self._workflow.preview_plan_update(self._current_project_id, path)
-                self._pending_plan_preview, self._pending_plan_path = preview, path
-                self._render_memory(selected)
-                if not preview.accepted:
-                    self._status.setText(f"BDB: aktualizacja planu zablokowana — {preview.reason_code}"); return
-                summary = "\n".join(preview.diff.summary_lines()) or "Brak zmian semantycznych"
-                answer = QMessageBox.question(self, "Podgląd aktualizacji planu", f"Plan v{preview.current_version} → v{preview.next_version}\n\n{summary}\n\nZastosować aktualizację?", QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok, QMessageBox.StandardButton.Cancel)
-                if answer != QMessageBox.StandardButton.Ok:
-                    self._pending_plan_preview = None; self._pending_plan_path = None; self._render_memory(selected); self._status.setText("BDB: aktualizacja planu anulowana"); return
-                project, _plan = self._workflow.apply_plan_update(self._current_project_id, path, preview)
-            else:
-                project, _plan = self._workflow.import_plan(self._current_project_id, path)
+        project_id = self._current_project_id
+        selected = next((item for item in self._projects if item.project_id == project_id), None)
+        if selected is not None and selected.plan_imported:
+            self._run_workflow("plan", "Podgląd aktualizacji planu", lambda: self._workflow.preview_plan_update(project_id, path), lambda preview: self._plan_preview_completed(project_id, path, preview))
+        else:
+            self._run_workflow("plan", "Import planu", lambda: self._workflow.import_plan(project_id, path), self._plan_completed)
+
+    def _plan_preview_completed(self, project_id: str, path: str, preview: Any) -> None:
+        self._pending_plan_preview, self._pending_plan_path = preview, path
+        if not preview.accepted:
+            self._status.setText(f"BDB: aktualizacja planu zablokowana — {preview.reason_code}"); return
+        summary = "\n".join(preview.diff.summary_lines()) or "Brak zmian semantycznych"
+        answer = QMessageBox.question(self, "Podgląd aktualizacji planu", f"Plan v{preview.current_version} → v{preview.next_version}\n\n{summary}\n\nZastosować aktualizację?", QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok, QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Ok:
             self._pending_plan_preview = None; self._pending_plan_path = None
-        except ProjectWorkflowError as exc: self._status.setText(f"BDB: import planu zatrzymany — {exc.code}"); return
-        self.start_bootstrap(); self._select_project(project.project_id); self.select_page("Current project")
+            self._status.setText("BDB: aktualizacja planu anulowana"); return
+        self._run_workflow("plan", "Zapis aktualizacji planu", lambda: self._workflow.apply_plan_update(project_id, path, preview), self._plan_completed)
+
+    def _plan_completed(self, result: Any) -> None:
+        self._pending_plan_preview = None; self._pending_plan_path = None
+        self._project_completed(result[0])
 
     def _queue_prompt(self, kind: str) -> None:
         if self._is_read_only():
             self._status.setText("BDB: odrzucono operację — system jest w trybie tylko do odczytu (read-only)")
             return
         if self._current_project_id is None: return
-        try:
-            launch = {"plan": self._workflow.queue_plan_prompt, "start": self._workflow.queue_start_prompt, "continue": self._workflow.queue_continue_prompt}[kind](self._current_project_id)
-        except ProjectWorkflowError as exc: self._status.setText(f"BDB: prompt zatrzymany — {exc.code}"); return
+        project_id = self._current_project_id
+        operation = {"plan": self._workflow.queue_plan_prompt, "start": self._workflow.queue_start_prompt, "continue": self._workflow.queue_continue_prompt}[kind]
+        self._run_workflow("prompt", "Przygotowanie promptu", lambda: operation(project_id), self._prompt_completed)
+
+    def _prompt_completed(self, launch: Any) -> None:
         self._status.setText(f"BDB: prompt oczekuje w ChatGPT ({launch.launch_id}); Send pozostaje ręczny")
         self._projects = self._catalog.read(); self._render_catalog(self._projects)
 

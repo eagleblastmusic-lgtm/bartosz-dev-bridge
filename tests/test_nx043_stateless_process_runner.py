@@ -20,6 +20,14 @@ from bdb_vnext import stateless_process_runner as spr
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
+class _FixtureApprovalEvaluator(ep.ExecutionPolicyEvaluator):
+    """Explicit request-bound approval for reviewed, harmless runner fixtures."""
+    def evaluate(self, request, candidate_root, **kwargs):
+        if request.effect_class is lec.ExecutionEffectClass.NON_REPLAYABLE_MUTATION:
+            kwargs["approval_token"] = self.approval_registry.issue(request, effect_class=ep.PolicyEffectClass.DESTRUCTIVE, validity_seconds=60)
+        return super().evaluate(request, candidate_root, **kwargs)
+
 NX043_GATE_FIELDS = {
     "STATELESS_PROCESS_RUNNER_VERSION_EXPLICIT",
     "EXECUTIONS_WITHOUT_VALID_POLICY_ALLOW",
@@ -107,7 +115,8 @@ def _make_req(exec_id: str = "exec:runner-1", **kwargs: Any) -> lec.LocalExecuti
         "expected_source_tree": "b" * 40,
     }
     defaults.update(kwargs)
-    return lec.LocalExecutionRequest(**defaults)
+    from bdb_vnext.tool_adapters import classified_request
+    return classified_request(**defaults)
 
 
 # ==============================================================================
@@ -117,7 +126,7 @@ def _make_req(exec_id: str = "exec:runner-1", **kwargs: Any) -> lec.LocalExecuti
 def test_windows_argv_quoting_corpus(tmp_path: Path) -> None:
     """Validate exact Windows argv roundtripping via child witness process."""
     runner = spr.StatelessWindowsProcessRunner()
-    evaluator = ep.ExecutionPolicyEvaluator()
+    evaluator = _FixtureApprovalEvaluator()
     candidate_root = tmp_path / "candidate"
     candidate_root.mkdir()
 
@@ -156,7 +165,7 @@ def test_windows_argv_quoting_corpus(tmp_path: Path) -> None:
 def test_stdout_stderr_separation_and_nonzero_exit(tmp_path: Path) -> None:
     """Verify separate stdout and stderr capture, and mechanical exit code handling."""
     runner = spr.StatelessWindowsProcessRunner()
-    evaluator = ep.ExecutionPolicyEvaluator()
+    evaluator = _FixtureApprovalEvaluator()
     candidate_root = tmp_path / "candidate"
     candidate_root.mkdir()
 
@@ -175,7 +184,7 @@ def test_stdout_stderr_separation_and_nonzero_exit(tmp_path: Path) -> None:
 def test_timeout_and_process_tree_termination(tmp_path: Path) -> None:
     """Verify timeout terminates child and grandchild processes with zero orphans."""
     runner = spr.StatelessWindowsProcessRunner()
-    evaluator = ep.ExecutionPolicyEvaluator()
+    evaluator = _FixtureApprovalEvaluator()
     candidate_root = tmp_path / "candidate"
     candidate_root.mkdir()
 
@@ -201,7 +210,7 @@ def test_timeout_and_process_tree_termination(tmp_path: Path) -> None:
 def test_cancellation_and_job_object_cleanup(tmp_path: Path) -> None:
     """Verify cancellation terminates running process tree cleanly."""
     runner = spr.StatelessWindowsProcessRunner()
-    evaluator = ep.ExecutionPolicyEvaluator()
+    evaluator = _FixtureApprovalEvaluator()
     candidate_root = tmp_path / "candidate"
     candidate_root.mkdir()
 
@@ -238,7 +247,7 @@ def test_cancellation_and_job_object_cleanup(tmp_path: Path) -> None:
 def test_large_output_and_concurrent_streaming(tmp_path: Path) -> None:
     """Verify concurrent streaming of large stdout and stderr (> 64 KiB) without deadlocks."""
     runner = spr.StatelessWindowsProcessRunner()
-    evaluator = ep.ExecutionPolicyEvaluator()
+    evaluator = _FixtureApprovalEvaluator()
     candidate_root = tmp_path / "candidate"
     candidate_root.mkdir()
 
@@ -266,7 +275,7 @@ def test_large_output_and_concurrent_streaming(tmp_path: Path) -> None:
 def test_policy_revalidation_blocks_stale_spawn(tmp_path: Path) -> None:
     """If source state drifts after policy evaluation, runner refuses spawn."""
     runner = spr.StatelessWindowsProcessRunner()
-    evaluator = ep.ExecutionPolicyEvaluator()
+    evaluator = _FixtureApprovalEvaluator()
     candidate_root = tmp_path / "candidate"
     candidate_root.mkdir()
 
@@ -299,7 +308,7 @@ def run_nx043_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
     second_auth_created = bool(spr.SECOND_EXECUTION_RESULT_AUTHORITY_CREATED)
 
     runner = spr.StatelessWindowsProcessRunner()
-    evaluator = ep.ExecutionPolicyEvaluator()
+    evaluator = _FixtureApprovalEvaluator()
 
     # 1. Windows Argv Quoting Corpus
     witness_script = candidate_root / "gate_witness.py"

@@ -19,6 +19,13 @@ from bdb_vnext import stateless_process_runner as spr
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
+class _FixtureApprovalEvaluator(ep.ExecutionPolicyEvaluator):
+    """Request-bound approval for the reviewed PowerShell fixture scripts."""
+    def evaluate(self, request, candidate_root, **kwargs):
+        kwargs["approval_token"] = self.approval_registry.issue(request, effect_class=ep.PolicyEffectClass.DESTRUCTIVE, validity_seconds=60)
+        return super().evaluate(request, candidate_root, **kwargs)
+
 NX046_GATE_FIELDS = {
     "STATELESS_POWERSHELL_VERSION_EXPLICIT",
     "POWERSHELL_SHELL_IDENTITIES",
@@ -128,7 +135,7 @@ def test_encoded_command_and_file_mode_execution(tmp_path: Path) -> None:
     """Tests -EncodedCommand and -File execution for available PowerShell interpreters."""
     installations = sp.discover_powershell_installations()
     adapter = sp.StatelessPowerShellAdapter(installations=installations)
-    policy_eval = ep.ExecutionPolicyEvaluator()
+    policy_eval = _FixtureApprovalEvaluator()
 
     # Determine available family
     fam = sp.PowerShellFamily.PWSH if installations[sp.PowerShellFamily.PWSH].is_available else sp.PowerShellFamily.WINDOWS_POWERSHELL
@@ -175,7 +182,7 @@ def test_powershell_encoding_fidelity(tmp_path: Path) -> None:
     """Verifies Polish Unicode characters (Zażółć gęślą jaźń) and quotes survive execution."""
     installations = sp.discover_powershell_installations()
     adapter = sp.StatelessPowerShellAdapter(installations=installations)
-    policy_eval = ep.ExecutionPolicyEvaluator()
+    policy_eval = _FixtureApprovalEvaluator()
 
     fam = sp.PowerShellFamily.PWSH if installations[sp.PowerShellFamily.PWSH].is_available else sp.PowerShellFamily.WINDOWS_POWERSHELL
 
@@ -201,7 +208,7 @@ def test_powershell_timeout_process_tree_cleanup(tmp_path: Path) -> None:
     """PowerShell timeout kills the entire process tree via Windows Job Object."""
     installations = sp.discover_powershell_installations()
     adapter = sp.StatelessPowerShellAdapter(installations=installations)
-    policy_eval = ep.ExecutionPolicyEvaluator()
+    policy_eval = _FixtureApprovalEvaluator()
 
     fam = sp.PowerShellFamily.PWSH if installations[sp.PowerShellFamily.PWSH].is_available else sp.PowerShellFamily.WINDOWS_POWERSHELL
 
@@ -236,7 +243,7 @@ def run_nx046_machine_gate(tmp_path: Path | None = None) -> dict[str, Any]:
     version_explicit = bool(sp.STATELESS_POWERSHELL_VERSION_EXPLICIT)
     installations = sp.discover_powershell_installations()
     adapter = sp.StatelessPowerShellAdapter(installations=installations)
-    policy_eval = ep.ExecutionPolicyEvaluator()
+    policy_eval = _FixtureApprovalEvaluator()
 
     shell_identities = len(installations)
     identity_divergences = 0

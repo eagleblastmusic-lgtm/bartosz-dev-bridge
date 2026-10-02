@@ -360,7 +360,8 @@ class StatelessPowerShellAdapter:
                 script_identity.raw_bytes.decode(script_identity.declared_encoding),
             )
 
-        return LocalExecutionRequest(
+        from .tool_adapters import classified_request
+        return classified_request(
             execution_id=execution_id,
             project_id=project_id,
             adapter_id="process.raw",

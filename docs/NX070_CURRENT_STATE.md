@@ -4,6 +4,13 @@ Snapshot version: `bdb-vnext-current-snapshot-v1`
 Status: **CURRENT / VOLATILE SNAPSHOT**  
 Observation date: `2026-08-27`
 
+Temporal scope: the values below are the observation from **2026-08-27**.
+They preserve the NX-070 qualification context and do not establish today's
+ACTIVE slot, client plan or loaded Chrome bytes. Obtain a fresh, separate
+source/ACTIVE/client/Browser readback using [the production procedure](VNEXT_PRODUCTION_RUNTIME.md).
+The remediation behavior and acceptance evidence are described in
+[the implementation record](APP_REMEDIATION_IMPLEMENTATION_2026_10_02.md).
+
 This is the repository's explicit current-state surface for the NX-070
 documentation synchronization. It separates the qualified repository source
 from the currently deployed production generation. The authority order is:

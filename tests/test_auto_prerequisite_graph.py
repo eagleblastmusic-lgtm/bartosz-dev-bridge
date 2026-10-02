@@ -637,9 +637,11 @@ def test_project_center_gate_actions_confirm_recheck_and_use_workflow_boundary(t
     memory.pass_gate("G0")
     confirmations[0] = True
     window._auto_milestone_gate_button.click()
+    window.drain_operations()
     assert memory.read_state().execution["milestone_gate_statuses"]["GATE:P0"] == "pending"
 
     window._auto_milestone_gate_button.click()
+    window.drain_operations()
     assert memory.read_state().execution["milestone_gate_statuses"]["GATE:P0"] == "passed"
     assert window._mutation_operations_invoked == 1
     window.close()
@@ -1025,6 +1027,7 @@ def test_project_center_auto_start_synchronizes_milestone_run_and_launch_queue(t
     window._projects = (record,)
     window._select_project(PROJECT_ID)
     window._start_auto_from_gui()
+    window.drain_operations()
 
     state = workflow.memory(PROJECT_ID).read_state()
     active_run = state.execution.get("active_milestone_run")
@@ -1039,12 +1042,14 @@ def test_project_center_auto_start_synchronizes_milestone_run_and_launch_queue(t
     assert pending.auto_send is True
 
     window._stop_auto_from_gui()
+    window.drain_operations()
     state_stopped = workflow.memory(PROJECT_ID).read_state()
     active_stopped = state_stopped.execution.get("active_milestone_run")
     assert isinstance(active_stopped, Mapping)
     assert active_stopped.get("status") == "stopped"
 
     window._resume_auto_from_gui()
+    window.drain_operations()
     state_resumed = workflow.memory(PROJECT_ID).read_state()
     active_resumed = state_resumed.execution.get("active_milestone_run")
     assert isinstance(active_resumed, Mapping)
@@ -1116,10 +1121,12 @@ def test_project_center_milestone_transition_and_gate_approval_launches_next_mil
     assert window._auto_milestone_gate_button.isEnabled()
 
     window._auto_milestone_gate_button.click()
+    window.drain_operations()
     assert memory.read_state().execution["milestone_gate_statuses"]["GATE:P0"] == "passed"
     assert not window._auto_milestone_gate_button.isEnabled()
 
     window._start_auto_from_gui()
+    window.drain_operations()
     state_after = memory.read_state()
     active_run = state_after.execution.get("active_milestone_run")
     assert isinstance(active_run, Mapping), window._status.text()

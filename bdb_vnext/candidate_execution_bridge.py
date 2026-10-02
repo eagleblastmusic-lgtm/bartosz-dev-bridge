@@ -34,6 +34,7 @@ from .engineering_loop import (
     ValidationRunner,
 )
 from .execution_policy import (
+    ApprovalToken,
     ExecutionPolicyEvaluator,
     PolicyDecision,
     PolicyEffectClass,
@@ -158,6 +159,7 @@ class CandidateExecutionBridge:
         current_tree: str,
         candidate_id: str,
         validation_policy: ValidationPolicy | None = None,
+        approval_token: ApprovalToken | None = None,
     ) -> tuple[LocalExecutionResult, PromotionEligibilityRecord | None]:
         """Execute mutation inside candidate workspace, run ValidationRunner, and produce eligibility."""
         canon_candidate = canonicalize_path(candidate_root)
@@ -177,6 +179,10 @@ class CandidateExecutionBridge:
                 "direct_active_write_blocked",
                 "PROJECT_MUTATION request CWD points to canonical ACTIVE repository",
             )
+        try:
+            canonicalize_path(resolved_req_cwd).relative_to(canon_candidate)
+        except ValueError as exc:
+            raise LocalExecutionContractError("candidate_cwd_escape", "Execution CWD must stay inside Candidate") from exc
 
         # 2. Strict Stale Source Checks (pre-spawn stop)
         if request.expected_source_head != current_head:
@@ -197,6 +203,7 @@ class CandidateExecutionBridge:
             project_root=canon_active,
             current_head=current_head,
             current_tree=current_tree,
+            approval_token=approval_token,
         )
         if decision.decision != "ALLOW":
             raise LocalExecutionContractError(
