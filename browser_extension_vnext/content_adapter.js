@@ -253,7 +253,8 @@ function projectContentSearchUnit(node) {
     const roleNodes = Array.from(unit.querySelectorAll(PROJECT_CONVERSATION_ROLE_SELECTOR));
     const selectionNodes = Array.from(unit.querySelectorAll(PROJECT_SELECTION_MESSAGE_SELECTOR));
     if (roleNodes.length !== 1 || projectMessageAttribute(roleNodes[0], "data-conversation-role") !== "assistant" ||
-        roleNodes[0].parentElement !== unit || selectionNodes.length !== 1 || selectionNodes[0].parentElement !== unit ||
+        roleNodes[0].parentElement !== unit || selectionNodes.length !== 1 || !unit.contains(selectionNodes[0]) ||
+        selectionNodes[0].closest(PROJECT_CONTENT_SEARCH_UNIT_SELECTOR) !== unit ||
         projectMessageAttribute(selectionNodes[0], "data-chatgpt-selection-message-id") !== messageId ||
         projectMessageAttribute(selectionNodes[0], "data-chatgpt-selection-conversation-id") !== projectConversationId()) return null;
     const searchIds = (projectMessageAttribute(unit, "data-chatgpt-search-message-ids") || "").split(/\s+/).filter(Boolean);

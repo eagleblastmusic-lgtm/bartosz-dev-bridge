@@ -221,6 +221,12 @@ class HTMLElement {
     if (this.parentNode) this.parentNode.appendChild(element);
   }
   matches(selector) { return selectorMatch(this, selector); }
+  contains(node) {
+    for (let current = node; current; current = current.parentNode) {
+      if (current === this) return true;
+    }
+    return false;
+  }
   closest(selector) {
     for (let current = this; current; current = current.parentElement) {
       if (selector === "form" && current.tagName === "FORM") return current;
@@ -339,8 +345,36 @@ function appendAssistantUnit(contents, turnKey, result, messageId) {
   codeBlock.appendChild(inlineCodePane);
   markdownRoot.appendChild(codeBlock);
   selection.appendChild(markdownRoot);
-  unit.appendChild(label);
-  unit.appendChild(selection);
+  if (input.dom_mode !== "missing-role") unit.appendChild(label);
+  if (input.dom_mode === "wrong-role") label.setAttribute("data-conversation-role", "user");
+  if (input.dom_mode === "multiple-roles") {
+    const extraRole = new HTMLElement("h4");
+    extraRole.setAttribute("data-conversation-role", "assistant");
+    unit.appendChild(extraRole);
+  }
+  if (input.dom_mode === "wrong-message-id") selection.setAttribute("data-chatgpt-selection-message-id", "foreign-message-id");
+  if (input.dom_mode === "wrong-selection-conversation") selection.setAttribute("data-chatgpt-selection-conversation-id", "foreign-conversation-id");
+  if (input.dom_mode === "direct-selection") {
+    unit.appendChild(selection);
+  } else {
+    const wrapper = new HTMLElement("div");
+    if (input.dom_mode === "foreign-nested-unit") wrapper.setAttribute("data-content-search-unit-key", turnKey + ":3:assistant");
+    wrapper.appendChild(selection);
+    unit.appendChild(wrapper);
+  }
+  if (input.dom_mode === "multiple-selections") {
+    const extraSelection = new HTMLElement("div");
+    extraSelection.setAttribute("data-chatgpt-selection-message-id", messageId);
+    extraSelection.setAttribute("data-chatgpt-selection-conversation-id", input.conversation_id);
+    unit.appendChild(extraSelection);
+  }
+  if (input.dom_mode === "multiple-code-results") {
+    const extraPre = new HTMLElement("pre");
+    const extraCode = new HTMLElement("code");
+    extraCode.appendChild(new TextNode(JSON.stringify(result)));
+    extraPre.appendChild(extraCode);
+    selection.appendChild(extraPre);
+  }
   contents.appendChild(unit);
   return unit;
 }
@@ -372,7 +406,7 @@ function appendLiveTurn({ turnKey, userPrompt = null, userMessageId = null, resu
   return turn;
 }
 
-const initialTurnKey = "fixture-captured-turn-a";
+const initialTurnKey = "fallback-turn-2";
 appendLiveTurn({
   turnKey: initialTurnKey,
   userPrompt: input.dom_mode === "ambiguous-turn" ? null : input.launch.prompt,
@@ -528,7 +562,30 @@ vm.createContext(context);
 vm.runInContext(fs.readFileSync(workerPath, "utf8"), context, { filename: "transport_worker.js" });
 vm.runInContext(fs.readFileSync(adapterPath, "utf8"), context, { filename: "content_adapter.js" });
 
-const negativeRecovery = ["ambiguous-turn", "identity-mismatch", "duplicate-candidate-turn"].includes(input.dom_mode);
+const rejectedOwnership = ["foreign-nested-unit", "multiple-selections", "wrong-message-id", "wrong-selection-conversation", "wrong-role", "missing-role", "multiple-roles"];
+const negativeRecovery = ["ambiguous-turn", "identity-mismatch", "duplicate-candidate-turn", "multiple-code-results", ...rejectedOwnership].includes(input.dom_mode);
+const initialUnit = conversationRoot.querySelectorAll("[data-content-search-unit-key]")
+  .find((unit) => unit.getAttribute("data-content-search-unit-key") === "fallback-turn-2:2:assistant");
+const initialSelection = initialUnit.querySelector("[data-chatgpt-selection-message-id]");
+assert.equal(initialUnit.contains(initialSelection), true);
+assert.equal(initialSelection.parentElement === initialUnit, input.dom_mode === "direct-selection");
+assert.equal(initialSelection.closest("[data-content-search-unit-key]") === initialUnit, input.dom_mode !== "foreign-nested-unit");
+assert.equal(context.projectContentSearchUnit(initialUnit) !== null, !rejectedOwnership.includes(input.dom_mode));
+if (input.dom_mode === "multiple-code-results") assert.equal(context.projectStructuralAssistantOwner(initialUnit.querySelector("pre code")), null);
+
+// The Browser accepts only the exact historical tuple, dropping it before Native.
+assert.ok(context.parseProjectExecutionResult({ textContent: JSON.stringify(input.result) }));
+const refs = input.result.canonical_refs;
+for (const invalidRefs of [[], refs.slice(0, 2), [...refs, refs[0]], [refs[1], refs[0], refs[2]],
+    ["attempt-" + "a".repeat(31), refs[1], refs[2]],
+    ["attempt-" + "g".repeat(32), refs[1], refs[2]],
+    [refs[0], "sha256:" + "a".repeat(63), refs[2]],
+    [refs[0], "sha256:" + "g".repeat(64), refs[2]],
+    [refs[0], refs[1], "milestone-run-" + "a".repeat(31)],
+    [refs[0], refs[1], "milestone-run-" + "g".repeat(32)],
+    [refs[0], refs[1], null]]) {
+  assert.equal(context.parseProjectExecutionResult({ textContent: JSON.stringify({ ...input.result, canonical_refs: invalidRefs }) }), null);
+}
 const deadline = Date.now() + (negativeRecovery ? 1000 : 20000);
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 (async () => {
@@ -545,10 +602,13 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
   assert.equal(document.querySelectorAll("[data-testid^='conversation-turn-']").length, 0, "captured live route has no legacy conversation-turn test IDs");
   assert.equal(document.querySelectorAll("[data-virtualized-turn-content]").length, 0, "captured live route has no virtualized-turn attribute");
   const codeBlocks = document.querySelectorAll("pre code");
-  assert.equal(codeBlocks.length, input.dom_mode === "duplicate-candidate-turn" ? 2 : 1, "the existing result is discoverable through pre/code only");
+  assert.equal(codeBlocks.length, ["duplicate-candidate-turn", "multiple-code-results"].includes(input.dom_mode) ? 2 : 1, "the existing result is discoverable through pre/code only");
   assert.equal(codeBlocks[0].textContent, JSON.stringify(input.result));
   assert.equal(JSON.parse(codeBlocks[0].textContent).schema, "bdb-project-execution-submission-v1");
   if (negativeRecovery) {
+    if (rejectedOwnership.includes(input.dom_mode) || input.dom_mode === "multiple-code-results") {
+      assert.equal(document.querySelectorAll(".bdb-vnext-project-execution-panel").length, 0, "invalid ownership or ambiguous code must not decorate");
+    }
     assert.equal(trace.nativeRequests.filter((item) => item.action === "project_launch_ack" && item.request.launch_id === input.launch.launch_id).length, 0, "an unpaired structural result cannot ACK the prior launch");
     assert.equal(trace.nativeRequests.filter((item) => item.action === "project_execution_submit" && item.request.result?.execution_binding_id === p3Binding).length, 0, "an unpaired structural result cannot be auto-submitted");
     assert.equal(trace.sends.length, 0, "ambiguous recovery cannot resend");
